@@ -42,14 +42,13 @@ import {
   resolveLtxDimAlignmentForExecutionProfile,
 } from '../../api/payloads_ltx_video'
 import { useLtxVideoGeneration, type LtxRunHistoryItem } from '../../composables/useLtxVideoGeneration'
-import { useResultsCard } from '../../composables/useResultsCard'
+import { useWorkflowSnapshotActions } from '../../composables/useWorkflowSnapshotActions'
 import { useModelTabsStore, type LtxTabParams } from '../../stores/model_tabs'
-import { useWorkflowsStore } from '../../stores/workflows'
+import { readFileAsDataURL } from '../../utils/image_io'
 
 const props = defineProps<{ tabId: string }>()
 
 const store = useModelTabsStore()
-const workflows = useWorkflowsStore()
 
 const {
   status,
@@ -75,8 +74,21 @@ const {
   resumeNotice,
 } = useLtxVideoGeneration(props.tabId)
 
-const { notice: copyNotice, copyJson, formatJson, toast } = useResultsCard()
-const workflowBusy = ref(false)
+const {
+  notice: copyNotice,
+  copyJson,
+  formatJson,
+  toast,
+  workflowBusy,
+  sendToWorkflows,
+  copyCurrentParams,
+} = useWorkflowSnapshotActions({
+  getTab: () => tab.value ?? null,
+  getWorkflowParamsSnapshot: () => (params.value as unknown as Record<string, unknown> | null) ?? null,
+  onBeforeCopyCurrentParams: () => {
+    resumeNotice.value = ''
+  },
+})
 
 type ExecutionProfileOption = {
   value: string
@@ -273,15 +285,6 @@ function updateParamsPatch(patch: Partial<LtxTabParams>): void {
   })
 }
 
-function readFileAsDataURL(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result || ''))
-    reader.onerror = () => reject(reader.error ?? new Error('Failed to read file.'))
-    reader.readAsDataURL(file)
-  })
-}
-
 async function onInitImageFile(file: File): Promise<void> {
   try {
     const dataUrl = await readFileAsDataURL(file)
@@ -328,31 +331,6 @@ function formatHistoryTitle(item: LtxRunHistoryItem): string {
   const dt = new Date(item.createdAtMs || Date.now())
   const hh = dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
   return `${formatVideoModeLabel(item.mode)} · ${hh}`
-}
-
-async function sendToWorkflows(): Promise<void> {
-  if (!tab.value) return
-  workflowBusy.value = true
-  try {
-    const result = await workflows.saveSnapshot({
-      name: `${tab.value.title} — ${new Date().toLocaleString()}`,
-      source_tab_id: tab.value.id,
-      type: tab.value.type,
-      engine_semantics: tab.value.type,
-      params_snapshot: params.value as unknown as Record<string, unknown>,
-    })
-    toast(result.action === 'updated' ? 'Snapshot updated in Workflows.' : 'Snapshot saved to Workflows.')
-  } catch (error) {
-    toast(error instanceof Error ? error.message : String(error))
-  } finally {
-    workflowBusy.value = false
-  }
-}
-
-async function copyCurrentParams(): Promise<void> {
-  if (!params.value) return
-  resumeNotice.value = ''
-  await copyJson(params.value as unknown as Record<string, unknown>, 'Copied params.')
 }
 
 async function onSelectHistoryItem(item: { taskId: string }): Promise<void> {

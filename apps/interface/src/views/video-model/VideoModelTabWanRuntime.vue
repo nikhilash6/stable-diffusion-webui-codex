@@ -33,8 +33,7 @@ import { useModelTabsStore, type TabByType, type WanAssetsParams, type WanStageP
 import type { SamplerInfo, SchedulerInfo, GeneratedImage } from '../../api/types'
 import { fetchSamplers, fetchSchedulers } from '../../api/client'
 import { useVideoGeneration, type VideoRunHistoryItem } from '../../composables/useVideoGeneration'
-import { useResultsCard } from '../../composables/useResultsCard'
-import { useWorkflowsStore } from '../../stores/workflows'
+import { useWorkflowSnapshotActions } from '../../composables/useWorkflowSnapshotActions'
 import { useEngineCapabilitiesStore } from '../../stores/engine_capabilities'
 import { useBootstrapStore } from '../../stores/bootstrap'
 import {
@@ -49,10 +48,10 @@ import {
   normalizeWanImg2VidImageScale,
   type WanImg2VidFrameGuideConfig,
 } from '../../utils/wan_img2vid_frame_projection'
+import { readFileAsDataURL, readImageDimensions } from '../../utils/image_io'
 
 const props = defineProps<{ tabId: string }>()
 const store = useModelTabsStore()
-const workflows = useWorkflowsStore()
 const engineCaps = useEngineCapabilitiesStore()
 const bootstrap = useBootstrapStore()
 
@@ -985,7 +984,21 @@ async function onGenerateClick(): Promise<void> {
   await generate()
 }
 
-const { notice: copyNotice, toast, copyJson, formatJson } = useResultsCard()
+const {
+  notice: copyNotice,
+  toast,
+  copyJson,
+  formatJson,
+  workflowBusy,
+  sendToWorkflows,
+  copyCurrentParams,
+} = useWorkflowSnapshotActions({
+  getTab: () => tab.value ?? null,
+  getWorkflowParamsSnapshot: () => (tab.value?.params as Record<string, unknown> | null) ?? null,
+  getCopyCurrentParamsSnapshot: () => buildCurrentSnapshot(),
+  resolveEngineSemantics: (currentTab) => (currentTab.type === 'wan' ? 'wan22' : currentTab.type),
+  copyCurrentParamsMessage: 'Copied current params JSON.',
+})
 const historyDetailsOpen = ref(false)
 const historyDetailsItem = ref<VideoRunHistoryItem | null>(null)
 
@@ -1036,6 +1049,12 @@ const historyDetailsLowNegativePrompt = computed(() => {
   if (negative) return negative
   return readHistorySnapshotText(item, 'negativePrompt')
 })
+const historyDetailsSections = computed(() => [
+  { key: 'highPrompt', label: 'High Prompt', text: historyDetailsHighPrompt.value },
+  { key: 'highNegativePrompt', label: 'High Negative Prompt', text: historyDetailsHighNegativePrompt.value },
+  { key: 'lowPrompt', label: 'Low Prompt', text: historyDetailsLowPrompt.value },
+  { key: 'lowNegativePrompt', label: 'Low Negative Prompt', text: historyDetailsLowNegativePrompt.value },
+])
 
 function reportTabMutationError(error: unknown): void {
   toast(error instanceof Error ? error.message : String(error))
@@ -1404,10 +1423,6 @@ function buildCurrentSnapshot(): Record<string, unknown> {
       latentNoiseScale: video.value.upscalingLatentNoiseScale,
     },
   }
-}
-
-async function copyCurrentParams(): Promise<void> {
-  await copyJson(buildCurrentSnapshot(), 'Copied current params JSON.')
 }
 
 async function copyInfo(): Promise<void> {
@@ -1788,27 +1803,6 @@ watch(
   { immediate: true },
 )
 
-const workflowBusy = ref(false)
-
-async function sendToWorkflows(): Promise<void> {
-  if (!tab.value) return
-  workflowBusy.value = true
-  try {
-    const result = await workflows.saveSnapshot({
-      name: `${tab.value.title} — ${new Date().toLocaleString()}`,
-      source_tab_id: tab.value.id,
-      type: tab.value.type,
-      engine_semantics: tab.value.type === 'wan' ? 'wan22' : tab.value.type,
-      params_snapshot: tab.value.params as Record<string, unknown>,
-    })
-    toast(result.action === 'updated' ? 'Snapshot updated in Workflows.' : 'Snapshot saved to Workflows.')
-  } catch (e) {
-    toast(e instanceof Error ? e.message : String(e))
-  } finally {
-    workflowBusy.value = false
-  }
-}
-
 function toDataUrl(image: GeneratedImage): string { return `data:image/${image.format};base64,${image.data}` }
 
 function formatVideoModeLabel(mode: unknown): string {
@@ -1841,24 +1835,6 @@ function readHistoryStageSnapshotText(item: VideoRunHistoryItem, stageKey: 'high
   const value = (stage as Record<string, unknown>)[key]
   if (typeof value !== 'string') return ''
   return value.trim()
-}
-
-function readFileAsDataURL(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result))
-    reader.onerror = () => reject(reader.error)
-    reader.readAsDataURL(file)
-  })
-}
-
-function readImageDimensions(src: string): Promise<{ width: number; height: number }> {
-  return new Promise((resolve, reject) => {
-    const image = new Image()
-    image.onload = () => resolve({ width: image.naturalWidth || image.width, height: image.naturalHeight || image.height })
-    image.onerror = () => reject(new Error('Failed to load image'))
-    image.src = src
-  })
 }
 
 defineExpose({ generate })
@@ -2034,10 +2010,7 @@ const slotProps = computed(() => ({
   historyDetailsImageUrl: historyDetailsImageUrl.value,
   historyDetailsModeLabel: historyDetailsModeLabel.value,
   historyDetailsCreatedAtLabel: historyDetailsCreatedAtLabel.value,
-  historyDetailsHighPrompt: historyDetailsHighPrompt.value,
-  historyDetailsHighNegativePrompt: historyDetailsHighNegativePrompt.value,
-  historyDetailsLowPrompt: historyDetailsLowPrompt.value,
-  historyDetailsLowNegativePrompt: historyDetailsLowNegativePrompt.value,
+  historyDetailsSections: historyDetailsSections.value,
   onLoadHistoryDetails,
   onApplyHistoryDetails,
   onCopyHistoryDetails,

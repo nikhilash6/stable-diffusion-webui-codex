@@ -120,7 +120,7 @@ Symbols (top-level; keep in sync; no ghosts):
             <div v-if="highPromptOpen" class="mt-2">
               <PromptFields v-model:prompt="highPrompt" v-model:negative="highNegative" :hide-negative="hideHighNegativePrompt" token-engine="wan" />
             </div>
-            <LoraModal v-model="showHighPromptLoraModal" @insert="onHighPromptLoraInsert" />
+            <LoraModal v-model="showHighPromptLoraModal" :show-negative-target="!hideHighNegativePrompt" @insert="onHighPromptLoraInsert" />
           </div>
 
           <div class="gen-card">
@@ -141,7 +141,7 @@ Symbols (top-level; keep in sync; no ghosts):
             <div v-if="lowPromptOpen" class="mt-2" id="wan-guided-low-prompt">
               <PromptFields v-model:prompt="lowPrompt" v-model:negative="lowNegative" :hide-negative="hideLowNegativePrompt" token-engine="wan" />
             </div>
-            <LoraModal v-model="showLowPromptLoraModal" @insert="onLowPromptLoraInsert" />
+            <LoraModal v-model="showLowPromptLoraModal" :show-negative-target="!hideLowNegativePrompt" @insert="onLowPromptLoraInsert" />
           </div>
 
         <div v-if="mode === 'img2vid'" class="gen-card">

@@ -333,6 +333,7 @@ import ResultViewer from '../components/ResultViewer.vue'
 import ResultsCard from '../components/results/ResultsCard.vue'
 import RunCard from '../components/results/RunCard.vue'
 import RunProgressStatus from '../components/results/RunProgressStatus.vue'
+import { readFileAsDataURL } from '../utils/image_io'
 
 const presets = usePresetsStore()
 const presetName = ref('')
@@ -618,15 +619,6 @@ function setOverlap(value: number): void {
   const v = Math.trunc(Number(value))
   if (!Number.isFinite(v)) return
   overlap.value = Math.max(0, Math.min(tileSize.value - 1, v))
-}
-
-function readFileAsDataURL(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result))
-    reader.onerror = () => reject(reader.error)
-    reader.readAsDataURL(file)
-  })
 }
 
 async function onImageSet(file: File): Promise<void> {

@@ -11,7 +11,6 @@ Provides a dedicated card with one nested `ipAdapter` owner prop, enable toggle,
 
 Symbols (top-level; keep in sync; no ghosts):
 - `IpAdapterCard` (component): Dedicated IP-Adapter UI card for supported image tabs.
-- `SOURCE_MODE_OPTIONS` (constant): Segmented-control options for `DIR|IMG` source selection.
 -->
 
 <template>
@@ -32,32 +31,6 @@ Symbols (top-level; keep in sync; no ghosts):
     </p>
 
     <div v-if="ipAdapter.enabled" class="ip-adapter-card__body">
-      <div class="ip-adapter-card__top-row">
-        <div class="field">
-          <label class="label-muted">Source</label>
-          <CompactSegmentedControl
-            :modelValue="ipAdapter.source.mode"
-            :options="SOURCE_MODE_OPTIONS"
-            :disabled="disabled"
-            ariaLabel="IP-Adapter source mode"
-            @update:modelValue="(value) => emit('patch:ipAdapter', { source: { mode: value as IpAdapterFormState['source']['mode'] } })"
-          />
-        </div>
-
-        <div v-if="img2imgMode" class="field ip-adapter-card__same-init-field">
-          <label class="label-muted">Shortcut</label>
-          <button
-            :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', ipAdapter.source.sameAsInit ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
-            type="button"
-            :aria-pressed="ipAdapter.source.sameAsInit"
-            :disabled="disabled || ipAdapter.source.mode !== 'img'"
-            @click="emit('patch:ipAdapter', { source: { sameAsInit: !ipAdapter.source.sameAsInit } })"
-          >
-            Same as init image
-          </button>
-        </div>
-      </div>
-
       <div class="gc-row ip-adapter-card__selectors">
         <div class="field gc-col gc-col--wide">
           <label class="label-muted">Adapter model</label>
@@ -129,41 +102,55 @@ Symbols (top-level; keep in sync; no ghosts):
         />
       </div>
 
-      <p v-if="ipAdapter.source.mode === 'img' && ipAdapter.source.sameAsInit" class="caption ip-adapter-card__hint">
-        Uses the current init image as the IP-Adapter reference image.
-      </p>
-
-      <InitialImageCard
-        v-else-if="ipAdapter.source.mode === 'img'"
-        label="Reference Image"
-        :src="ipAdapter.source.referenceImageData"
-        :has-image="Boolean(ipAdapter.source.referenceImageData)"
+      <ImageSourceBlock
+        :mode="ipAdapter.source.mode"
+        :folder-source="ipAdapter.source"
         :disabled="disabled"
-        :dropzone="true"
+        show-source-mode-toggle
+        show-source-mode-label
+        source-mode-label="Source"
+        source-mode-aria-label="IP-Adapter source mode"
+        :show-image-picker="!ipAdapter.source.sameAsInit"
+        image-label="Reference Image"
+        :image-src="ipAdapter.source.referenceImageData"
+        :has-image="Boolean(ipAdapter.source.referenceImageData)"
         :thumbnail="true"
         :zoomable="true"
-        @set="(file) => emit('set:referenceImage', file)"
-        @clear="() => emit('clear:referenceImage')"
-        @rejected="(payload) => emit('reject:referenceImage', payload)"
-      />
-
-      <ImageFolderSourceFields
-        v-else
-        :source="ipAdapter.source"
-        :disabled="disabled"
-        pathLabel="Folder path"
-        pathPlaceholder="input/ip-adapter-source"
-        countLabel="Reference images"
-        @patch:source="(value) => emit('patch:ipAdapter', { source: value })"
-      />
+        folder-path-label="Folder path"
+        folder-path-placeholder="input/ip-adapter-source"
+        folder-count-label="Reference images"
+        @update:mode="(value) => emit('patch:ipAdapter', { source: { mode: value } })"
+        @patch:folderSource="(value) => emit('patch:ipAdapter', { source: value })"
+        @set:image="(file) => emit('set:referenceImage', file)"
+        @clear:image="() => emit('clear:referenceImage')"
+        @reject:image="(payload) => emit('reject:referenceImage', payload)"
+      >
+        <template #controls-extra>
+          <div v-if="img2imgMode" class="field ip-adapter-card__same-init-field">
+            <label class="label-muted">Shortcut</label>
+            <button
+              :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', ipAdapter.source.sameAsInit ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
+              type="button"
+              :aria-pressed="ipAdapter.source.sameAsInit"
+              :disabled="disabled || ipAdapter.source.mode !== 'img'"
+              @click="emit('patch:ipAdapter', { source: { sameAsInit: !ipAdapter.source.sameAsInit } })"
+            >
+              Same as init image
+            </button>
+          </div>
+        </template>
+        <template #img-empty>
+          <p class="caption ip-adapter-card__hint">
+            Uses the current init image as the IP-Adapter reference image.
+          </p>
+        </template>
+      </ImageSourceBlock>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import InitialImageCard from './InitialImageCard.vue'
-import ImageFolderSourceFields from './ImageFolderSourceFields.vue'
-import CompactSegmentedControl from './ui/CompactSegmentedControl.vue'
+import ImageSourceBlock from './ImageSourceBlock.vue'
 import SliderField from './ui/SliderField.vue'
 import WanSubHeader from './wan/WanSubHeader.vue'
 import type { IpAdapterFormState } from '../stores/model_tabs'
@@ -176,11 +163,6 @@ type SelectChoice = {
 type IpAdapterPatch = Partial<Omit<IpAdapterFormState, 'source'>> & {
   source?: Partial<IpAdapterFormState['source']>
 }
-
-const SOURCE_MODE_OPTIONS = [
-  { value: 'dir', label: 'DIR' },
-  { value: 'img', label: 'IMG' },
-] as const
 
 withDefaults(defineProps<{
   disabled?: boolean

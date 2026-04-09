@@ -1,7 +1,7 @@
 <!-- tags: prompt, components, tiptap -->
 # apps/interface/src/components/prompt Overview
 Date: 2025-12-03
-Last Review: 2026-03-28
+Last Review: 2026-04-08
 Status: Active
 
 ## Purpose
@@ -19,3 +19,4 @@ Status: Active
 - 2026-01-03: Added standardized file header blocks to prompt components (non-test files) as part of the rollout (doc-only change).
 - 2026-02-17: `PromptTokenChip.vue` now resolves the live ProseMirror node from `tr.doc.nodeAt(getPos())` before toggle/weight/remove mutations, fixing stale chip-state updates that previously required view switching.
 - 2026-03-02: `PromptCard.vue` now accepts `hideNegative` as an explicit override (in addition to capability-driven hiding), so callers can suppress Negative Prompt fields when CFG semantics require it.
+- 2026-04-08: `PromptCard.vue` still owns which prompt asset tools are exposed, but LoRA/TI modal chrome now comes from `components/modals/PromptAssetInsertModal.vue`; when `hideNegative` is active, the LoRA modal also hides its Negative target action instead of offering a dead insert path.

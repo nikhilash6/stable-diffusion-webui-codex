@@ -8,13 +8,12 @@ Required Notice: see NOTICE
 
 Purpose: SDXL refiner configuration card (global or hires second pass).
 Renders a compact enable switch, refiner-model selector, and slider-based refiner controls (`Swap At Step` + `CFG`) in a single row,
-with optional advanced APG controls gated by capabilities and emitted as guidance-advanced patches.
+with optional advanced guidance controls (CFG/APG) gated by capabilities and emitted as guidance-advanced patches.
 Uses the shared `WanSubHeader` title pattern with full-row click toggle parity to match the BASIC PARAMETERS card header style.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `RefinerSettingsCard` (component): SDXL refiner settings panel component.
 - `toggle` (function): Toggles `enabled` via `update:enabled`.
-- `hasGuidanceSupport` (function): Returns whether the active capability map enables a specific APG control.
 - `patchGuidanceAdvanced` (function): Emits partial updates for nested advanced-guidance state.
 - `toggleGuidanceAdvanced` (function): Toggles local advanced-panel visibility for this card only.
 -->
@@ -99,7 +98,7 @@ Symbols (top-level; keep in sync; no ghosts):
               v-if="showGuidanceAdvancedToggle"
               :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', advancedOpen ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
               type="button"
-              title="Show advanced APG controls"
+              title="Show advanced guidance controls"
               :aria-pressed="advancedOpen"
               @click="toggleGuidanceAdvanced"
             >
@@ -109,132 +108,14 @@ Symbols (top-level; keep in sync; no ghosts):
         </SliderField>
       </div>
 
-      <div
-        v-if="showGuidanceAdvancedRow && (hasGuidanceSupport('guidance_rescale') || hasGuidanceSupport('cfg_trunc_ratio') || hasGuidanceSupport('renorm_cfg'))"
-        class="rf-row rf-row--advanced"
-      >
-        <SliderField
-          v-if="hasGuidanceSupport('guidance_rescale')"
-          class="rf-col"
-          label="Guidance Rescale"
-          :modelValue="guidanceAdvanced.guidanceRescale"
-          :min="0"
-          :max="1"
-          :step="0.01"
-          :inputStep="0.01"
-          :nudgeStep="0.01"
-          inputClass="cdx-input-w-md"
-          @update:modelValue="(value) => patchGuidanceAdvanced({ guidanceRescale: clampFloat(value, 0, 1) })"
-        />
-
-        <SliderField
-          v-if="hasGuidanceSupport('cfg_trunc_ratio')"
-          class="rf-col"
-          label="CFG Trunc Ratio"
-          :modelValue="guidanceAdvanced.cfgTruncRatio"
-          :min="0"
-          :max="1"
-          :step="0.01"
-          :inputStep="0.01"
-          :nudgeStep="0.01"
-          inputClass="cdx-input-w-md"
-          @update:modelValue="(value) => patchGuidanceAdvanced({ cfgTruncRatio: clampFloat(value, 0, 1) })"
-        />
-
-        <SliderField
-          v-if="hasGuidanceSupport('renorm_cfg')"
-          class="rf-col"
-          label="Renorm CFG"
-          :modelValue="guidanceAdvanced.renormCfg"
-          :min="0"
-          :max="4"
-          :step="0.05"
-          :inputStep="0.05"
-          :nudgeStep="0.05"
-          inputClass="cdx-input-w-md"
-          @update:modelValue="(value) => patchGuidanceAdvanced({ renormCfg: clampFloat(value, 0, 4) })"
-        />
-      </div>
-
-      <div
-        v-if="showGuidanceAdvancedRow && (hasGuidanceSupport('apg_start_step') || hasGuidanceSupport('apg_eta') || hasGuidanceSupport('apg_rescale'))"
-        class="rf-row rf-row--advanced"
-      >
-        <SliderField
-          v-if="hasGuidanceSupport('apg_start_step')"
-          class="rf-col"
-          label="APG Start"
-          :modelValue="guidanceAdvanced.apgStartStep"
-          :min="0"
-          :max="swapAtStepMax"
-          :step="1"
-          :inputStep="1"
-          :nudgeStep="1"
-          inputClass="cdx-input-w-md"
-          @update:modelValue="(value) => patchGuidanceAdvanced({ apgStartStep: clampInt(value, 0, swapAtStepMax) })"
-        />
-
-        <SliderField
-          v-if="hasGuidanceSupport('apg_eta')"
-          class="rf-col"
-          label="APG Eta"
-          :modelValue="guidanceAdvanced.apgEta"
-          :min="-1"
-          :max="1"
-          :step="0.01"
-          :inputStep="0.01"
-          :nudgeStep="0.01"
-          inputClass="cdx-input-w-md"
-          @update:modelValue="(value) => patchGuidanceAdvanced({ apgEta: clampFloat(value, -1, 1) })"
-        />
-
-        <SliderField
-          v-if="hasGuidanceSupport('apg_rescale')"
-          class="rf-col"
-          label="APG Rescale"
-          :modelValue="guidanceAdvanced.apgRescale"
-          :min="0"
-          :max="1"
-          :step="0.01"
-          :inputStep="0.01"
-          :nudgeStep="0.01"
-          inputClass="cdx-input-w-md"
-          @update:modelValue="(value) => patchGuidanceAdvanced({ apgRescale: clampFloat(value, 0, 1) })"
-        />
-      </div>
-
-      <div
-        v-if="showGuidanceAdvancedRow && (hasGuidanceSupport('apg_momentum') || hasGuidanceSupport('apg_norm_threshold'))"
-        class="rf-row rf-row--advanced-secondary"
-      >
-        <SliderField
-          v-if="hasGuidanceSupport('apg_momentum')"
-          class="rf-col"
-          label="APG Momentum"
-          :modelValue="guidanceAdvanced.apgMomentum"
-          :min="0"
-          :max="0.99"
-          :step="0.01"
-          :inputStep="0.01"
-          :nudgeStep="0.01"
-          inputClass="cdx-input-w-md"
-          @update:modelValue="(value) => patchGuidanceAdvanced({ apgMomentum: clampFloat(value, 0, 0.99) })"
-        />
-
-        <SliderField
-          v-if="hasGuidanceSupport('apg_norm_threshold')"
-          class="rf-col"
-          label="APG Norm"
-          :modelValue="guidanceAdvanced.apgNormThreshold"
-          :min="0"
-          :max="40"
-          :step="0.1"
-          :inputStep="0.1"
-          :nudgeStep="0.1"
-          inputClass="cdx-input-w-md"
-          @update:modelValue="(value) => patchGuidanceAdvanced({ apgNormThreshold: clampFloat(value, 0, 40) })"
-        />
-      </div>
+      <AdvancedGuidanceFields
+        v-if="showGuidanceAdvancedRow"
+        variant="refiner"
+        :guidance-advanced="guidanceAdvanced"
+        :guidance-support="guidanceSupport"
+        :max-apg-start-step="swapAtStepMax"
+        @patch="patchGuidanceAdvanced"
+      />
     </div>
   </div>
 </template>
@@ -243,25 +124,13 @@ Symbols (top-level; keep in sync; no ghosts):
 // tags: refiner, settings, grid
 import { computed, ref, watch } from 'vue'
 import type { GuidanceAdvancedCapabilities } from '../api/types'
-import type { GuidanceAdvancedParams } from '../stores/model_tabs'
+import { DEFAULT_GUIDANCE_ADVANCED_PARAMS, type GuidanceAdvancedParams } from '../stores/model_tabs'
+import { hasAnyGuidanceSupport } from '../utils/guidance_advanced'
 
+import AdvancedGuidanceFields from './AdvancedGuidanceFields.vue'
 import NumberStepperInput from './ui/NumberStepperInput.vue'
 import SliderField from './ui/SliderField.vue'
 import WanSubHeader from './wan/WanSubHeader.vue'
-
-const DEFAULT_GUIDANCE_ADVANCED: GuidanceAdvancedParams = {
-  enabled: false,
-  apgEnabled: false,
-  apgStartStep: 0,
-  apgEta: 0,
-  apgMomentum: 0,
-  apgNormThreshold: 15,
-  apgRescale: 0,
-  guidanceRescale: 0,
-  cfgTruncEnabled: false,
-  cfgTruncRatio: 0.8,
-  renormCfg: 0,
-}
 
 const props = withDefaults(defineProps<{
   enabled: boolean
@@ -353,7 +222,7 @@ const normalizedCfg = computed(() => {
   return clampFloat(value, cfgMin.value, cfgMax.value)
 })
 
-const guidanceAdvanced = computed(() => props.guidanceAdvanced ?? DEFAULT_GUIDANCE_ADVANCED)
+const guidanceAdvanced = computed(() => props.guidanceAdvanced ?? DEFAULT_GUIDANCE_ADVANCED_PARAMS)
 const guidanceSupport = computed(() => props.guidanceSupport ?? null)
 const advancedOpen = ref(false)
 
@@ -362,19 +231,7 @@ watch(() => props.enabled, (isEnabled) => {
 })
 
 const showGuidanceAdvancedToggle = computed(() => {
-  const support = guidanceSupport.value
-  if (!support) return false
-  return (
-    Boolean(support.guidance_rescale)
-    || Boolean(support.cfg_trunc_ratio)
-    || Boolean(support.renorm_cfg)
-    || Boolean(support.apg_enabled)
-    || Boolean(support.apg_start_step)
-    || Boolean(support.apg_eta)
-    || Boolean(support.apg_momentum)
-    || Boolean(support.apg_norm_threshold)
-    || Boolean(support.apg_rescale)
-  )
+  return hasAnyGuidanceSupport(guidanceSupport.value)
 })
 
 const showGuidanceAdvancedRow = computed(() => showGuidanceAdvancedToggle.value && advancedOpen.value)
@@ -395,10 +252,6 @@ function onSwapAtStepUpdate(value: number): void {
 
 function onCfgUpdate(value: number): void {
   emit('update:cfg', clampFloat(value, cfgMin.value, cfgMax.value))
-}
-
-function hasGuidanceSupport(control: keyof GuidanceAdvancedCapabilities): boolean {
-  return Boolean(guidanceSupport.value?.[control])
 }
 
 function patchGuidanceAdvanced(patch: Partial<GuidanceAdvancedParams>): void {

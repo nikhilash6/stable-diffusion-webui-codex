@@ -12,8 +12,10 @@ starts `/api/txt2img`, `/api/img2img`, and `/api/image-automation` (when run act
 includes `settings_revision` in payloads, handles stale-revision conflicts (`409` + `current_revision`), and consumes task SSE events to update UI state.
 Consumes rich progress payload metadata (`progress.message` + `progress.data`) plus buffered `automation_iteration` events, and derives total-phase progress fields for dual run-card bars.
 Exposes task cancellation for active runs (`/api/tasks/:id/cancel`).
-Persists a per-tab resume marker to `localStorage` and auto-reattaches to in-flight tasks after reload (SSE replay via `after` / `lastEventId`),
-reconstructing truthful `currentRun` / history-selection state and preserving wall-clock gentime for runs that finish after resume.
+Delegates the shared task-stream/resume/history shell to `useTaskRunLifecycle.ts`, while keeping image-specific auto-resume hydration,
+automation replay recovery, and result/history shaping local. Persists a per-tab resume marker to `localStorage` and auto-reattaches to
+in-flight tasks after reload (SSE replay via `after` / `lastEventId`), reconstructing truthful `currentRun` / history-selection state and
+preserving wall-clock gentime for runs that finish after resume.
 FLUX.2 img2img guidance emission is variant-aware (`img2img_cfg_scale` xor `img2img_distilled_cfg_scale`), and img2img hires emission is
 shared with the canonical hires payload builder while remaining blocked for masked runs. Native SDXL SUPIR mode stays on the single nested frontend owner
 `params.supir` and is emitted only through `img2img_extras.supir` for truthful SDXL img2img/inpaint runs, with diagnostics-backed sampler metadata
@@ -39,6 +41,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `buildImageAutomationRequest` (function): Wraps a one-shot image template payload in the automation request envelope.
 - `inferRunModeFromSnapshot` (function): Recovers the truthful txt2img/img2img run mode from a persisted params snapshot.
 - `inferRunSummaryFromSnapshot` (function): Rebuilds a fallback run-summary string when older resume markers lack explicit summary metadata.
+- `ResumeStateLoad` (type): Parsed image resume-state load result (`state` + optional parse error).
 - `buildRunItemFromResumeState` (function): Reconstructs the active/terminal run record from persisted resume metadata.
 - `resolveErrorRunStatus` (function): Distinguishes `cancelled` from generic terminal errors for history truthfulness.
 - `extractLoraNamesFromPrompt` (function): Extracts LoRA token names from prompt text (`<lora:name:weight>`).
@@ -65,7 +68,7 @@ import {
   type NestedStageSelectorPayloads,
   type Txt2ImgRequest,
 } from '../api/payloads'
-import { cancelTask, fetchTaskResult, startImageAutomation, startImg2Img, startTxt2Img, subscribeTask } from '../api/client'
+import { cancelTask, fetchTaskResult, startImageAutomation, startImg2Img, startTxt2Img } from '../api/client'
 import type {
   GeneratedImage,
   GuidanceAdvancedCapabilities,
@@ -79,6 +82,7 @@ import { buildExplicitImageRequestContract } from '../utils/image_request_contra
 import { parseInpaintMode } from '../utils/image_params'
 import { normalizeImg2ImgResizeModeForEngine } from '../utils/img2img_resize'
 import { formatSettingsRevisionConflictMessage, resolveSettingsRevisionConflict } from './settings_revision_conflict'
+import { type ResumeLoadResult, useTaskRunLifecycle } from './useTaskRunLifecycle'
 import { resolveSupirSelectionState } from './useSupirDiagnostics'
 
 export type ImageRunStatus = 'running' | 'completed' | 'error' | 'cancelled'
@@ -201,13 +205,15 @@ function normalizeResumeTerminalStatus(value: unknown): Exclude<ImageRunStatus, 
   return null
 }
 
-function loadResumeState(key: string): ResumeState | null {
+type ResumeStateLoad = ResumeLoadResult<ResumeState>
+
+function loadResumeState(key: string): ResumeStateLoad {
   try {
     const raw = localStorage.getItem(key)
-    if (!raw) return null
+    if (!raw) return { state: null, error: null }
     const obj = JSON.parse(raw) as any
-    if (!obj || typeof obj !== 'object') return null
-    if (typeof obj.taskId !== 'string' || !obj.taskId.trim()) return null
+    if (!obj || typeof obj !== 'object') return { state: null, error: null }
+    if (typeof obj.taskId !== 'string' || !obj.taskId.trim()) return { state: null, error: null }
     const lastEventId = typeof obj.lastEventId === 'number' && Number.isFinite(obj.lastEventId) ? Math.trunc(obj.lastEventId) : 0
     const createdAtMs = typeof obj.createdAtMs === 'number' && Number.isFinite(obj.createdAtMs) ? Math.trunc(obj.createdAtMs) : 0
     const paramsSnapshot = obj.paramsSnapshot && typeof obj.paramsSnapshot === 'object' ? (obj.paramsSnapshot as Record<string, unknown>) : {}
@@ -224,18 +230,21 @@ function loadResumeState(key: string): ResumeState | null {
       ? Math.trunc(obj.finishedAtMs)
       : null
     return {
-      taskId: obj.taskId,
-      lastEventId: Math.max(0, lastEventId),
-      createdAtMs,
-      paramsSnapshot,
-      mode,
-      promptPreview,
-      summary,
-      finishedAtMs,
-      terminalStatus: normalizeResumeTerminalStatus(obj.terminalStatus),
+      state: {
+        taskId: obj.taskId,
+        lastEventId: Math.max(0, lastEventId),
+        createdAtMs,
+        paramsSnapshot,
+        mode,
+        promptPreview,
+        summary,
+        finishedAtMs,
+        terminalStatus: normalizeResumeTerminalStatus(obj.terminalStatus),
+      },
+      error: null,
     }
   } catch {
-    return null
+    return { state: null, error: null }
   }
 }
 
@@ -256,7 +265,7 @@ function clearResumeState(key: string): void {
 }
 
 function patchResumeState(key: string, patch: Partial<ResumeState>): void {
-  const current = loadResumeState(key)
+  const current = loadResumeState(key).state
   if (!current) return
   saveResumeState(key, { ...current, ...patch })
 }
@@ -264,7 +273,7 @@ function patchResumeState(key: string, patch: Partial<ResumeState>): void {
 function updateResumeEventId(key: string, eventId: number): void {
   const v = Math.trunc(Number(eventId))
   if (!Number.isFinite(v) || v <= 0) return
-  const cur = loadResumeState(key)
+  const cur = loadResumeState(key).state
   if (!cur || v <= cur.lastEventId) return
   patchResumeState(key, { lastEventId: v })
 }
@@ -678,7 +687,6 @@ export function useGeneration(tabId: string) {
   
   // Reactive state for this tab
   const state = ref(getTabState(tabId))
-  const resumeNotice = ref('')
   let currentEventId = 0
   let skipAutomationReplayThroughEventId = 0
   
@@ -901,14 +909,40 @@ export function useGeneration(tabId: string) {
     if (normalized <= 0) return
     skipAutomationReplayThroughEventId = Math.max(skipAutomationReplayThroughEventId, normalized)
   }
+
+  const taskLifecycle = useTaskRunLifecycle({
+    tabId,
+    state,
+    resumeKey: resumeKey(tabId),
+    unsubscribers,
+    resumeAttempts,
+    loadResumeState,
+    saveResumeState,
+    clearResumeState,
+    updateResumeEventId,
+    onTaskEvent: handleTaskEvent,
+    isSnapshotRunning: (snapshot) => snapshot.status === 'running',
+    onResumeRunning: handleResumedRunningSnapshot,
+    onResumeTerminal: handleResumeTerminalSnapshot,
+    onHistoryLoaded: handleHistorySnapshot,
+    onHistoryLoadError: (_taskId, error) => {
+      state.value.status = 'error'
+      state.value.errorMessage = error instanceof Error ? error.message : String(error)
+    },
+    stopStreamBeforeHistoryLoad: true,
+    getResumeAttachOptions: (saved) => ({
+      after: saved.lastEventId,
+      onEventId: (eventId) => {
+        if (!Number.isFinite(eventId)) return
+        currentEventId = Math.max(0, Math.trunc(eventId))
+      },
+    }),
+    onStopStream: resetAutomationRecoveryReplayState,
+  })
+  const resumeNotice = taskLifecycle.resumeNotice
   
   function stopStream(): void {
-    const unsub = unsubscribers.get(tabId)
-    if (unsub) {
-      unsub()
-      unsubscribers.delete(tabId)
-    }
-    resetAutomationRecoveryReplayState()
+    taskLifecycle.stopStream()
   }
   
   function resetProgress(): void {
@@ -1302,8 +1336,7 @@ export function useGeneration(tabId: string) {
 
       state.value.progress.stage = 'submitted'
 
-      const key = resumeKey(tabId)
-      saveResumeState(key, {
+      taskLifecycle.saveResume({
         taskId,
         lastEventId: 0,
         createdAtMs,
@@ -1314,16 +1347,12 @@ export function useGeneration(tabId: string) {
         finishedAtMs: null,
         terminalStatus: null,
       })
-      resetAutomationRecoveryReplayState()
-      const unsub = subscribeTask(state.value.taskId, handleTaskEvent, undefined, {
-        onMeta: ({ eventId }) => {
-          if (typeof eventId === 'number' && Number.isFinite(eventId)) {
-            currentEventId = Math.max(0, Math.trunc(eventId))
-          }
-          if (typeof eventId === 'number') updateResumeEventId(key, eventId)
+      taskLifecycle.attachStream(state.value.taskId, {
+        onEventId: (eventId) => {
+          if (!Number.isFinite(eventId)) return
+          currentEventId = Math.max(0, Math.trunc(eventId))
         },
       })
-      unsubscribers.set(tabId, unsub)
     } catch (error) {
       const conflictRevision = resolveSettingsRevisionConflict(error)
       if (conflictRevision !== null) {
@@ -1507,62 +1536,34 @@ export function useGeneration(tabId: string) {
     }
   }
 
-  async function tryAutoResume(): Promise<void> {
-    if (resumeAttempts.has(tabId)) return
-    resumeAttempts.add(tabId)
-
-    const key = resumeKey(tabId)
-    const saved = loadResumeState(key)
-    if (!saved) return
-
-    let res
-    try {
-      res = await fetchTaskResult(saved.taskId)
-    } catch {
-      clearResumeState(key)
-      return
+  function handleResumedRunningSnapshot(saved: ResumeState, res: Awaited<ReturnType<typeof fetchTaskResult>>): void {
+    if (res.status !== 'running') return
+    state.value.status = 'running'
+    state.value.taskId = saved.taskId
+    state.value.errorMessage = ''
+    state.value.selectedTaskId = ''
+    state.value.finishedAtMs = null
+    state.value.startedAtMs = typeof res.started_at_ms === 'number' && Number.isFinite(res.started_at_ms)
+      ? Math.trunc(res.started_at_ms)
+      : (saved.createdAtMs > 0 ? saved.createdAtMs : null)
+    if (typeof res.stage === 'string' && res.stage.trim()) state.value.progress.stage = res.stage
+    const progressPayload = res.progress
+    if (progressPayload && typeof progressPayload === 'object') {
+      state.value.progress = buildProgressStateFromPayload(progressPayload, { fallbackStage: state.value.progress.stage })
     }
+    if (res.preview_image) state.value.previewImage = res.preview_image
+    if (res.preview_step !== undefined) state.value.previewStep = res.preview_step ?? null
+    applyAutomationRecoveryGallery(res.automation_gallery_images)
+    state.value.currentRun = buildRunItemFromResumeState(saved, {
+      status: 'running',
+      thumbnail: res.preview_image
+        ?? (Array.isArray(res.automation_gallery_images) ? res.automation_gallery_images[0] ?? null : null)
+        ?? null,
+    })
+    markAutomationRecoveryWatermark(res.buffer_newest_event_id ?? res.last_event_id)
+  }
 
-    if (res.status === 'running') {
-      state.value.status = 'running'
-      state.value.taskId = saved.taskId
-      state.value.errorMessage = ''
-      state.value.selectedTaskId = ''
-      state.value.finishedAtMs = null
-      state.value.startedAtMs = typeof res.started_at_ms === 'number' && Number.isFinite(res.started_at_ms)
-        ? Math.trunc(res.started_at_ms)
-        : (saved.createdAtMs > 0 ? saved.createdAtMs : null)
-      if (typeof res.stage === 'string' && res.stage.trim()) state.value.progress.stage = res.stage
-      const p = res.progress
-      if (p && typeof p === 'object') {
-        state.value.progress = buildProgressStateFromPayload(p, { fallbackStage: state.value.progress.stage })
-      }
-      if (res.preview_image) state.value.previewImage = res.preview_image
-      if (res.preview_step !== undefined) state.value.previewStep = res.preview_step ?? null
-      applyAutomationRecoveryGallery(res.automation_gallery_images)
-      state.value.currentRun = buildRunItemFromResumeState(saved, {
-        status: 'running',
-        thumbnail: res.preview_image
-          ?? (Array.isArray(res.automation_gallery_images) ? res.automation_gallery_images[0] ?? null : null)
-          ?? null,
-      })
-      markAutomationRecoveryWatermark(res.buffer_newest_event_id ?? res.last_event_id)
-      const unsub = subscribeTask(saved.taskId, handleTaskEvent, undefined, {
-        after: saved.lastEventId,
-        onMeta: ({ eventId }) => {
-          if (typeof eventId === 'number' && Number.isFinite(eventId)) {
-            currentEventId = Math.max(0, Math.trunc(eventId))
-          }
-          if (typeof eventId === 'number') updateResumeEventId(key, eventId)
-        },
-      })
-      unsubscribers.set(tabId, unsub)
-      resumeNotice.value = 'Reconnected (resumed task).'
-      return
-    }
-
-    // Task is terminal; hydrate UI and clear resume marker.
-    clearResumeState(key)
+  function handleResumeTerminalSnapshot(saved: ResumeState, res: Awaited<ReturnType<typeof fetchTaskResult>>): void {
     if (res.status === 'completed' && res.result) {
       const completedImages = Array.isArray(res.automation_gallery_images) && res.automation_gallery_images.length > 0
         ? [...res.automation_gallery_images]
@@ -1606,57 +1607,47 @@ export function useGeneration(tabId: string) {
     }
   }
 
-  // Attempt to resume an in-flight task after a browser reload/crash.
-  void tryAutoResume()
-
-  async function loadHistory(taskId: string): Promise<void> {
-    if (!taskId || state.value.status === 'running') return
-    stopStream()
-    state.value.historyLoadingTaskId = taskId
-    try {
-      const result = await fetchTaskResult(taskId)
-      if (result.status === 'error') {
-        state.value.gallery = []
-        state.value.info = null
-        state.value.previewImage = null
-        state.value.previewStep = null
-        state.value.lastSeed = null
-        state.value.startedAtMs = null
-        state.value.finishedAtMs = null
-        state.value.taskId = taskId
-        state.value.selectedTaskId = taskId
-        state.value.currentRun = null
-        state.value.status = 'error'
-        state.value.errorMessage = result.error || 'Task failed.'
-        return
-      }
-      if (result.status === 'completed' && result.result) {
-        if (Array.isArray(result.automation_gallery_images) && result.automation_gallery_images.length > 0) {
-          state.value.gallery = [...result.automation_gallery_images]
-        } else {
-          state.value.gallery = result.result.images || []
-        }
-        state.value.info = result.result.info ?? null
-        state.value.errorMessage = ''
-        state.value.status = 'done'
-        state.value.taskId = taskId
-        state.value.startedAtMs = null
-        state.value.finishedAtMs = null
-        state.value.previewImage = null
-        state.value.previewStep = null
-        state.value.selectedTaskId = taskId
-        state.value.currentRun = null
-        return
-      }
+  function handleHistorySnapshot(taskId: string, result: Awaited<ReturnType<typeof fetchTaskResult>>): void {
+    if (result.status === 'error') {
+      state.value.gallery = []
+      state.value.info = null
+      state.value.previewImage = null
+      state.value.previewStep = null
+      state.value.lastSeed = null
+      state.value.startedAtMs = null
+      state.value.finishedAtMs = null
+      state.value.taskId = taskId
+      state.value.selectedTaskId = taskId
+      state.value.currentRun = null
       state.value.status = 'error'
-      state.value.errorMessage = 'Task is still running.'
-    } catch (err) {
-      state.value.status = 'error'
-      state.value.errorMessage = err instanceof Error ? err.message : String(err)
-    } finally {
-      state.value.historyLoadingTaskId = ''
+      state.value.errorMessage = result.error || 'Task failed.'
+      return
     }
+    if (result.status === 'completed' && result.result) {
+      if (Array.isArray(result.automation_gallery_images) && result.automation_gallery_images.length > 0) {
+        state.value.gallery = [...result.automation_gallery_images]
+      } else {
+        state.value.gallery = result.result.images || []
+      }
+      state.value.info = result.result.info ?? null
+      state.value.errorMessage = ''
+      state.value.status = 'done'
+      state.value.taskId = taskId
+      state.value.startedAtMs = null
+      state.value.finishedAtMs = null
+      state.value.previewImage = null
+      state.value.previewStep = null
+      state.value.selectedTaskId = taskId
+      state.value.currentRun = null
+      return
+    }
+    state.value.status = 'error'
+    state.value.errorMessage = 'Task is still running.'
   }
+
+  // Attempt to resume an in-flight task after a browser reload/crash.
+  void taskLifecycle.tryAutoResume()
+  const loadHistory = taskLifecycle.loadHistory
 
   async function cancel(mode: 'immediate' | 'after_current' = 'immediate'): Promise<void> {
     const taskId = state.value.taskId
@@ -1665,8 +1656,7 @@ export function useGeneration(tabId: string) {
   }
 
   function clearHistory(): void {
-    state.value.history = []
-    state.value.selectedTaskId = ''
+    taskLifecycle.clearHistory()
   }
   
   // Expose reactive state and methods

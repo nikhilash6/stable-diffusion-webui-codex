@@ -17,8 +17,7 @@ Init-image filename captions are centered in the footer area for clearer media i
 
 Symbols (top-level; keep in sync; no ghosts):
 - `InitialImageBlock` (component): Unified initial-image owner for img2img/inpaint and img2vid surfaces.
-- `SOURCE_MODE_OPTIONS` (constant): Segmented-control options for init-image source mode switching.
-- `showSourceModeToggle` (prop): Controls whether `DIR|IMG` source ownership is exposed in the block header.
+- `showSourceModeToggle` (prop): Controls whether the composed shared image-source surface exposes `DIR|IMG` source ownership.
 - `showInpaintControls` (prop): Controls whether inpaint editor/runtime controls are available in the block.
 - `showFrameGuideEditor` (prop): Controls whether WAN frame-guide metadata is forwarded to the zoom overlay.
 - `initSource` (prop): Nested init-image source owner (`DIR|IMG` + folder settings) rendered when source-mode toggling is enabled.
@@ -48,33 +47,33 @@ Symbols (top-level; keep in sync; no ghosts):
         <span class="initial-image-block__title">{{ sectionTitle }}</span>
         <span v-if="sectionSubtitle" class="caption">{{ sectionSubtitle }}</span>
       </div>
-      <div v-if="showSourceModeToggle || $slots['header-actions']" class="initial-image-block__header-actions">
+      <div v-if="$slots['header-actions']" class="initial-image-block__header-actions">
         <slot name="header-actions" />
-        <CompactSegmentedControl
-          v-if="showSourceModeToggle"
-          :modelValue="effectiveInitSource.mode"
-          :options="SOURCE_MODE_OPTIONS"
-          :disabled="disabled"
-          ariaLabel="Initial image source mode"
-          @update:modelValue="(value) => emit('patch:initSource', { mode: value as InitSourceFormState['mode'] })"
-        />
       </div>
     </div>
 
-    <InitialImageCard
-      v-if="effectiveInitSource.mode === 'img'"
-      :label="initImageLabel"
-      :src="initImageData"
-      :has-image="hasInitImage"
+    <ImageSourceBlock
+      :mode="effectiveInitSource.mode"
+      :folder-source="effectiveInitSource"
       :disabled="disabled"
-      :dropzone="true"
+      :show-source-mode-toggle="showSourceModeToggle"
+      source-mode-aria-label="Initial image source mode"
+      :image-label="initImageLabel"
+      :image-src="initImageData"
+      :has-image="hasInitImage"
       :thumbnail="true"
       :zoomable="true"
       :preview-click-action="shouldUseMaskPreviewClick ? 'emit' : 'zoom'"
       :zoom-frame-guide="showFrameGuideEditor ? zoomFrameGuide : null"
-      @set="(file) => emit('set:initImage', file)"
-      @clear="() => emit('clear:initImage')"
-      @rejected="(payload) => emit('reject:initImage', payload)"
+      :show-use-crop="true"
+      folder-path-label="Folder path"
+      folder-path-placeholder="input/img2img-source"
+      folder-count-label="Images to generate"
+      @update:mode="(value) => emit('patch:initSource', { mode: value as InitSourceFormState['mode'] })"
+      @patch:folderSource="(value) => emit('patch:initSource', value)"
+      @set:image="(file) => emit('set:initImage', file)"
+      @clear:image="() => emit('clear:initImage')"
+      @reject:image="(payload) => emit('reject:initImage', payload)"
       @preview-click="onInitPreviewClick"
       @update:zoom-frame-guide="onZoomFrameGuideUpdate"
     >
@@ -127,18 +126,7 @@ Symbols (top-level; keep in sync; no ghosts):
         </div>
         <p v-if="initImageName" class="caption initial-image-block__caption initial-image-block__caption--init-name">{{ initImageName }}</p>
       </template>
-    </InitialImageCard>
-
-    <ImageFolderSourceFields
-      v-else
-      :source="effectiveInitSource"
-      :showUseCrop="true"
-      :disabled="disabled"
-      pathLabel="Folder path"
-      pathPlaceholder="input/img2img-source"
-      countLabel="Images to generate"
-      @patch:source="(value) => emit('patch:initSource', value)"
-    />
+    </ImageSourceBlock>
 
     <slot />
 
@@ -316,9 +304,7 @@ Symbols (top-level; keep in sync; no ghosts):
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch, type CSSProperties } from 'vue'
-import ImageFolderSourceFields from './ImageFolderSourceFields.vue'
-import InitialImageCard from './InitialImageCard.vue'
-import CompactSegmentedControl from './ui/CompactSegmentedControl.vue'
+import ImageSourceBlock from './ImageSourceBlock.vue'
 import InpaintMaskEditorOverlay from './ui/InpaintMaskEditorOverlay.vue'
 import HoverTooltip from './ui/HoverTooltip.vue'
 import SliderField from './ui/SliderField.vue'
@@ -334,11 +320,6 @@ import {
 import type { WanImg2VidFrameGuideConfig } from '../utils/wan_img2vid_frame_projection'
 
 type InpaintMode = 'per_step_blend' | 'post_sample_blend' | 'fooocus_inpaint' | 'brushnet'
-
-const SOURCE_MODE_OPTIONS = [
-  { value: 'dir', label: 'DIR' },
-  { value: 'img', label: 'IMG' },
-] as const
 
 const PREVIEW_SPILL_TINT = {
   red: 255,

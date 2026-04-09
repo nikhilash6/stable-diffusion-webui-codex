@@ -8,7 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: Shared QuickSettings top bar for Model Tabs (SD/Flux/Chroma/ZImage/LTX/WAN).
 Loads `/api/options`, `/api/models`, `/api/models/inventory`, and `/api/paths`, then filters/presents per-family selectors (models/TE/VAE)
-and commits overrides (device + runtime flags + tab-scoped Z-Image variant) used by generation payload builders. Asset-contract-derived selector
+through the shared non-WAN `QuickSettingsAssetBlock.vue` owner plus the specialized WAN branch, and commits overrides (device + runtime flags + tab-scoped Z-Image variant) used by generation payload builders. Asset-contract-derived selector
 hints now disappear when checkpoint inventory metadata lacks a valid `core_only` flag, preventing stale UI contract display. FLUX.2 stays
 first-class as the current Klein 4B / base-4B slice (single Qwen3-4B selector, backend-capability-driven img2img/inpaint gating, no FLUX.1 aliasing).
 For LTX, QuickSettings remains the owner of mode + checkpoint/VAE/text-encoder selection only; execution-profile defaults are checkpoint-aware
@@ -194,33 +194,52 @@ Symbols (top-level; keep in sync; no ghosts):
           </div>
         </div>
         <fieldset class="qs-readonly-fieldset" :disabled="modelAssetSelectorsReadOnly">
-          <QuickSettingsFlux
+          <QuickSettingsAssetBlock
             v-if="activeFamily === 'flux1'"
             :checkpoint="effectiveCheckpoint"
             :checkpoints="filteredModelTitles"
+            checkpoint-choice-mode="truncate"
             :vae="store.currentVae"
             :vae-choices="filteredVaeChoices"
-            :text-encoder-primary="flux1TextEncoderPrimary"
-            :text-encoder-secondary="flux1TextEncoderSecondary"
+            vae-choice-mode="truncate"
+            vae-placeholder-label="Select VAE"
+            :text-encoder="flux1TextEncoderPrimary"
             :text-encoder-choices="filteredTextEncoderChoices"
+            text-encoder-group-label="Text Encoders"
+            text-encoder-group-class="qs-group-flux-tenc"
+            text-encoder-automatic-label="Select CLIP"
+            text-encoder-metadata-kind="text_encoder_primary"
+            show-text-encoder-actions
+            :secondary-text-encoder="flux1TextEncoderSecondary"
+            :secondary-text-encoder-choices="filteredTextEncoderChoices"
+            secondary-text-encoder-automatic-label="Select T5"
+            secondary-text-encoder-metadata-kind="text_encoder_secondary"
+            show-secondary-text-encoder
+            show-secondary-text-encoder-actions
             @update:checkpoint="onModelChange"
             @update:vae="onVaeChange"
-            @update:textEncoderPrimary="onPrimaryTextEncoderChange"
-            @update:textEncoderSecondary="onSecondaryTextEncoderChange"
+            @update:textEncoder="onPrimaryTextEncoderChange"
+            @update:secondaryTextEncoder="onSecondaryTextEncoderChange"
             @addCheckpointPath="onAddCheckpointPath"
             @addVaePath="onAddVaePath"
             @addTencPath="onAddTencPath"
             @showMetadata="onShowMetadata"
           />
-          <QuickSettingsFlux2
+          <QuickSettingsAssetBlock
             v-else
             :checkpoint="effectiveCheckpoint"
             :checkpoints="filteredModelTitles"
+            checkpoint-choice-mode="truncate"
             :vae="store.currentVae"
             :vae-choices="filteredVaeChoices"
+            vae-choice-mode="truncate"
+            vae-placeholder-label="Select VAE"
             :text-encoder="flux2TextEncoder"
             :text-encoder-choices="filteredTextEncoderChoices"
-            :text-encoder-field-label="flux2TextEncoderFieldLabel"
+            :text-encoder-group-label="flux2TextEncoderFieldLabel"
+            text-encoder-group-class="qs-group-flux-tenc"
+            text-encoder-automatic-label="Select Qwen3-4B"
+            show-text-encoder-actions
             @update:checkpoint="onModelChange"
             @update:vae="onVaeChange"
             @update:textEncoder="onPrimaryTextEncoderChange"
@@ -279,24 +298,45 @@ Symbols (top-level; keep in sync; no ghosts):
           </div>
         </div>
         <fieldset class="qs-readonly-fieldset" :disabled="modelAssetSelectorsReadOnly">
-          <QuickSettingsZImage
+          <QuickSettingsAssetBlock
             :checkpoint="effectiveCheckpoint"
             :checkpoints="filteredModelTitles"
-            :turbo="zimageTurbo"
-            :turbo-locked="zimageTurboLocked"
+            checkpoint-label="Model"
+            checkpoint-choice-mode="truncate"
             :vae="store.currentVae"
             :vae-choices="filteredVaeChoices"
+            vae-choice-mode="truncate"
+            vae-placeholder-label="Select VAE"
             :text-encoder="primaryTextEncoder"
             :text-encoder-choices="filteredTextEncoderChoices"
+            text-encoder-group-label="Text Encoder (Qwen3)"
+            text-encoder-automatic-label="Select Text Encoder"
+            show-text-encoder-actions
             @update:checkpoint="onModelChange"
-            @update:turbo="onZImageTurboChange"
             @update:vae="onVaeChange"
             @update:textEncoder="onPrimaryTextEncoderChange"
             @addCheckpointPath="onAddCheckpointPath"
             @addVaePath="onAddVaePath"
             @addTencPath="onAddTencPath"
             @showMetadata="onShowMetadata"
-          />
+          >
+            <template #after-checkpoint>
+              <div class="quicksettings-group qs-group-zimage-turbo">
+                <div class="qs-row">
+                  <button
+                    :class="['btn', 'qs-toggle-btn', zimageTurbo ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
+                    type="button"
+                    :aria-pressed="zimageTurbo"
+                    :disabled="zimageTurboLocked"
+                    :title="zimageTurboLocked ? 'Turbo variant is fixed by model metadata' : 'Toggle Turbo variant'"
+                    @click="onZImageTurboChange(!zimageTurbo)"
+                  >
+                    Turbo
+                  </button>
+                </div>
+              </div>
+            </template>
+          </QuickSettingsAssetBlock>
           <div v-if="canShowModeToggles" class="quicksettings-group qs-group-mode-toggle qs-group-mode-toggle--end">
             <label class="label-muted">Mode</label>
             <div class="qs-row">
@@ -339,14 +379,21 @@ Symbols (top-level; keep in sync; no ghosts):
           </div>
         </div>
         <fieldset class="qs-readonly-fieldset" :disabled="modelAssetSelectorsReadOnly">
-          <QuickSettingsChroma
+          <QuickSettingsAssetBlock
             :checkpoint="effectiveCheckpoint"
             :checkpoints="filteredModelTitles"
+            checkpoint-label="Model"
+            checkpoint-choice-mode="truncate"
             :vae="store.currentVae"
             :vae-choices="filteredVaeChoices"
+            vae-choice-mode="truncate"
+            vae-placeholder-label="Select VAE"
             :text-encoder="primaryTextEncoder"
             :text-encoder-choices="filteredTextEncoderChoices"
+            text-encoder-group-label="Text Encoder (T5)"
+            text-encoder-automatic-label="Select Text Encoder"
             :show-text-encoder="store.isModelCoreOnly(effectiveCheckpoint)"
+            show-text-encoder-actions
             @update:checkpoint="onModelChange"
             @update:vae="onVaeChange"
             @update:textEncoder="onPrimaryTextEncoderChange"
@@ -422,7 +469,7 @@ Symbols (top-level; keep in sync; no ghosts):
               </button>
             </div>
           </div>
-          <QuickSettingsBase
+          <QuickSettingsAssetBlock
             :checkpoint="effectiveCheckpoint"
             :checkpoints="filteredModelTitles"
             :vae="effectiveVae"
@@ -469,7 +516,7 @@ Symbols (top-level; keep in sync; no ghosts):
           </div>
         </div>
         <fieldset class="qs-readonly-fieldset" :disabled="modelAssetSelectorsReadOnly">
-          <QuickSettingsBase
+          <QuickSettingsAssetBlock
             :checkpoint="effectiveCheckpoint"
             :checkpoints="filteredModelTitles"
             :vae="store.currentVae"
@@ -623,13 +670,9 @@ import {
 } from '../utils/engine_taxonomy'
 import { buildUseInitImagePatch } from '../utils/image_params'
 import { filterModelTitlesForFamily, enginePrefixForFamily } from '../utils/model_family_filters'
-import QuickSettingsBase from './quicksettings/QuickSettingsBase.vue'
+import QuickSettingsAssetBlock from './quicksettings/QuickSettingsAssetBlock.vue'
 import QuickSettingsPerf from './quicksettings/QuickSettingsPerf.vue'
 import QuickSettingsWan from './quicksettings/QuickSettingsWan.vue'
-import QuickSettingsFlux from './quicksettings/QuickSettingsFlux.vue'
-import QuickSettingsFlux2 from './quicksettings/QuickSettingsFlux2.vue'
-import QuickSettingsChroma from './quicksettings/QuickSettingsChroma.vue'
-import QuickSettingsZImage from './quicksettings/QuickSettingsZImage.vue'
 import QuickSettingsOverridesModal from './modals/QuickSettingsOverridesModal.vue'
 import QuickSettingsAddPathModal from './modals/QuickSettingsAddPathModal.vue'
 import AssetMetadataModal from './modals/AssetMetadataModal.vue'

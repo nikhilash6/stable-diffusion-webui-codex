@@ -842,40 +842,40 @@
   .modal-list-section {
     margin-top: 0.5rem;
   }
-  .modal-panel.lora-modal-panel {
+  .modal-panel.prompt-asset-modal-panel {
     width: min(94vw, 56rem);
     height: min(78dvh, 48rem);
     max-height: 78dvh;
   }
-  .lora-modal-panel .modal-body {
+  .prompt-asset-modal-panel .modal-body {
     display: flex;
     flex-direction: column;
     min-height: 0;
   }
-  .lora-modal-toolbar {
+  .prompt-asset-modal-toolbar {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto auto auto;
     align-items: end;
     gap: 0.5rem;
   }
-  .lora-modal-field {
+  .prompt-asset-modal-field {
     min-width: 0;
   }
-  .lora-modal-field--weight {
+  .prompt-asset-modal-field--weight {
     width: 7rem;
   }
-  .lora-modal-weight-input {
+  .prompt-asset-modal-weight-input {
     width: 100%;
     min-width: 0;
   }
-  .lora-modal-refresh-btn {
+  .prompt-asset-modal-refresh-btn {
     align-self: end;
   }
-  .lora-modal-count {
+  .prompt-asset-modal-count {
     white-space: nowrap;
     align-self: end;
   }
-  .lora-modal-list-section {
+  .prompt-asset-modal-list-section {
     flex: 1 1 auto;
     min-height: 0;
     display: flex;
@@ -943,14 +943,14 @@
     color: hsla(0, 0%, 100%, 0.96);
   }
   @media (max-width: 52rem) {
-    .lora-modal-toolbar {
+    .prompt-asset-modal-toolbar {
       grid-template-columns: minmax(0, 1fr) auto;
       row-gap: 0.4rem;
     }
-    .lora-modal-field--weight {
+    .prompt-asset-modal-field--weight {
       width: 6.5rem;
     }
-    .lora-modal-count {
+    .prompt-asset-modal-count {
       justify-self: end;
     }
     .lora-modal-item {

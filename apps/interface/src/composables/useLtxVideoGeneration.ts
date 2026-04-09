@@ -10,8 +10,9 @@ Purpose: Dedicated LTX video generation composable for the generic backend video
 Owns per-tab runtime state for `ltx2` txt2vid/img2vid runs, validates LTX-specific frontend assumptions against the backend capability/asset
 contracts, preflights the strict LTX request contract (profile-aware `32px` / `64px` dimensions, `8n+1` frames, integer `steps` / `fps` / `seed`,
 finite `cfgScale`), builds generic payloads, starts `/api/txt2vid` or `/api/img2vid` tasks, consumes task SSE events to surface progress/results,
-and keeps a compact per-tab run history aligned with the shared WAN-baseline Results owner. Unlike the WAN composable, this lane still has no queue
-or stage orchestration; it stays fail-loud on unsupported generic-video assumptions.
+and keeps a compact per-tab run history aligned with the shared WAN-baseline Results owner. Delegates the shared task-stream/resume/history shell to
+`useTaskRunLifecycle.ts`, while keeping LTX-specific preflight, compact history shaping, and synchronous resume pre-hydration local. Unlike the WAN composable,
+this lane still has no queue or stage orchestration; it stays fail-loud on unsupported generic-video assumptions.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `Status` (type): Runtime status union (`idle|running|error|done`).
@@ -20,6 +21,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `LtxProgressState` (interface): Current task progress snapshot.
 - `LtxGenerationState` (interface): Per-tab LTX runtime state, including current result/history selection.
 - `ResumeState` (type): Persisted auto-resume marker for an in-flight LTX task.
+- `ResumeStateLoad` (type): Parsed LTX resume-state load result (`state` + optional parse error).
 - `freshState` (function): Creates empty per-tab state.
 - `readPersistedLtxResumeModeForTab` (function): Reads the persisted LTX resume-marker mode for a tab when available.
 - `isLtxGenerationRunningForTab` (function): Reports whether a given LTX tab currently owns an in-flight task.
@@ -29,7 +31,7 @@ Symbols (top-level; keep in sync; no ghosts):
 
 import { computed, reactive, ref } from 'vue'
 
-import { cancelTask, fetchTaskResult, startImg2Vid, startTxt2Vid, subscribeTask } from '../api/client'
+import { cancelTask, fetchTaskResult, startImg2Vid, startTxt2Vid } from '../api/client'
 import { formatZodError } from '../api/payloads'
 import {
   buildLtxImg2VidPayload,
@@ -51,6 +53,7 @@ import { useEngineCapabilitiesStore } from '../stores/engine_capabilities'
 import { useModelTabsStore, type LtxGenerationMode, type LtxTabParams, type TabByType } from '../stores/model_tabs'
 import { useQuicksettingsStore } from '../stores/quicksettings'
 import { formatSettingsRevisionConflictMessage, resolveSettingsRevisionConflict } from './settings_revision_conflict'
+import { type ResumeLoadResult, useTaskRunLifecycle } from './useTaskRunLifecycle'
 
 type Status = 'idle' | 'running' | 'error' | 'done'
 
@@ -71,6 +74,8 @@ type PendingRun = RunMetadata & {
 type ResumeState = PendingRun & {
   lastEventId: number
 }
+
+type ResumeStateLoad = ResumeLoadResult<ResumeState>
 
 type PreparedRun =
   | (RunMetadata & { mode: 'txt2vid'; payload: LtxTxt2VidPayload })
@@ -210,7 +215,7 @@ export function isLtxGenerationRunningForTab(tabId: string): boolean {
 function getTabState(tabId: string): LtxGenerationState {
   if (!tabStates.has(tabId)) {
     const state = reactive(freshState()) as LtxGenerationState
-    const saved = loadResumeState(resumeKey(tabId))
+    const saved = loadResumeState(resumeKey(tabId)).state
     if (saved) applyResumePendingState(state, saved)
     tabStates.set(tabId, state)
   }
@@ -227,33 +232,36 @@ function parseResumeMode(value: unknown): LtxGenerationMode | null {
   return null
 }
 
-function loadResumeState(key: string): ResumeState | null {
+function loadResumeState(key: string): ResumeStateLoad {
   try {
     const raw = localStorage.getItem(key)
-    if (!raw) return null
+    if (!raw) return { state: null, error: null }
     const parsed: unknown = JSON.parse(raw)
-    if (!isRecordObject(parsed)) return null
+    if (!isRecordObject(parsed)) return { state: null, error: null }
     const taskId = typeof parsed.taskId === 'string' ? parsed.taskId.trim() : ''
-    if (!taskId) return null
+    if (!taskId) return { state: null, error: null }
     const lastEventId = typeof parsed.lastEventId === 'number' && Number.isFinite(parsed.lastEventId)
       ? Math.max(0, Math.trunc(parsed.lastEventId))
       : 0
     const mode = parseResumeMode(parsed.mode)
-    if (!mode) return null
+    if (!mode) return { state: null, error: null }
     const createdAtMs = typeof parsed.createdAtMs === 'number' && Number.isFinite(parsed.createdAtMs)
       ? Math.max(0, Math.trunc(parsed.createdAtMs))
       : 0
     const summary = typeof parsed.summary === 'string' ? parsed.summary : ''
     const promptPreview = typeof parsed.promptPreview === 'string' ? parsed.promptPreview : ''
     const paramsSnapshot = isRecordObject(parsed.paramsSnapshot) ? parsed.paramsSnapshot : {}
-    return { taskId, lastEventId, mode, createdAtMs, summary, promptPreview, paramsSnapshot }
+    return {
+      state: { taskId, lastEventId, mode, createdAtMs, summary, promptPreview, paramsSnapshot },
+      error: null,
+    }
   } catch {
-    return null
+    return { state: null, error: null }
   }
 }
 
 export function readPersistedLtxResumeModeForTab(tabId: string): LtxGenerationMode | null {
-  return loadResumeState(resumeKey(tabId))?.mode ?? null
+  return loadResumeState(resumeKey(tabId)).state?.mode ?? null
 }
 
 function saveResumeState(key: string, state: ResumeState): void {
@@ -275,7 +283,7 @@ function clearResumeState(key: string): void {
 function updateResumeEventId(key: string, eventId: number): void {
   const value = Math.trunc(Number(eventId))
   if (!Number.isFinite(value) || value <= 0) return
-  const current = loadResumeState(key)
+  const current = loadResumeState(key).state
   if (!current || value <= current.lastEventId) return
   saveResumeState(key, { ...current, lastEventId: value })
 }
@@ -319,10 +327,7 @@ export function useLtxVideoGeneration(tabId: string) {
   })
 
   function stopStream(): void {
-    const unsub = unsubscribers.get(tabId)
-    if (!unsub) return
-    unsub()
-    unsubscribers.delete(tabId)
+    taskLifecycle.stopStream()
   }
 
   function resetProgress(): void {
@@ -343,6 +348,31 @@ export function useLtxVideoGeneration(tabId: string) {
   function setErrorMessage(message: string): void {
     state.value.errorMessage = message
   }
+
+  const taskLifecycle = useTaskRunLifecycle({
+    tabId,
+    state,
+    resumeKey: resumeKey(tabId),
+    unsubscribers,
+    resumeAttempts,
+    loadResumeState,
+    saveResumeState,
+    clearResumeState,
+    updateResumeEventId,
+    onTaskEvent: onTaskEvent,
+    isSnapshotRunning: (snapshot) => snapshot.status === 'running',
+    onResumeRunning: handleResumedRunningSnapshot,
+    onResumeTerminal: handleResumeTerminalSnapshot,
+    onResumeFetchError: () => {
+      resetStateToIdle(state.value)
+    },
+    onHistoryLoaded: handleHistorySnapshot,
+    onHistoryLoadError: (_taskId, error) => {
+      setError(error instanceof Error ? error.message : String(error))
+    },
+    resumeNotice,
+    resumeToastShown,
+  })
 
   function isVaeSentinel(value: string): boolean {
     const normalized = String(value || '').trim().toLowerCase()
@@ -695,8 +725,7 @@ export function useLtxVideoGeneration(tabId: string) {
         paramsSnapshot: run.paramsSnapshot,
       }
 
-      const key = resumeKey(tabId)
-      saveResumeState(key, {
+      taskLifecycle.saveResume({
         taskId,
         lastEventId: 0,
         mode: run.mode,
@@ -705,12 +734,7 @@ export function useLtxVideoGeneration(tabId: string) {
         promptPreview: run.promptPreview,
         paramsSnapshot: run.paramsSnapshot,
       })
-      const unsub = subscribeTask(taskId, onTaskEvent, undefined, {
-        onMeta: ({ eventId }) => {
-          if (typeof eventId === 'number') updateResumeEventId(key, eventId)
-        },
-      })
-      unsubscribers.set(tabId, unsub)
+      taskLifecycle.attachStream(taskId)
     } catch (error) {
       clearResumeState(resumeKey(tabId))
       const conflictRevision = resolveSettingsRevisionConflict(error)
@@ -804,62 +828,30 @@ export function useLtxVideoGeneration(tabId: string) {
     }
   }
 
-  async function tryAutoResume(): Promise<void> {
-    if (resumeAttempts.has(tabId)) return
-    resumeAttempts.add(tabId)
+  function handleResumedRunningSnapshot(saved: ResumeState, result: Awaited<ReturnType<typeof fetchTaskResult>>): void {
+    if (result.status !== 'running') return
+    applyResumePendingState(state.value, saved)
 
-    const key = resumeKey(tabId)
-    const saved = loadResumeState(key)
-    if (!saved) return
-
-    let result
-    try {
-      result = await fetchTaskResult(saved.taskId)
-    } catch {
-      clearResumeState(key)
-      resetStateToIdle(state.value)
-      return
-    }
-
-    if (result.status === 'running') {
-      stopStream()
-      applyResumePendingState(state.value, saved)
-
-      if (typeof result.stage === 'string' && result.stage.trim()) state.value.progress.stage = result.stage
-      const progress = result.progress
-      if (progress && typeof progress === 'object') {
-        const resumedProgress: LtxProgressState = {
-          stage: String(progress.stage ?? state.value.progress.stage),
-          percent: progress.percent ?? null,
-          etaSeconds: progress.eta_seconds ?? null,
-          step: progress.step ?? null,
-          totalSteps: progress.total_steps ?? null,
-          message: progress.message ?? null,
-          totalPercent: null,
-          totalPhase: null,
-          totalPhaseStep: null,
-          totalPhaseTotalSteps: null,
-        }
-        state.value.progress = resumedProgress
+    if (typeof result.stage === 'string' && result.stage.trim()) state.value.progress.stage = result.stage
+    const progress = result.progress
+    if (progress && typeof progress === 'object') {
+      const resumedProgress: LtxProgressState = {
+        stage: String(progress.stage ?? state.value.progress.stage),
+        percent: progress.percent ?? null,
+        etaSeconds: progress.eta_seconds ?? null,
+        step: progress.step ?? null,
+        totalSteps: progress.total_steps ?? null,
+        message: progress.message ?? null,
+        totalPercent: null,
+        totalPhase: null,
+        totalPhaseStep: null,
+        totalPhaseTotalSteps: null,
       }
-
-      const unsub = subscribeTask(saved.taskId, onTaskEvent, undefined, {
-        after: saved.lastEventId,
-        onMeta: ({ eventId }) => {
-          if (typeof eventId === 'number') updateResumeEventId(key, eventId)
-        },
-      })
-      unsubscribers.set(tabId, unsub)
-
-      if (!resumeToastShown.has(saved.taskId)) {
-        resumeNotice.value = 'Reconnected (resumed task).'
-        resumeToastShown.add(saved.taskId)
-      }
-      return
+      state.value.progress = resumedProgress
     }
+  }
 
-    clearResumeState(key)
-
+  function handleResumeTerminalSnapshot(saved: ResumeState, result: Awaited<ReturnType<typeof fetchTaskResult>>): void {
     if (result.status === 'completed' && result.result) {
       ensureCurrentRunFromResume(saved)
       state.value.frames = Array.isArray(result.result.images) ? result.result.images : []
@@ -888,7 +880,33 @@ export function useLtxVideoGeneration(tabId: string) {
     resetStateToIdle(state.value)
   }
 
-  void tryAutoResume()
+  function handleHistorySnapshot(taskId: string, result: Awaited<ReturnType<typeof fetchTaskResult>>): void {
+    if (result.status === 'error') {
+      state.value.status = 'error'
+      state.value.errorMessage = result.error || 'Task failed.'
+      state.value.frames = []
+      state.value.info = null
+      state.value.video = null
+      state.value.taskId = taskId
+      state.value.selectedTaskId = taskId
+      state.value.currentRun = null
+      return
+    }
+    if (result.status === 'completed' && result.result) {
+      state.value.frames = Array.isArray(result.result.images) ? result.result.images : []
+      state.value.info = result.result.info ?? null
+      state.value.video = result.result.video ?? null
+      state.value.errorMessage = ''
+      state.value.status = 'done'
+      state.value.taskId = taskId
+      state.value.selectedTaskId = taskId
+      state.value.currentRun = null
+      return
+    }
+    setError('Task is still running.')
+  }
+
+  void taskLifecycle.tryAutoResume()
 
   async function cancel(modeValue: 'immediate' | 'after_current' = 'immediate'): Promise<void> {
     const taskId = state.value.taskId
@@ -938,44 +956,8 @@ export function useLtxVideoGeneration(tabId: string) {
     generate,
     stopStream,
     cancel,
-    loadHistory: async (taskId: string) => {
-      if (!taskId || state.value.status === 'running') return
-      state.value.historyLoadingTaskId = taskId
-      try {
-        const result = await fetchTaskResult(taskId)
-        if (result.status === 'error') {
-          state.value.status = 'error'
-          state.value.errorMessage = result.error || 'Task failed.'
-          state.value.frames = []
-          state.value.info = null
-          state.value.video = null
-          state.value.taskId = taskId
-          state.value.selectedTaskId = taskId
-          state.value.currentRun = null
-          return
-        }
-        if (result.status === 'completed' && result.result) {
-          state.value.frames = Array.isArray(result.result.images) ? result.result.images : []
-          state.value.info = result.result.info ?? null
-          state.value.video = result.result.video ?? null
-          state.value.errorMessage = ''
-          state.value.status = 'done'
-          state.value.taskId = taskId
-          state.value.selectedTaskId = taskId
-          state.value.currentRun = null
-          return
-        }
-        setError('Task is still running.')
-      } catch (error) {
-        setError(error instanceof Error ? error.message : String(error))
-      } finally {
-        state.value.historyLoadingTaskId = ''
-      }
-    },
-    clearHistory: () => {
-      state.value.history = []
-      state.value.selectedTaskId = ''
-    },
+    loadHistory: taskLifecycle.loadHistory,
+    clearHistory: taskLifecycle.clearHistory,
     resumeNotice,
   }
 }

@@ -1,13 +1,15 @@
 # apps/interface/src/composables Overview
 <!-- tags: frontend, composables -->
 Date: 2025-12-09
-Last Review: 2026-04-06
+Last Review: 2026-04-08
 Status: Active
 
 ## Purpose
 - Vue composables that encapsulate shared generation logic and reusable reactive helpers for engine tabs.
 
 ## Notes
+- 2026-04-08: Shared `Save snapshot` / `Copy params` / workflow save-vs-update notice ownership now lives in `useWorkflowSnapshotActions.ts`; keep `copyInfo`, history copy/apply/load/details, and other mode-specific Results/history actions local to the image/WAN/LTX view owners, and keep caller-config differences explicit (`engine_semantics`, plus save-snapshot vs copy-current snapshot sources when a lane like WAN needs both) instead of inventing a fake universal workflow schema.
+- 2026-04-08: Shared frontend task-stream/resume/history ownership now lives in `useTaskRunLifecycle.ts`; `useGeneration(tabId)`, `useVideoGeneration(tabId)`, and `useLtxVideoGeneration(tabId)` keep payload builders, result/history shaping, queueing, automation replay recovery, and LTX synchronous resume pre-hydration local while delegating stream attach/stop, auto-resume reattach, history load/clear gating, and `resumeNotice` wiring to that shared owner.
 - 2026-03-21: `useGeneration(tabId)` now normalizes img2img resize mode against the active engine contract and emits top-level `img2img_resize_mode` only for unmasked ZImage img2img, matching the truthful pixel-space resize modes owned by `runtime/pipeline_stages/image_init.py`.
 - 2026-03-20: `useGeneration(tabId)` now delegates explicit image selector/extras resolution to `utils/image_request_contract.ts`; checkpoint metadata validation, FLUX.2 guidance-mode resolution, asset-contract lookup, required `tenc_sha`/`vae_sha`, `vae_source`, and ZImage variant extras must stay owned by that shared helper instead of drifting back into the composable.
 - 2026-03-20: `useGeneration(tabId)` now requires canonical checkpoint inventory metadata (`hash`, `format`, `core_only`) and emits explicit image selectors `model_sha`, `checkpoint_core_only`, `model_format`, and `vae_source`; masked img2img remains request-owned, not model-class inferred.

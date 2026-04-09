@@ -8,17 +8,6 @@
     gap: 1rem;
   }
 
-  .ip-adapter-card__top-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.9rem;
-    align-items: flex-end;
-  }
-
-  .ip-adapter-card__top-row > .field {
-    min-width: 0;
-  }
-
   .ip-adapter-card__same-init-field {
     flex: 0 0 auto;
   }

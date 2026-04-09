@@ -72,8 +72,6 @@ Symbols (top-level; keep in sync; no ghosts):
 - `reuseSeed` (function): Reuses the last seed from history/current run as the next seed.
 - `download` (function): Downloads a generated image artifact to disk.
 - `sendToImg2Img` (function): Sends a generated image back into img2img init-image fields (async).
-- `readFileAsDataURL` (function): Reads a File into a data URL (used for init-image handling).
-- `readImageDimensions` (function): Reads width/height from an image source URL (used for init-image dimension sync).
 - `syncInitImageDims` (function): Synchronizes init-image derived dimensions into width/height params (async).
 - `maskEditorImageWidth`/`maskEditorImageHeight` (const): Derived init-image dimensions used by the inpaint mask editor canvas (keeps backend mask-dimension contract).
 - `maybeApplyKontextDefaults` (function): Applies FLUX.1 Kontext-specific default params when relevant to the current engine/tab.
@@ -510,62 +508,27 @@ Symbols (top-level; keep in sync; no ghosts):
       </GenerationResultsPanel>
     </div>
 
-    <Modal v-model="historyDetailsOpen" :title="historyDetailsTitle">
-      <div v-if="historyDetailsItem" class="cdx-history-modal">
-        <div class="cdx-history-modal__top">
-          <img
-            v-if="historyDetailsImageUrl"
-            class="cdx-history-modal__preview"
-            :src="historyDetailsImageUrl"
-            :alt="historyDetailsTitle"
-          >
-          <div v-else class="cdx-history-modal__preview cdx-history-modal__preview--empty">No preview</div>
-          <div class="cdx-history-modal__meta">
-            <div class="cdx-history-modal__meta-row"><span>Mode</span><strong>{{ historyDetailsModeLabel }}</strong></div>
-            <div class="cdx-history-modal__meta-row"><span>Created</span><strong>{{ historyDetailsCreatedAtLabel }}</strong></div>
-            <div class="cdx-history-modal__meta-row"><span>Status</span><strong>{{ historyDetailsItem.status }}</strong></div>
-            <div class="cdx-history-modal__meta-row"><span>Task</span><code>{{ historyDetailsItem.taskId }}</code></div>
-          </div>
-        </div>
-
-        <div class="cdx-history-modal__section">
-          <p class="label-muted">Summary</p>
-          <p class="cdx-history-modal__summary">{{ historyDetailsItem.summary }}</p>
-        </div>
-
-        <div v-if="historyDetailsPrompt" class="cdx-history-modal__section">
-          <p class="label-muted">Prompt</p>
-          <pre class="text-xs break-words">{{ historyDetailsPrompt }}</pre>
-        </div>
-        <div v-if="historyDetailsNegativePrompt" class="cdx-history-modal__section">
-          <p class="label-muted">Negative Prompt</p>
-          <pre class="text-xs break-words">{{ historyDetailsNegativePrompt }}</pre>
-        </div>
-        <div v-if="historyDetailsItem.errorMessage" class="cdx-history-modal__section">
-          <p class="label-muted">Error</p>
-          <pre class="text-xs break-words">{{ historyDetailsItem.errorMessage }}</pre>
-        </div>
-        <details class="accordion">
-          <summary>Params snapshot</summary>
-          <div class="accordion-body">
-            <pre class="text-xs break-words">{{ formatJson(historyDetailsItem.paramsSnapshot) }}</pre>
-          </div>
-        </details>
-      </div>
-      <template #footer>
-        <button
-          class="btn btn-sm btn-secondary"
-          type="button"
-          :disabled="!historyDetailsItem || isRunning || historyLoadingTaskId === historyDetailsItem.taskId"
-          @click="onLoadHistoryDetails"
-        >
-          {{ historyDetailsItem && historyLoadingTaskId === historyDetailsItem.taskId ? 'Loading…' : 'Load' }}
-        </button>
-        <button class="btn btn-sm btn-outline" type="button" :disabled="!historyDetailsItem || isRunning" @click="onApplyHistoryDetails">Apply</button>
-        <button class="btn btn-sm btn-outline" type="button" :disabled="!historyDetailsItem || isRunning" @click="onCopyHistoryDetails">Copy</button>
-        <button class="btn btn-sm btn-outline" type="button" @click="historyDetailsOpen = false">Close</button>
-      </template>
-    </Modal>
+    <RunHistoryDetailsModal
+      v-model="historyDetailsOpen"
+      :title="historyDetailsTitle"
+      :preview-url="historyDetailsImageUrl"
+      :preview-alt="historyDetailsTitle"
+      :mode-label="historyDetailsModeLabel"
+      :created-at-label="historyDetailsCreatedAtLabel"
+      :status="historyDetailsItem?.status || ''"
+      :task-id="historyDetailsItem?.taskId || ''"
+      :summary="historyDetailsItem?.summary || ''"
+      :error-message="historyDetailsItem?.errorMessage || ''"
+      :params-snapshot="historyDetailsItem?.paramsSnapshot"
+      :sections="historyDetailsSections"
+      :load-disabled="!historyDetailsItem || isRunning || historyLoadingTaskId === historyDetailsItem.taskId"
+      :load-label="historyDetailsItem && historyLoadingTaskId === historyDetailsItem.taskId ? 'Loading…' : 'Load'"
+      :apply-disabled="!historyDetailsItem || isRunning"
+      :copy-disabled="!historyDetailsItem || isRunning"
+      @load="onLoadHistoryDetails"
+      @apply="onApplyHistoryDetails"
+      @copy="onCopyHistoryDetails"
+    />
   </section>
   <section v-else>
     <div class="panel"><div class="panel-body">Tab not found.</div></div>
@@ -582,7 +545,7 @@ import type {
   SamplerInfo,
   SchedulerInfo,
 } from '../api/types'
-import { formatJson, useResultsCard } from '../composables/useResultsCard'
+import { useWorkflowSnapshotActions } from '../composables/useWorkflowSnapshotActions'
 import { resolveEngineForRequest, useGeneration, type ImageRunHistoryItem } from '../composables/useGeneration'
 import { resolveSupirSelectionState, useSupirDiagnostics } from '../composables/useSupirDiagnostics'
 import {
@@ -607,7 +570,6 @@ import {
 import { useQuicksettingsStore } from '../stores/quicksettings'
 import { useBootstrapStore } from '../stores/bootstrap'
 import { useUpscalersStore } from '../stores/upscalers'
-import { useWorkflowsStore } from '../stores/workflows'
 import { useXyzStore } from '../stores/xyz'
 import { fallbackSamplingDefaultsForTabFamily, normalizeTabFamily } from '../utils/engine_taxonomy'
 import { filterModelTitlesForFamily } from '../utils/model_family_filters'
@@ -622,11 +584,13 @@ import {
   normalizeNonNegativeInt,
   resolveHiresModePolicy,
 } from '../utils/image_params'
+import { readFileAsDataURL, readImageDimensions } from '../utils/image_io'
 import BasicParametersCard from '../components/BasicParametersCard.vue'
 import HiresSettingsCard from '../components/HiresSettingsCard.vue'
 import Img2ImgBasicParametersCard from '../components/Img2ImgBasicParametersCard.vue'
 import InitialImageBlock from '../components/InitialImageBlock.vue'
 import IpAdapterCard from '../components/IpAdapterCard.vue'
+import RunHistoryDetailsModal from '../components/modals/RunHistoryDetailsModal.vue'
 import PromptCard from '../components/prompt/PromptCard.vue'
 import RefinerSettingsCard from '../components/RefinerSettingsCard.vue'
 import SupirModeCard from '../components/SupirModeCard.vue'
@@ -638,7 +602,6 @@ import RunCard from '../components/results/RunCard.vue'
 import RunProgressStatus from '../components/results/RunProgressStatus.vue'
 import RunSummaryChips from '../components/results/RunSummaryChips.vue'
 import XyzSweepCard from '../components/XyzSweepCard.vue'
-import Modal from '../components/ui/Modal.vue'
 
 const props = defineProps<{ tabId: string; type: ImageTabType }>()
 type IpAdapterPatch = Partial<Omit<ImageBaseParams['ipAdapter'], 'source'>> & {
@@ -650,7 +613,6 @@ const store = useModelTabsStore()
 const engineCaps = useEngineCapabilitiesStore()
 const quicksettingsStore = useQuicksettingsStore()
 const bootstrap = useBootstrapStore()
-const workflows = useWorkflowsStore()
 const upscalersStore = useUpscalersStore()
 const xyzStore = useXyzStore()
 const { upscalers, loading: upscalersLoading, error: upscalersError, minTile } = storeToRefs(upscalersStore)
@@ -710,8 +672,19 @@ onBeforeUnmount(() => {
   stopStream()
 })
 
-const workflowBusy = ref(false)
-const { notice: copyNotice, toast, copyJson } = useResultsCard()
+const {
+  notice: copyNotice,
+  toast,
+  copyJson,
+  formatJson,
+  workflowBusy,
+  sendToWorkflows,
+  copyCurrentParams,
+} = useWorkflowSnapshotActions({
+  getTab: () => tab.value ?? null,
+  getWorkflowParamsSnapshot: () => (tab.value?.params as unknown as Record<string, unknown> | null) ?? null,
+  resolveEngineSemantics: (currentTab) => (currentTab.type === 'wan' ? 'wan22' : currentTab.type),
+})
 type ImageTab = TabByType<ImageTabType>
 
 const historyDetailsTitle = computed(() => (historyDetailsItem.value ? formatHistoryTitle(historyDetailsItem.value) : 'History details'))
@@ -740,6 +713,10 @@ const historyDetailsNegativePrompt = computed(() => {
   if (!item) return ''
   return readHistorySnapshotText(item, 'negativePrompt')
 })
+const historyDetailsSections = computed(() => [
+  { key: 'prompt', label: 'Prompt', text: historyDetailsPrompt.value },
+  { key: 'negativePrompt', label: 'Negative Prompt', text: historyDetailsNegativePrompt.value },
+])
 
 watch(
   resumeNotice,
@@ -1596,30 +1573,6 @@ async function onCancelRun(): Promise<void> {
   }
 }
 
-async function sendToWorkflows(): Promise<void> {
-  if (!tab.value) return
-  workflowBusy.value = true
-  try {
-    const result = await workflows.saveSnapshot({
-      name: `${tab.value.title} — ${new Date().toLocaleString()}`,
-      source_tab_id: tab.value.id,
-      type: tab.value.type,
-      engine_semantics: tab.value.type === 'wan' ? 'wan22' : tab.value.type,
-      params_snapshot: tab.value.params as Record<string, unknown>,
-    })
-    toast(result.action === 'updated' ? 'Snapshot updated in Workflows.' : 'Snapshot saved to Workflows.')
-  } catch (e) {
-    toast(e instanceof Error ? e.message : String(e))
-  } finally {
-    workflowBusy.value = false
-  }
-}
-
-async function copyCurrentParams(): Promise<void> {
-  if (!tab.value) return
-  await copyJson(tab.value.params, 'Copied params.')
-}
-
 async function copyHistoryParams(item: ImageRunHistoryItem): Promise<void> {
   await copyJson(item.paramsSnapshot, 'Copied history params.')
 }
@@ -2290,21 +2243,6 @@ async function sendToImg2Img(image: GeneratedImage): Promise<void> {
     // ignore
   }
   setParams(patch)
-}
-
-function readFileAsDataURL(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(reader.error); reader.readAsDataURL(file)
-  })
-}
-
-function readImageDimensions(src: string): Promise<{ width: number; height: number }> {
-  return new Promise((resolve, reject) => {
-    const img = new Image()
-    img.onload = () => resolve({ width: img.naturalWidth || img.width, height: img.naturalHeight || img.height })
-    img.onerror = () => reject(new Error('Failed to load image'))
-    img.src = src
-  })
 }
 
 async function syncInitImageDims(): Promise<void> {

@@ -251,6 +251,7 @@ import { useModelTabsStore } from '../stores/model_tabs'
 import { useQuicksettingsStore } from '../stores/quicksettings'
 import { useWorkflowsStore } from '../stores/workflows'
 import { resolveImageRequestEngineId, type TabFamily } from '../utils/engine_taxonomy'
+import { readFileAsDataURL } from '../utils/image_io'
 import { buildUseInitImagePatch } from '../utils/image_params'
 import { mapCheckpointTitle, mapSamplerScheduler, parseComfyPromptJson, parseInfotext, type ParsedInfotext } from '../utils/pnginfo'
 import ResultsCard from '../components/results/ResultsCard.vue'
@@ -406,15 +407,6 @@ const canSendTo = computed(() => {
   if (targetMode.value === 'img2img' && !previewDataUrl.value) return false
   return true
 })
-
-function readFileAsDataURL(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result))
-    reader.onerror = () => reject(reader.error)
-    reader.readAsDataURL(file)
-  })
-}
 
 function metadataValue(metadata: Record<string, string> | undefined | null, key: string): string {
   if (!metadata) return ''

@@ -44,6 +44,7 @@ Symbols (top-level; keep in sync; no ghosts):
                 </VideoPromptStageCard>
                 <LoraModal
                   :modelValue="wan.showHighPromptLoraModal"
+                  :show-negative-target="!wan.hideHighNegativePrompt"
                   @update:modelValue="wan.setShowHighPromptLoraModal"
                   @insert="wan.onHighPromptLoraInsert"
                 />
@@ -68,6 +69,7 @@ Symbols (top-level; keep in sync; no ghosts):
                 </VideoPromptStageCard>
                 <LoraModal
                   :modelValue="wan.showLowPromptLoraModal"
+                  :show-negative-target="!wan.hideLowNegativePrompt"
                   @update:modelValue="wan.setShowLowPromptLoraModal"
                   @insert="wan.onLowPromptLoraInsert"
                 />
@@ -776,70 +778,28 @@ Symbols (top-level; keep in sync; no ghosts):
           </GenerationResultsPanel>
         </div>
 
-        <Modal :modelValue="wan.historyDetailsOpen" :title="wan.historyDetailsTitle" @update:modelValue="wan.setHistoryDetailsOpen">
-          <div v-if="wan.historyDetailsItem" class="cdx-history-modal">
-            <div class="cdx-history-modal__top">
-              <img
-                v-if="wan.historyDetailsImageUrl"
-                class="cdx-history-modal__preview"
-                :src="wan.historyDetailsImageUrl"
-                :alt="wan.historyDetailsTitle"
-              >
-              <div v-else class="cdx-history-modal__preview cdx-history-modal__preview--empty">No preview</div>
-              <div class="cdx-history-modal__meta">
-                <div class="cdx-history-modal__meta-row"><span>Mode</span><strong>{{ wan.historyDetailsModeLabel }}</strong></div>
-                <div class="cdx-history-modal__meta-row"><span>Created</span><strong>{{ wan.historyDetailsCreatedAtLabel }}</strong></div>
-                <div class="cdx-history-modal__meta-row"><span>Status</span><strong>{{ wan.historyDetailsItem.status }}</strong></div>
-                <div class="cdx-history-modal__meta-row"><span>Task</span><code>{{ wan.historyDetailsItem.taskId }}</code></div>
-              </div>
-            </div>
-
-            <div class="cdx-history-modal__section">
-              <p class="label-muted">Summary</p>
-              <p class="cdx-history-modal__summary">{{ wan.historyDetailsItem.summary }}</p>
-            </div>
-
-            <div v-if="wan.historyDetailsHighPrompt" class="cdx-history-modal__section">
-              <p class="label-muted">High Prompt</p>
-              <pre class="text-xs break-words">{{ wan.historyDetailsHighPrompt }}</pre>
-            </div>
-            <div v-if="wan.historyDetailsHighNegativePrompt" class="cdx-history-modal__section">
-              <p class="label-muted">High Negative Prompt</p>
-              <pre class="text-xs break-words">{{ wan.historyDetailsHighNegativePrompt }}</pre>
-            </div>
-            <div v-if="wan.historyDetailsLowPrompt" class="cdx-history-modal__section">
-              <p class="label-muted">Low Prompt</p>
-              <pre class="text-xs break-words">{{ wan.historyDetailsLowPrompt }}</pre>
-            </div>
-            <div v-if="wan.historyDetailsLowNegativePrompt" class="cdx-history-modal__section">
-              <p class="label-muted">Low Negative Prompt</p>
-              <pre class="text-xs break-words">{{ wan.historyDetailsLowNegativePrompt }}</pre>
-            </div>
-            <div v-if="wan.historyDetailsItem.errorMessage" class="cdx-history-modal__section">
-              <p class="label-muted">Error</p>
-              <pre class="text-xs break-words">{{ wan.historyDetailsItem.errorMessage }}</pre>
-            </div>
-            <details class="accordion">
-              <summary>Params snapshot</summary>
-              <div class="accordion-body">
-                <pre class="text-xs break-words">{{ wan.formatJson(wan.historyDetailsItem.paramsSnapshot) }}</pre>
-              </div>
-            </details>
-          </div>
-          <template #footer>
-            <button
-              class="btn btn-sm btn-secondary"
-              type="button"
-              :disabled="!wan.historyDetailsItem || wan.isRunning || wan.historyLoadingTaskId === wan.historyDetailsItem.taskId"
-              @click="wan.onLoadHistoryDetails"
-            >
-              {{ wan.historyDetailsItem && wan.historyLoadingTaskId === wan.historyDetailsItem.taskId ? 'Loading…' : 'Load' }}
-            </button>
-            <button class="btn btn-sm btn-outline" type="button" :disabled="!wan.historyDetailsItem || wan.isRunning" @click="wan.onApplyHistoryDetails">Apply</button>
-            <button class="btn btn-sm btn-outline" type="button" :disabled="!wan.historyDetailsItem || wan.isRunning" @click="wan.onCopyHistoryDetails">Copy</button>
-            <button class="btn btn-sm btn-outline" type="button" @click="wan.setHistoryDetailsOpen(false)">Close</button>
-          </template>
-        </Modal>
+        <RunHistoryDetailsModal
+          :modelValue="wan.historyDetailsOpen"
+          :title="wan.historyDetailsTitle"
+          :preview-url="wan.historyDetailsImageUrl"
+          :preview-alt="wan.historyDetailsTitle"
+          :mode-label="wan.historyDetailsModeLabel"
+          :created-at-label="wan.historyDetailsCreatedAtLabel"
+          :status="wan.historyDetailsItem?.status || ''"
+          :task-id="wan.historyDetailsItem?.taskId || ''"
+          :summary="wan.historyDetailsItem?.summary || ''"
+          :error-message="wan.historyDetailsItem?.errorMessage || ''"
+          :params-snapshot="wan.historyDetailsItem?.paramsSnapshot"
+          :sections="wan.historyDetailsSections"
+          :load-disabled="!wan.historyDetailsItem || wan.isRunning || wan.historyLoadingTaskId === wan.historyDetailsItem.taskId"
+          :load-label="wan.historyDetailsItem && wan.historyLoadingTaskId === wan.historyDetailsItem.taskId ? 'Loading…' : 'Load'"
+          :apply-disabled="!wan.historyDetailsItem || wan.isRunning"
+          :copy-disabled="!wan.historyDetailsItem || wan.isRunning"
+          @update:modelValue="wan.setHistoryDetailsOpen"
+          @load="wan.onLoadHistoryDetails"
+          @apply="wan.onApplyHistoryDetails"
+          @copy="wan.onCopyHistoryDetails"
+        />
 
         <Teleport to="body">
           <div
@@ -1131,13 +1091,13 @@ import VideoOutputCard from '../components/video/VideoOutputCard.vue'
 import VideoPromptStageCard from '../components/video/VideoPromptStageCard.vue'
 import VideoStageBasicParamsCard from '../components/video/VideoStageBasicParamsCard.vue'
 import LoraModal from '../components/modals/LoraModal.vue'
+import RunHistoryDetailsModal from '../components/modals/RunHistoryDetailsModal.vue'
 import GenerationResultsPanel from '../components/results/GenerationResultsPanel.vue'
 import ResultsHistoryStrip from '../components/results/ResultsHistoryStrip.vue'
 import RunCard from '../components/results/RunCard.vue'
 import RunProgressStatus from '../components/results/RunProgressStatus.vue'
 import RunSummaryChips from '../components/results/RunSummaryChips.vue'
 import HoverTooltip from '../components/ui/HoverTooltip.vue'
-import Modal from '../components/ui/Modal.vue'
 import NumberStepperInput from '../components/ui/NumberStepperInput.vue'
 import SliderField from '../components/ui/SliderField.vue'
 import VideoZoomOverlay from '../components/ui/VideoZoomOverlay.vue'
