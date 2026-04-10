@@ -250,7 +250,7 @@ import {
 import { useModelTabsStore } from '../stores/model_tabs'
 import { useQuicksettingsStore } from '../stores/quicksettings'
 import { useWorkflowsStore } from '../stores/workflows'
-import { resolveImageRequestEngineId, type TabFamily } from '../utils/engine_taxonomy'
+import { isWanTabFamily, resolveImageRequestEngineId, type TabFamily } from '../utils/engine_taxonomy'
 import { readFileAsDataURL } from '../utils/image_io'
 import { buildUseInitImagePatch } from '../utils/image_params'
 import { mapCheckpointTitle, mapSamplerScheduler, parseComfyPromptJson, parseInfotext, type ParsedInfotext } from '../utils/pnginfo'
@@ -281,13 +281,13 @@ const workflowBusy = ref(false)
 const sendBusy = ref(false)
 const lastSentTabId = ref<string>('')
 
-const compatibleTabs = computed(() => tabs.orderedTabs.filter(t => t.type !== 'wan' && t.type !== 'anima' && t.type !== 'ltx2'))
+const compatibleTabs = computed(() => tabs.orderedTabs.filter((tab) => !isWanTabFamily(tab.type) && tab.type !== 'anima' && tab.type !== 'ltx2'))
 const targetTabId = ref('')
 const targetTab = computed(() => compatibleTabs.value.find(t => t.id === targetTabId.value) || null)
 const targetMode = ref<TargetMode>('txt2img')
 const targetTabFamily = computed<TabFamily | null>(() => {
   const type = targetTab.value?.type
-  if (!type || type === 'wan' || type === 'anima' || type === 'ltx2') return null
+  if (!type || isWanTabFamily(type) || type === 'anima' || type === 'ltx2') return null
   return type
 })
 const targetSamplingEngineId = computed(() => {
@@ -613,7 +613,7 @@ async function saveSnapshot(): Promise<void> {
       name: `${selectedFile.value.name} — ${new Date().toLocaleString()}`,
       source_tab_id: targetTab.value.id,
       type: targetTab.value.type,
-      engine_semantics: targetTab.value.type === 'wan' ? 'wan22' : targetTab.value.type,
+      engine_semantics: targetTab.value.type,
       params_snapshot: patch,
     })
     const vae = await maybeApplyVae()

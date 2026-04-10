@@ -80,7 +80,8 @@
   .quicksettings .qs-group-wan-refresh { flex: 0 0 auto; }
   .quicksettings .qs-group-wan-lightx2v { flex: 0 0 auto; min-width: 100px; }
   .quicksettings .qs-group-wan-high,
-  .quicksettings .qs-group-wan-low { flex: 2 1 18rem; min-width: 14rem; }
+  .quicksettings .qs-group-wan-low,
+  .quicksettings .qs-group-wan-model { flex: 2 1 18rem; min-width: 14rem; }
   .quicksettings .qs-group-wan-text-encoder { flex: 2 1 18rem; min-width: 14rem; }
   .quicksettings .qs-group-wan-vae { flex: 1.2 1 12rem; min-width: 10rem; }
   .quicksettings .qs-group-zimage-turbo { flex: 0 0 auto; }
@@ -109,6 +110,13 @@
     align-items: stretch; 
     gap: var(--space-sm); 
     height: var(--control-h-md);
+  }
+
+  .qs-toggle-group {
+    display: inline-flex;
+    align-items: stretch;
+    gap: 0.35rem;
+    flex-wrap: wrap;
   }
 
   .qs-row-wrap {

@@ -37,7 +37,7 @@ import { useModelTabsStore, type ImageBaseParams, type ImageTabType, type TabByT
 import { useEngineCapabilitiesStore } from './engine_capabilities'
 import { useQuicksettingsStore } from './quicksettings'
 import { useUpscalersStore } from './upscalers'
-import { fallbackSamplingDefaultsForTabFamily, normalizeTabFamily, resolveImageRequestEngineId, type TabFamily } from '../utils/engine_taxonomy'
+import { fallbackSamplingDefaultsForTabFamily, isWanTabFamily, normalizeTabFamily, resolveImageRequestEngineId, type TabFamily } from '../utils/engine_taxonomy'
 
 type Status = 'idle' | 'running' | 'stopped' | 'error' | 'done'
 type StopMode = 'immediate' | 'after_current'
@@ -134,7 +134,7 @@ export const useXyzStore = defineStore('xyz', () => {
     if (!tab || typeof tab !== 'object') return false
     const candidate = tab as { type?: unknown; params?: unknown }
     const family = normalizeTabFamily(candidate.type)
-    if (!family || family === 'wan' || family === 'ltx2') return false
+    if (!family || isWanTabFamily(family) || family === 'ltx2') return false
     return Boolean(candidate.params && typeof candidate.params === 'object')
   }
 

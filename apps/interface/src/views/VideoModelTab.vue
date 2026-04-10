@@ -14,11 +14,11 @@ Symbols (top-level; keep in sync; no ghosts):
 - `VideoModelTab` (component): Canonical route-owned video workspace for current video families.
 - `VideoTabType` (type): Supported video tab types rendered by this owner.
 - `tab` (computed): Current tab selected by `tabId`.
-- `videoTabType` (computed): Normalized current video tab type (`wan|ltx2`) for the active branch.
+- `videoTabType` (computed): Normalized current video tab type (`wan22_14b|wan22_5b|ltx2`) for the active branch.
 -->
 
 <template>
-  <section v-if="videoTabType === 'wan'">
+  <section v-if="videoTabType === 'wan22_14b'">
     <VideoModelTabWanRuntime :tab-id="tabId" v-slot="wan">
       <section v-if="wan.tab" class="panels video-panels">
         <div class="panel-stack">
@@ -823,6 +823,505 @@ Symbols (top-level; keep in sync; no ghosts):
     </VideoModelTabWanRuntime>
   </section>
 
+  <section v-else-if="videoTabType === 'wan22_5b'">
+    <VideoModelTabWan22_5bRuntime :tab-id="tabId" v-slot="wan5b">
+      <section v-if="wan5b.tab" class="panels video-panels">
+        <div class="panel-stack">
+          <div class="panel">
+            <div class="panel-header">Prompt</div>
+            <div class="panel-body">
+              <VideoPromptStageCard
+                title="Prompt"
+                :prompt="wan5b.prompt"
+                :negative="wan5b.negativePrompt"
+                :hide-negative="wan5b.hideNegativePrompt"
+                token-engine="wan"
+                :corner-label="wan5b.modeLabel"
+                collapsible
+                :open="wan5b.promptOpen"
+                @update:prompt="wan5b.setPromptText"
+                @update:negative="wan5b.setNegativeText"
+                @update:open="wan5b.togglePrompt"
+              >
+                <template #header-actions>
+                  <button class="btn btn-sm btn-secondary" type="button" @click="wan5b.setShowPromptLoraModal(true)">LoRA</button>
+                </template>
+              </VideoPromptStageCard>
+              <LoraModal
+                :modelValue="wan5b.showPromptLoraModal"
+                :show-negative-target="!wan5b.hideNegativePrompt"
+                @update:modelValue="wan5b.setShowPromptLoraModal"
+                @insert="wan5b.onPromptLoraInsert"
+              />
+
+              <div v-if="wan5b.mode === 'img2vid'" id="wan-guided-init-image" class="mt-3">
+                <InitialImageBlock
+                  :disabled="wan5b.isRunning"
+                  sectionTitle="Img2Vid Parameters"
+                  sectionSubtitle="Initial image"
+                  initImageLabel="Image"
+                  :showFrameGuideEditor="true"
+                  :initImageData="wan5b.video.initImageData"
+                  :initImageName="wan5b.video.initImageName"
+                  :zoomFrameGuide="wan5b.wanInitImageZoomFrameGuide"
+                  @set:initImage="wan5b.onInitImageFile"
+                  @clear:initImage="wan5b.clearInit"
+                  @reject:initImage="wan5b.onInitImageRejected"
+                  @update:zoom-frame-guide="wan5b.onZoomFrameGuideUpdate"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">Generation Parameters</div>
+            <div class="panel-body">
+              <VideoCoreParamsCard
+                title="Video"
+                :width="wan5b.video.width"
+                :height="wan5b.video.height"
+                :width-min="64"
+                :width-max="2048"
+                :width-step="wan5b.dimensionInputStep"
+                :width-input-step="wan5b.dimensionInputStep"
+                :width-nudge-step="wan5b.dimensionInputStep"
+                :height-min="64"
+                :height-max="2048"
+                :height-step="wan5b.dimensionInputStep"
+                :height-input-step="wan5b.dimensionInputStep"
+                :height-nudge-step="wan5b.dimensionInputStep"
+                :frames="wan5b.video.frames"
+                :fps="wan5b.video.fps"
+                :min-frames="9"
+                :max-frames="401"
+                :frame-step="4"
+                :frame-nudge-step="4"
+                frame-rule-label="4n+1"
+                :disabled="wan5b.isRunning"
+                :show-temporal-section="false"
+                @update:width="wan5b.applyWidth"
+                @update:height="wan5b.applyHeight"
+                @update:frames="(value) => wan5b.setVideo({ frames: value })"
+                @update:fps="(value) => wan5b.setVideo({ fps: value })"
+              >
+                <template #width-right>
+                  <NumberStepperInput
+                    :modelValue="wan5b.video.width"
+                    :min="64"
+                    :max="2048"
+                    :step="wan5b.dimensionInputStep"
+                    :nudgeStep="wan5b.dimensionInputStep"
+                    inputClass="cdx-input-w-md"
+                    :disabled="wan5b.isRunning"
+                    @update:modelValue="wan5b.applyWidth"
+                  />
+                  <select
+                    class="ui-input ui-input-sm select-md cdx-input-w-sm"
+                    :disabled="wan5b.isRunning"
+                    :value="wan5b.aspectMode"
+                    aria-label="Aspect ratio"
+                    title="Aspect ratio"
+                    @change="wan5b.onAspectModeChange"
+                  >
+                    <option value="free">Free</option>
+                    <option value="current">Lock</option>
+                    <option value="image" :disabled="wan5b.initImageAspectRatio === null">Image</option>
+                    <option value="16:9">16:9</option>
+                    <option value="1:1">1:1</option>
+                    <option value="9:16">9:16</option>
+                    <option value="4:3">4:3</option>
+                    <option value="3:4">3:4</option>
+                  </select>
+                </template>
+                <template #width-below>
+                  <span v-if="wan5b.aspectMode !== 'free'" class="caption">Keeps ratio while editing width/height.</span>
+                </template>
+                <p v-if="wan5b.mode === 'img2vid'" class="caption mt-2">WAN 2.2 5B img2vid runs only the single-stage solo path.</p>
+              </VideoCoreParamsCard>
+
+              <div class="mt-3">
+                <VideoOutputCard title="Video Output" :show-upscaling-section="true">
+                  <div class="gc-row">
+                    <div class="gc-col">
+                      <label class="label-muted">Format</label>
+                      <select class="select-md" :disabled="wan5b.isRunning" :value="wan5b.video.format" @change="wan5b.setVideo({ format: ($event.target as HTMLSelectElement).value })">
+                        <option value="video/h264-mp4">H.264 MP4</option>
+                        <option value="video/h265-mp4">H.265 MP4</option>
+                        <option value="video/webm">WebM</option>
+                        <option value="image/gif">GIF</option>
+                      </select>
+                    </div>
+                    <div class="gc-col">
+                      <label class="label-muted">Pixel Format</label>
+                      <select class="select-md" :disabled="wan5b.isRunning" :value="wan5b.video.pixFmt" @change="wan5b.setVideo({ pixFmt: ($event.target as HTMLSelectElement).value })">
+                        <option value="yuv420p">yuv420p</option>
+                        <option value="yuv444p">yuv444p</option>
+                        <option value="yuv422p">yuv422p</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div class="gc-row">
+                    <SliderField
+                      class="gc-col gc-col--compact"
+                      label="Loop Count"
+                      :modelValue="wan5b.video.loopCount"
+                      :min="0"
+                      :max="32"
+                      :step="1"
+                      :disabled="wan5b.isRunning"
+                      inputClass="cdx-input-w-md"
+                      @update:modelValue="wan5b.onLoopCountChange"
+                    />
+                    <SliderField
+                      class="gc-col gc-col--compact"
+                      label="CRF"
+                      :modelValue="wan5b.video.crf"
+                      :min="0"
+                      :max="51"
+                      :step="1"
+                      :disabled="wan5b.isRunning"
+                      inputClass="cdx-input-w-md"
+                      @update:modelValue="wan5b.onCrfChange"
+                    />
+                    <SliderField
+                      class="gc-col gc-col--compact"
+                      label="Interpolation (RIFE)"
+                      :modelValue="wan5b.video.interpolationFps"
+                      :min="0"
+                      :max="240"
+                      :step="1"
+                      :disabled="wan5b.isRunning"
+                      inputClass="cdx-input-w-md"
+                      @update:modelValue="wan5b.onInterpolationTargetFpsChange"
+                    >
+                      <template #below>
+                        <span class="caption">{{ wan5b.interpolationCaption }}</span>
+                      </template>
+                    </SliderField>
+                    <div class="gc-col gc-col--presets cdx-video-compact-toggle-column">
+                      <button
+                        :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', wan5b.video.pingpong ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
+                        type="button"
+                        :disabled="wan5b.isRunning"
+                        :aria-pressed="wan5b.video.pingpong"
+                        @click="wan5b.setVideo({ pingpong: !wan5b.video.pingpong })"
+                      >
+                        Ping-pong
+                      </button>
+                      <button
+                        :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', wan5b.video.returnFrames ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
+                        type="button"
+                        :disabled="wan5b.isRunning"
+                        :aria-pressed="wan5b.video.returnFrames"
+                        @click="wan5b.setVideo({ returnFrames: !wan5b.video.returnFrames })"
+                      >
+                        Return frames
+                      </button>
+                    </div>
+                  </div>
+                  <template #upscaling-header-actions>
+                    <span class="cdx-video-badge-experimental">EXPERIMENTAL</span>
+                    <button
+                      :class="[
+                        'btn',
+                        'qs-toggle-btn',
+                        'qs-toggle-btn--sm',
+                        wan5b.video.upscalingEnabled ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off',
+                      ]"
+                      type="button"
+                      :disabled="wan5b.isRunning"
+                      :aria-pressed="wan5b.video.upscalingEnabled"
+                      @click="wan5b.setVideo({ upscalingEnabled: !wan5b.video.upscalingEnabled })"
+                    >
+                      {{ wan5b.video.upscalingEnabled ? 'Enabled' : 'Disabled' }}
+                    </button>
+                  </template>
+                  <template #upscaling>
+                    <div class="gc-row">
+                      <div class="gc-col">
+                        <label class="label-muted">Model</label>
+                        <input
+                          class="ui-input"
+                          type="text"
+                          :disabled="wan5b.isRunning"
+                          :value="wan5b.video.upscalingModel"
+                          @change="wan5b.setVideo({ upscalingModel: ($event.target as HTMLInputElement).value })"
+                        >
+                      </div>
+                      <SliderField
+                        class="gc-col gc-col--compact"
+                        label="Target Resolution"
+                        :modelValue="wan5b.video.upscalingResolution"
+                        :min="16"
+                        :max="4096"
+                        :step="16"
+                        :disabled="wan5b.isRunning"
+                        inputClass="cdx-input-w-md"
+                        @update:modelValue="wan5b.onUpscalingResolutionChange"
+                      />
+                      <SliderField
+                        class="gc-col gc-col--compact"
+                        label="Max Resolution"
+                        :modelValue="wan5b.video.upscalingMaxResolution"
+                        :min="0"
+                        :max="8192"
+                        :step="16"
+                        :disabled="wan5b.isRunning"
+                        inputClass="cdx-input-w-md"
+                        @update:modelValue="wan5b.onUpscalingMaxResolutionChange"
+                      />
+                    </div>
+                    <div class="gc-row">
+                      <SliderField
+                        class="gc-col gc-col--compact"
+                        label="Batch Size"
+                        :modelValue="wan5b.video.upscalingBatchSize"
+                        :min="1"
+                        :max="65"
+                        :step="4"
+                        :disabled="wan5b.isRunning"
+                        inputClass="cdx-input-w-md"
+                        @update:modelValue="wan5b.onUpscalingBatchSizeChange"
+                      />
+                      <SliderField
+                        class="gc-col gc-col--compact"
+                        label="Temporal Overlap"
+                        :modelValue="wan5b.video.upscalingTemporalOverlap"
+                        :min="0"
+                        :max="64"
+                        :step="1"
+                        :disabled="wan5b.isRunning"
+                        inputClass="cdx-input-w-md"
+                        @update:modelValue="wan5b.onUpscalingTemporalOverlapChange"
+                      />
+                      <SliderField
+                        class="gc-col gc-col--compact"
+                        label="Prepend Frames"
+                        :modelValue="wan5b.video.upscalingPrependFrames"
+                        :min="0"
+                        :max="64"
+                        :step="1"
+                        :disabled="wan5b.isRunning"
+                        inputClass="cdx-input-w-md"
+                        @update:modelValue="wan5b.onUpscalingPrependFramesChange"
+                      />
+                    </div>
+                    <div class="gc-row">
+                      <div class="gc-col">
+                        <label class="label-muted">Color Correction</label>
+                        <select
+                          class="select-md"
+                          :disabled="wan5b.isRunning"
+                          :value="wan5b.video.upscalingColorCorrection"
+                          @change="wan5b.setVideo({ upscalingColorCorrection: ($event.target as HTMLSelectElement).value as typeof wan5b.video.upscalingColorCorrection })"
+                        >
+                          <option value="lab">lab</option>
+                          <option value="wavelet">wavelet</option>
+                          <option value="wavelet_adaptive">wavelet_adaptive</option>
+                          <option value="hsv">hsv</option>
+                          <option value="adain">adain</option>
+                          <option value="none">none</option>
+                        </select>
+                      </div>
+                      <SliderField
+                        class="gc-col gc-col--compact"
+                        label="Input Noise"
+                        :modelValue="wan5b.video.upscalingInputNoiseScale"
+                        :min="0"
+                        :max="1"
+                        :step="0.01"
+                        :disabled="wan5b.isRunning"
+                        inputClass="cdx-input-w-md"
+                        @update:modelValue="wan5b.onUpscalingInputNoiseScaleChange"
+                      />
+                      <SliderField
+                        class="gc-col gc-col--compact"
+                        label="Latent Noise"
+                        :modelValue="wan5b.video.upscalingLatentNoiseScale"
+                        :min="0"
+                        :max="1"
+                        :step="0.01"
+                        :disabled="wan5b.isRunning"
+                        inputClass="cdx-input-w-md"
+                        @update:modelValue="wan5b.onUpscalingLatentNoiseScaleChange"
+                      />
+                    </div>
+                    <div v-if="wan5b.video.upscalingEnabled" class="caption">{{ wan5b.upscalingCaption }}</div>
+                  </template>
+                </VideoOutputCard>
+              </div>
+
+              <div class="mt-3">
+                <VideoStageBasicParamsCard
+                  title="Sampling"
+                  :samplers="wan5b.wanStageSamplers"
+                  :schedulers="wan5b.wanStageSchedulers"
+                  :recommended-samplers="wan5b.wanRecommendedSamplers"
+                  :recommended-schedulers="wan5b.wanRecommendedSchedulers"
+                  :sampler="wan5b.sampler"
+                  :scheduler="wan5b.scheduler"
+                  :steps="wan5b.steps"
+                  :cfg-scale="wan5b.cfgScale"
+                  :seed="wan5b.seed"
+                  :steps-max="150"
+                  :cfg-max="30"
+                  :cfg-step="0.5"
+                  :cfg-input-step="0.5"
+                  :cfg-nudge-step="0.5"
+                  :can-reuse-seed="wan5b.canReuseSeed"
+                  :disabled="wan5b.isRunning"
+                  @update:sampler="wan5b.setSamplerValue"
+                  @update:scheduler="wan5b.setSchedulerValue"
+                  @update:steps="wan5b.setStepsValue"
+                  @update:cfgScale="wan5b.setCfgScaleValue"
+                  @update:seed="wan5b.setSeedValue"
+                  @randomize-seed="wan5b.randomizeSeed"
+                  @reuse-seed="wan5b.reuseSeed"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel-stack panel-stack--sticky">
+          <RunCard
+            :isRunning="wan5b.isRunning"
+            :generateDisabled="wan5b.isRunning || !wan5b.canRunGeneration"
+            :generateTitle="wan5b.generateTitle"
+            generateId="wan22-5b-generate"
+            :showBatchControls="false"
+            @generate="wan5b.onGenerateClick"
+            @cancel="wan5b.cancel()"
+          >
+            <template #header-right>
+              <div class="results-header-actions">
+                <button v-if="wan5b.history.length && !wan5b.isRunning" class="btn btn-sm btn-secondary" type="button" :disabled="wan5b.isRunning" @click="wan5b.reuseLast">
+                  Reuse last
+                </button>
+              </div>
+            </template>
+
+            <div v-if="wan5b.resumeNotice || wan5b.copyNotice" class="caption">{{ wan5b.resumeNotice || wan5b.copyNotice }}</div>
+            <RunSummaryChips class="video-results-summary" :text="wan5b.runSummary" />
+            <RunProgressStatus
+              v-if="wan5b.isRunning"
+              :stage="wan5b.progress.stage"
+              :percent="wan5b.progress.percent"
+              :step="wan5b.progress.step"
+              :total-steps="wan5b.progress.totalSteps"
+              :eta-seconds="wan5b.progress.etaSeconds"
+              :show-progress-bar="true"
+            />
+            <RunProgressStatus
+              v-else-if="wan5b.errorMessage"
+              variant="error"
+              title="Run failed"
+              :message="wan5b.errorMessage"
+              :show-progress-bar="false"
+            />
+          </RunCard>
+
+          <GenerationResultsPanel class="video-results-panel" showHistory :showMedia="Boolean(wan5b.videoUrl)" :showInfo="Boolean(wan5b.info)">
+            <template #header-right>
+              <button class="btn btn-sm btn-outline" type="button" :disabled="wan5b.workflowBusy" @click="wan5b.sendToWorkflows">
+                {{ wan5b.workflowBusy ? 'Saving…' : 'Save snapshot' }}
+              </button>
+              <button class="btn btn-sm btn-outline" type="button" @click="wan5b.copyCurrentParams">Copy params</button>
+            </template>
+
+            <template #history-actions>
+              <button class="btn btn-sm btn-ghost" type="button" title="Clear history" :disabled="!wan5b.history.length || wan5b.isRunning" @click="wan5b.clearHistory">
+                Clear
+              </button>
+            </template>
+
+            <template #history>
+              <ResultsHistoryStrip
+                :items="wan5b.history"
+                :selectedTaskId="wan5b.selectedTaskId"
+                :formatTitle="wan5b.formatHistoryTitle"
+                :toDataUrl="wan5b.toDataUrl"
+                @select="wan5b.onSelectHistoryStripItem"
+              />
+
+              <details v-if="wan5b.diffText" class="accordion mt-2">
+                <summary>Diff vs previous run</summary>
+                <div class="accordion-body">
+                  <pre class="text-xs break-words">{{ wan5b.diffText }}</pre>
+                </div>
+              </details>
+            </template>
+
+            <template #media-actions>
+              <button v-if="wan5b.videoUrl" class="btn btn-sm btn-outline" type="button" @click="wan5b.openResultVideoZoom">Zoom</button>
+              <a v-if="wan5b.videoUrl" class="btn btn-sm btn-outline" :href="wan5b.videoUrl" target="_blank" rel="noreferrer">Open</a>
+            </template>
+
+            <template #media>
+              <video class="w-full rounded" :src="wan5b.videoUrl || ''" controls @dblclick.prevent.stop />
+              <p class="caption mt-1">Tip: if playback fails, install ffmpeg and ensure CODEX_ROOT/output is writable.</p>
+            </template>
+
+            <template #viewer>
+              <ResultViewer mode="video" :frames="wan5b.framesResult" :toDataUrl="wan5b.toDataUrl" emptyText="No results yet.">
+                <template #empty>
+                  <div class="results-empty-state">
+                    <div class="results-empty-title">
+                      <template v-if="wan5b.isRunning">Generating…</template>
+                      <template v-else-if="wan5b.videoUrl">Frames not returned</template>
+                      <template v-else>No results yet</template>
+                    </div>
+                    <div v-if="wan5b.videoUrl" class="caption">Enable “Return frames” in Video Output to include frames in the result payload.</div>
+                    <div v-else-if="!wan5b.isRunning" class="caption">Generate to see results here.</div>
+                  </div>
+                </template>
+              </ResultViewer>
+            </template>
+
+            <template #info-actions>
+              <button class="btn btn-sm btn-outline" type="button" @click="wan5b.copyInfo">Copy info</button>
+            </template>
+
+            <template #info>
+              <pre class="text-xs break-words">{{ wan5b.formatJson(wan5b.info) }}</pre>
+            </template>
+
+            <template #after-viewer>
+              <VideoZoomOverlay :modelValue="wan5b.videoZoomOpen" :src="wan5b.videoUrl || ''" aria-label="Zoomed WAN 2.2 5B result video" @update:modelValue="wan5b.setVideoZoomOpen" />
+            </template>
+          </GenerationResultsPanel>
+        </div>
+
+        <RunHistoryDetailsModal
+          :modelValue="wan5b.historyDetailsOpen"
+          :title="wan5b.historyDetailsTitle"
+          :preview-url="wan5b.historyDetailsImageUrl"
+          :preview-alt="wan5b.historyDetailsTitle"
+          :mode-label="wan5b.historyDetailsModeLabel"
+          :created-at-label="wan5b.historyDetailsCreatedAtLabel"
+          :status="wan5b.historyDetailsItem?.status || ''"
+          :task-id="wan5b.historyDetailsItem?.taskId || ''"
+          :summary="wan5b.historyDetailsItem?.summary || ''"
+          :error-message="wan5b.historyDetailsItem?.errorMessage || ''"
+          :params-snapshot="wan5b.historyDetailsItem?.paramsSnapshot"
+          :sections="wan5b.historyDetailsSections"
+          :load-disabled="!wan5b.historyDetailsItem || wan5b.isRunning || wan5b.historyLoadingTaskId === wan5b.historyDetailsItem.taskId"
+          :load-label="wan5b.historyDetailsItem && wan5b.historyLoadingTaskId === wan5b.historyDetailsItem.taskId ? 'Loading…' : 'Load'"
+          :apply-disabled="!wan5b.historyDetailsItem || wan5b.isRunning"
+          :copy-disabled="!wan5b.historyDetailsItem || wan5b.isRunning"
+          @update:modelValue="wan5b.setHistoryDetailsOpen"
+          @load="wan5b.onLoadHistoryDetails"
+          @apply="wan5b.onApplyHistoryDetails"
+          @copy="wan5b.onCopyHistoryDetails"
+        />
+      </section>
+      <section v-else>
+        <div class="panel"><div class="panel-body">Tab not found.</div></div>
+      </section>
+    </VideoModelTabWan22_5bRuntime>
+  </section>
+
   <section v-else-if="videoTabType === 'ltx2'">
     <VideoModelTabLtxRuntime :tab-id="tabId" v-slot="ltx">
       <section v-if="ltx.tab && ltx.params" class="panels video-panels">
@@ -1102,7 +1601,9 @@ import NumberStepperInput from '../components/ui/NumberStepperInput.vue'
 import SliderField from '../components/ui/SliderField.vue'
 import VideoZoomOverlay from '../components/ui/VideoZoomOverlay.vue'
 import { useModelTabsStore, type BaseTabType } from '../stores/model_tabs'
+import { isWanTabFamily } from '../utils/engine_taxonomy'
 import VideoModelTabLtxRuntime from './video-model/VideoModelTabLtxRuntime.vue'
+import VideoModelTabWan22_5bRuntime from './video-model/VideoModelTabWan22_5bRuntime.vue'
 import VideoModelTabWanRuntime from './video-model/VideoModelTabWanRuntime.vue'
 
 const props = defineProps<{ tabId: string }>()
@@ -1112,11 +1613,11 @@ const store = useModelTabsStore()
 const tabId = computed(() => props.tabId)
 const tab = computed(() => store.tabs.find((entry) => entry.id === tabId.value) || null)
 
-type VideoTabType = Extract<BaseTabType, 'wan' | 'ltx2'>
+type VideoTabType = Extract<BaseTabType, 'wan22_14b' | 'wan22_5b' | 'ltx2'>
 
 const videoTabType = computed<VideoTabType | null>(() => {
   const value = tab.value?.type
-  if (value === 'wan' || value === 'ltx2') return value
+  if (value === 'ltx2' || isWanTabFamily(value)) return value
   return null
 })
 

@@ -16,7 +16,7 @@ Symbols (top-level; keep in sync; no ghosts):
 */
 
 import type { ModelInfo } from '../api/types'
-import type { TabFamily } from './engine_taxonomy'
+import { isWanTabFamily, type TabFamily } from './engine_taxonomy'
 
 function normalizePath(path: string): string {
   return String(path || '').replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, '').toLowerCase().trim()
@@ -25,7 +25,7 @@ function normalizePath(path: string): string {
 export function enginePrefixForFamily(
   family: TabFamily,
 ): 'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'wan22' | 'zimage' | 'anima' | 'ltx2' {
-  if (family === 'wan') return 'wan22'
+  if (isWanTabFamily(family)) return 'wan22'
   if (family === 'chroma') return 'flux1'
   if (family === 'flux2') return 'flux2'
   if (family === 'anima') return 'anima'
@@ -70,7 +70,7 @@ export function modelMatchesFamily(
   if (family === 'flux2') return title.includes('flux2') || title.includes('flux.2') || filename.includes('flux2') || filename.includes('flux.2')
   if (family === 'flux1') return false
   if (family === 'chroma') return title.includes('chroma') || filename.includes('chroma')
-  if (family === 'wan') return title.includes('wan') || filename.includes('wan')
+  if (isWanTabFamily(family)) return title.includes('wan') || filename.includes('wan')
   if (family === 'ltx2') return title.includes('ltx') || filename.includes('ltx')
   if (family === 'zimage') {
     return (

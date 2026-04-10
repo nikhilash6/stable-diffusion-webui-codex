@@ -6,13 +6,13 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Renderless WAN runtime helper for the canonical video tab view.
-Mounts the existing WAN tab runtime under a view-local seam and exposes reactive slot props to `VideoModelTab.vue`,
+Purpose: Renderless WAN 2.2 14B runtime helper for the canonical video tab view.
+Mounts the exact 14B WAN tab runtime under a view-local seam and exposes reactive slot props to `VideoModelTab.vue`,
 while keeping the route-owned video view as the only live body/layout owner and routing shared Results/history actions through the current
 workflow save-or-update owner seam.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `VideoModelTabWanRuntime` (component): Renderless WAN runtime helper for `VideoModelTab.vue`.
+- `VideoModelTabWanRuntime` (component): Renderless WAN 2.2 14B runtime helper for `VideoModelTab.vue`.
 - `GuidedStep` (type): Guided-generation step definition (message + CSS selector to highlight/focus).
 - `AspectMode` (type): Aspect ratio mode presets for width/height controls.
 - `setHighPromptText` / `setHighNegativeText` / `setLowPromptText` / `setLowNegativeText` (functions): Prompt-field bridge setters exposed to the parent slot.
@@ -71,12 +71,14 @@ onMounted(() => {
     })
 })
 
-const tab = computed<TabByType<'wan'> | null>(() => {
+type WanTab = TabByType<'wan22_14b'>
+
+const tab = computed<WanTab | null>(() => {
   const candidate = store.tabs.find((entry) => entry.id === props.tabId) || null
-  if (!candidate || candidate.type !== 'wan') return null
-  return candidate as TabByType<'wan'>
+  if (!candidate || candidate.type !== 'wan22_14b') return null
+  return candidate as WanTab
 })
-const wanParams = computed<TabByType<'wan'>['params'] | null>(() => tab.value?.params || null)
+const wanParams = computed<WanTab['params'] | null>(() => tab.value?.params || null)
 const lightx2v = computed<boolean>(() => Boolean(wanParams.value?.lightx2v))
 
 function defaultStage(): WanStageParams {
@@ -996,7 +998,7 @@ const {
   getTab: () => tab.value ?? null,
   getWorkflowParamsSnapshot: () => (tab.value?.params as Record<string, unknown> | null) ?? null,
   getCopyCurrentParamsSnapshot: () => buildCurrentSnapshot(),
-  resolveEngineSemantics: (currentTab) => (currentTab.type === 'wan' ? 'wan22' : currentTab.type),
+  resolveEngineSemantics: () => 'wan22_14b',
   copyCurrentParamsMessage: 'Copied current params JSON.',
 })
 const historyDetailsOpen = ref(false)

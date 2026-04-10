@@ -15,10 +15,9 @@ fields are dropped during hydration instead of being preserved as rename glue. H
 (`latent:*` / `spandrel:*`) for hires-fix wiring, and img2img UI keeps an explicit resize/upscaler layout state (`img2imgResizeMode`,
 `img2imgUpscaler`) decoupled from backend hires dispatch. Image automation, SUPIR mode, and IP-Adapter UI state now stay under canonical owners
 (`runAction`, `initSource`, `supir`, `ipAdapter`) instead of drifting into flat helper fields. The nested `supir` owner now also carries the public restore
-window control (`restoreCfgSTmin`) as normalized UI state. WAN video normalization persists no-stretch img2vid guide controls
-(`img2vidImageScale`, `img2vidCropOffsetX`, `img2vidCropOffsetY`) with range normalization, clamps WAN stage schedulers to canonical `simple`,
-backfills blank WAN stage samplers to explicit `uni-pc bh2`, and persists both scheduler/sampler backfills through the normal tab-persistence
-queue without blocking tab hydration. FLUX.2 tabs keep the truthful Klein 4B / base-4B slice contract by capping `textEncoders` to one
+window control (`restoreCfgSTmin`) as normalized UI state. WAN 2.2 tab state is now split by exact lane: `wan22_14b` keeps the high/low two-stage
+owners with sampler/scheduler backfill, while `wan22_5b` owns a single-stage `stage` selector plus top-level prompt/sampler/seed fields and the
+shared no-stretch img2vid guide controls (`img2vidImageScale`, `img2vidCropOffsetX`, `img2vidCropOffsetY`). FLUX.2 tabs keep the truthful Klein 4B / base-4B slice contract by capping `textEncoders` to one
 `flux2/*` Qwen selector without overriding shared img2img denoise state. LTX normalization treats `mode` as the canonical owner of txt2vid/img2vid,
 persists explicit `executionProfile` state, and leaves stale/blank profile values visible until the active checkpoint metadata or user choice resolves
 them truthfully without silently rewriting stored raw profile ids.
@@ -72,8 +71,9 @@ Symbols (top-level; keep in sync; no ghosts):
 - `asParamsRecord` (function): Explicit boundary cast helper from typed tab params to persisted `Record<string, unknown>`.
 - `normalizeWanFrameCount` (function): Clamps/snap-normalizes WAN frame counts to the `4n+1` domain.
 - `normalizeWanVideoParams` (function): Sanitizes WAN video nested params (frames/window/attention controls) with `img2vidMode` as source of truth.
-- `normalizeWanParams` (function): Applies WAN-specific nested merge normalization for `high/low/video/assets` params, enforcing canonical WAN stage scheduler `simple`.
-- `shouldPersistWanStageSamplingBackfill` (function): Detects persisted WAN params requiring High/Low stage sampler/scheduler migration (`sampler='uni-pc bh2'`, `scheduler='simple'`).
+- `normalizeWan14bParams` (function): Applies exact WAN 14B nested merge normalization for `high/low/video/assets`, enforcing canonical stage scheduler `simple`.
+- `normalizeWan5bParams` (function): Applies exact WAN 5B single-stage normalization for `stage/video/assets` plus top-level prompt/sampler/seed owners.
+- `shouldPersistWan14bStageSamplingBackfill` (function): Detects persisted WAN 14B params requiring High/Low stage sampler/scheduler migration (`sampler='uni-pc bh2'`, `scheduler='simple'`).
 - `buildImageTopLevelBackfillPatch` (function): Builds a missing-top-level-only image-tab backfill patch from the normalized owner shape so hydration can persist absent canonical keys without widening into unrelated nested drift.
 - `normalizeImageParams` (function): Applies image-tab nested merge normalization (`hires/refiner`) with sampler/scheduler and strict inpaint-mode reset.
 - `normalizeParamsForType` (function): Normalizes raw params payload based on tab type (shape checking; discards invalid fields).
@@ -98,7 +98,7 @@ import type { ApiTab } from '../api/types'
 import type { HiresFormState, RefinerFormState, SwapModelFormState, SwapStageFormState } from '../api/payloads'
 import { type EngineType, getEngineConfig, getEngineDefaults } from './engine_config'
 import { useEngineCapabilitiesStore } from './engine_capabilities'
-import { fallbackSamplingDefaultsForTabFamily, normalizeTabFamily, type TabFamily } from '../utils/engine_taxonomy'
+import { fallbackSamplingDefaultsForTabFamily, isWanTabFamily, normalizeTabFamily, type TabFamily } from '../utils/engine_taxonomy'
 import { DEFAULT_IMG2IMG_RESIZE_MODE, normalizeImg2ImgResizeMode, type Img2ImgResizeMode } from '../utils/img2img_resize'
 import { parseInpaintMode } from '../utils/image_params'
 import {
@@ -110,7 +110,10 @@ import {
 import { normalizeWanImg2VidImageScale } from '../utils/wan_img2vid_frame_projection'
 
 export type BaseTabType = ApiTab['type']
-export type ImageTabType = Exclude<BaseTabType, 'wan' | 'ltx2'>
+export type ImageTabType = Exclude<BaseTabType, 'wan22_14b' | 'wan22_5b' | 'ltx2'>
+export type WanTabType = Extract<BaseTabType, 'wan22_14b' | 'wan22_5b'>
+export type Wan14bTabType = Extract<BaseTabType, 'wan22_14b'>
+export type Wan5bTabType = Extract<BaseTabType, 'wan22_5b'>
 
 export interface BaseTabMeta {
   createdAt: string
@@ -238,7 +241,7 @@ export interface LtxTabParams {
   videoReturnFrames: boolean
 }
 
-export type WanTabParams = Record<string, unknown> & {
+export type Wan14bTabParams = Record<string, unknown> & {
   schemaVersion: number
   high: WanStageParams
   low: WanStageParams
@@ -246,6 +249,26 @@ export type WanTabParams = Record<string, unknown> & {
   assets: WanAssetsParams
   lightx2v: boolean
   lowFollowsHigh: boolean
+}
+
+export type Wan5bStageParams = Record<string, unknown> & {
+  modelDir: string
+  loras: WanStageLoraParams[]
+  flowShift?: number
+}
+
+export type Wan5bTabParams = Record<string, unknown> & {
+  schemaVersion: number
+  prompt: string
+  negativePrompt: string
+  stage: Wan5bStageParams
+  video: WanVideoParams
+  assets: WanAssetsParams
+  sampler: string
+  scheduler: string
+  steps: number
+  cfgScale: number
+  seed: number
 }
 
 export interface BaseTab {
@@ -402,7 +425,8 @@ export type TabParamsByType = {
   chroma: ImageBaseParams
   anima: ImageBaseParams
   ltx2: LtxTabParams
-  wan: WanTabParams
+  wan22_14b: Wan14bTabParams
+  wan22_5b: Wan5bTabParams
 }
 
 export type TabByType<T extends BaseTabType = BaseTabType> = Omit<BaseTab, 'type' | 'params'> & {
@@ -472,7 +496,7 @@ const IMAGE_PARAM_SPARSE_PERSIST_DEFAULT_KEYS = new Set<string>([
   'inpaintMode',
 ])
 
-const WAN_PARAM_TOP_LEVEL_KEYS = new Set<string>([
+const WAN14B_PARAM_TOP_LEVEL_KEYS = new Set<string>([
   'schemaVersion',
   'high',
   'low',
@@ -480,6 +504,20 @@ const WAN_PARAM_TOP_LEVEL_KEYS = new Set<string>([
   'assets',
   'lightx2v',
   'lowFollowsHigh',
+])
+
+const WAN5B_PARAM_TOP_LEVEL_KEYS = new Set<string>([
+  'schemaVersion',
+  'prompt',
+  'negativePrompt',
+  'stage',
+  'video',
+  'assets',
+  'sampler',
+  'scheduler',
+  'steps',
+  'cfgScale',
+  'seed',
 ])
 
 const LTX_PARAM_TOP_LEVEL_KEYS = new Set<string>([
@@ -540,7 +578,7 @@ function defaultParams<T extends BaseTabType>(
   type: T,
   opts?: { sampler?: string; scheduler?: string },
 ): TabParamsByType[T] {
-  if (type === 'wan') {
+  if (type === 'wan22_14b' || type === 'wan22_5b') {
     const stage = (): WanStageParams => ({
       modelDir: '',
       prompt: '',
@@ -593,16 +631,35 @@ function defaultParams<T extends BaseTabType>(
       upscalingLatentNoiseScale: 0,
     }
     const assets: WanAssetsParams = { metadata: '', textEncoder: '', vae: '' }
-    const wanDefaults: TabParamsByType['wan'] = {
+    if (type === 'wan22_14b') {
+      const wanDefaults: Wan14bTabParams = {
+        schemaVersion: TAB_PARAMS_SCHEMA_VERSION,
+        high: stage(),
+        low: stage(),
+        video,
+        assets,
+        lightx2v: false,
+        lowFollowsHigh: false,
+      }
+      return wanDefaults as TabParamsByType[T]
+    }
+    const wan5bDefaults: Wan5bTabParams = {
       schemaVersion: TAB_PARAMS_SCHEMA_VERSION,
-      high: stage(),
-      low: stage(),
+      prompt: '',
+      negativePrompt: '',
+      stage: {
+        modelDir: '',
+        loras: [],
+      },
       video,
       assets,
-      lightx2v: false,
-      lowFollowsHigh: false,
+      sampler: 'uni-pc bh2',
+      scheduler: 'simple',
+      steps: 30,
+      cfgScale: 7,
+      seed: -1,
     }
-    return wanDefaults as TabParamsByType[T]
+    return wan5bDefaults as TabParamsByType[T]
   }
 
   if (type === 'ltx2') {
@@ -764,7 +821,7 @@ export function defaultImageParamsForType(
   type: BaseTabType,
   opts?: { sampler?: string; scheduler?: string },
 ): ImageBaseParams {
-  if (type === 'wan' || type === 'ltx2') {
+  if (isWanTabFamily(type) || type === 'ltx2') {
     const msg = `defaultImageParamsForType received '${type}'; expected an image tab type.`
     console.error(`[model_tabs] ${msg}`, { type })
     throw new Error(msg)
@@ -894,15 +951,15 @@ function migrateImageParamsPatch(rawPatch: Record<string, unknown>): {
   }
 }
 
-function migrateWanParamsPatch(rawPatch: Record<string, unknown>): {
-  patch: Partial<WanTabParams>
+function migrateWan14bParamsPatch(rawPatch: Record<string, unknown>): {
+  patch: Partial<Wan14bTabParams>
   droppedUnknownKeys: string[]
   fromVersion: number | null
 } {
   const patch: Record<string, unknown> = {}
   const droppedUnknownKeys: string[] = []
   for (const [key, value] of Object.entries(rawPatch)) {
-    if (!WAN_PARAM_TOP_LEVEL_KEYS.has(key)) {
+    if (!WAN14B_PARAM_TOP_LEVEL_KEYS.has(key)) {
       droppedUnknownKeys.push(key)
       continue
     }
@@ -911,7 +968,30 @@ function migrateWanParamsPatch(rawPatch: Record<string, unknown>): {
   const fromVersion = parseParamsSchemaVersion(rawPatch.schemaVersion)
   patch.schemaVersion = TAB_PARAMS_SCHEMA_VERSION
   return {
-    patch: patch as Partial<WanTabParams>,
+    patch: patch as Partial<Wan14bTabParams>,
+    droppedUnknownKeys,
+    fromVersion,
+  }
+}
+
+function migrateWan5bParamsPatch(rawPatch: Record<string, unknown>): {
+  patch: Partial<Wan5bTabParams>
+  droppedUnknownKeys: string[]
+  fromVersion: number | null
+} {
+  const patch: Record<string, unknown> = {}
+  const droppedUnknownKeys: string[] = []
+  for (const [key, value] of Object.entries(rawPatch)) {
+    if (!WAN5B_PARAM_TOP_LEVEL_KEYS.has(key)) {
+      droppedUnknownKeys.push(key)
+      continue
+    }
+    patch[key] = value
+  }
+  const fromVersion = parseParamsSchemaVersion(rawPatch.schemaVersion)
+  patch.schemaVersion = TAB_PARAMS_SCHEMA_VERSION
+  return {
+    patch: patch as Partial<Wan5bTabParams>,
     droppedUnknownKeys,
     fromVersion,
   }
@@ -1293,49 +1373,50 @@ function normalizeWanVideoParams(raw: Partial<WanVideoParams>, defaults: WanVide
   }
 }
 
-function normalizeWanParams(raw: unknown, defaults: TabParamsByType['wan']): TabParamsByType['wan'] {
+function normalizeWan14bStageParams(stagePatch: unknown, stageDefaults: WanStageParams): WanStageParams {
+  const stagePatchRecord = asRecordObject(stagePatch)
+  const merged: WanStageParams = {
+    ...stageDefaults,
+    ...(stagePatchRecord as Partial<WanStageParams>),
+  }
+  const sampler = typeof merged.sampler === 'string' ? merged.sampler.trim() : ''
+  merged.sampler = sampler || stageDefaults.sampler
+  const scheduler = typeof merged.scheduler === 'string' ? merged.scheduler.trim().toLowerCase() : ''
+  merged.scheduler = scheduler === 'simple' ? scheduler : 'simple'
+  const normalizedStage: WanStageParams = {
+    modelDir: merged.modelDir,
+    prompt: merged.prompt,
+    negativePrompt: merged.negativePrompt,
+    sampler: merged.sampler,
+    scheduler: merged.scheduler,
+    steps: merged.steps,
+    cfgScale: merged.cfgScale,
+    seed: merged.seed,
+    loras: Array.isArray(merged.loras) ? merged.loras : stageDefaults.loras,
+  }
+  if (typeof merged.flowShift === 'number' && Number.isFinite(merged.flowShift)) {
+    normalizedStage.flowShift = merged.flowShift
+  }
+  return normalizedStage
+}
+
+function normalizeWan14bParams(raw: unknown, defaults: Wan14bTabParams): Wan14bTabParams {
   const rawPatch = asRecordObject(raw)
-  const migration = migrateWanParamsPatch(rawPatch)
+  const migration = migrateWan14bParamsPatch(rawPatch)
   if (migration.droppedUnknownKeys.length > 0) {
     console.warn(
-      `[model_tabs] Dropping stale WAN params key(s) during migration: ${migration.droppedUnknownKeys.join(', ')}`,
+      `[model_tabs] Dropping stale WAN 14B params key(s) during migration: ${migration.droppedUnknownKeys.join(', ')}`,
       { fromVersion: migration.fromVersion, toVersion: TAB_PARAMS_SCHEMA_VERSION },
     )
   }
   const patch = migration.patch
-  const normalizeWanStageParams = (stagePatch: unknown, stageDefaults: WanStageParams): WanStageParams => {
-    const stagePatchRecord = asRecordObject(stagePatch)
-    const merged: WanStageParams = {
-      ...stageDefaults,
-      ...(stagePatchRecord as Partial<WanStageParams>),
-    }
-    const sampler = typeof merged.sampler === 'string' ? merged.sampler.trim() : ''
-    merged.sampler = sampler || stageDefaults.sampler
-    const scheduler = typeof merged.scheduler === 'string' ? merged.scheduler.trim().toLowerCase() : ''
-    merged.scheduler = scheduler === 'simple' ? scheduler : 'simple'
-    const normalizedStage: WanStageParams = {
-      modelDir: merged.modelDir,
-      prompt: merged.prompt,
-      negativePrompt: merged.negativePrompt,
-      sampler: merged.sampler,
-      scheduler: merged.scheduler,
-      steps: merged.steps,
-      cfgScale: merged.cfgScale,
-      seed: merged.seed,
-      loras: Array.isArray(merged.loras) ? merged.loras : stageDefaults.loras,
-    }
-    if (typeof merged.flowShift === 'number' && Number.isFinite(merged.flowShift)) {
-      normalizedStage.flowShift = merged.flowShift
-    }
-    return normalizedStage
-  }
   const videoPatch = asRecordObject(patch.video)
   const assetsPatch = asRecordObject(patch.assets)
   const normalizedVideo = normalizeWanVideoParams(videoPatch as Partial<WanVideoParams>, defaults.video)
   return {
     ...defaults,
-    high: normalizeWanStageParams(patch.high, defaults.high),
-    low: normalizeWanStageParams(patch.low, defaults.low),
+    high: normalizeWan14bStageParams(patch.high, defaults.high),
+    low: normalizeWan14bStageParams(patch.low, defaults.low),
     video: normalizedVideo,
     assets: { ...defaults.assets, ...(assetsPatch as Partial<WanAssetsParams>) },
     lightx2v: normalizeBoolean(patch.lightx2v, defaults.lightx2v),
@@ -1344,7 +1425,55 @@ function normalizeWanParams(raw: unknown, defaults: TabParamsByType['wan']): Tab
   }
 }
 
-function shouldPersistWanStageSamplingBackfill(raw: unknown): boolean {
+function normalizeWan5bStageParams(stagePatch: unknown, stageDefaults: Wan5bStageParams): Wan5bStageParams {
+  const stagePatchRecord = asRecordObject(stagePatch)
+  const merged: Wan5bStageParams = {
+    ...stageDefaults,
+    ...(stagePatchRecord as Partial<Wan5bStageParams>),
+  }
+  const normalizedStage: Wan5bStageParams = {
+    modelDir: String(merged.modelDir || '').trim(),
+    loras: Array.isArray(merged.loras) ? merged.loras : stageDefaults.loras,
+  }
+  if (typeof merged.flowShift === 'number' && Number.isFinite(merged.flowShift)) {
+    normalizedStage.flowShift = merged.flowShift
+  }
+  return normalizedStage
+}
+
+function normalizeWan5bParams(raw: unknown, defaults: Wan5bTabParams): Wan5bTabParams {
+  const rawPatch = asRecordObject(raw)
+  const migration = migrateWan5bParamsPatch(rawPatch)
+  if (migration.droppedUnknownKeys.length > 0) {
+    console.warn(
+      `[model_tabs] Dropping stale WAN 5B params key(s) during migration: ${migration.droppedUnknownKeys.join(', ')}`,
+      { fromVersion: migration.fromVersion, toVersion: TAB_PARAMS_SCHEMA_VERSION },
+    )
+  }
+  const patch = migration.patch
+  const videoPatch = asRecordObject(patch.video)
+  const assetsPatch = asRecordObject(patch.assets)
+  const sampler = typeof patch.sampler === 'string' ? patch.sampler.trim() : ''
+  const scheduler = typeof patch.scheduler === 'string' ? patch.scheduler.trim().toLowerCase() : ''
+  const steps = Number(patch.steps)
+  const seed = Number(patch.seed)
+  return {
+    ...defaults,
+    prompt: typeof patch.prompt === 'string' ? patch.prompt : defaults.prompt,
+    negativePrompt: typeof patch.negativePrompt === 'string' ? patch.negativePrompt : defaults.negativePrompt,
+    stage: normalizeWan5bStageParams(patch.stage, defaults.stage),
+    video: normalizeWanVideoParams(videoPatch as Partial<WanVideoParams>, defaults.video),
+    assets: { ...defaults.assets, ...(assetsPatch as Partial<WanAssetsParams>) },
+    sampler: sampler || defaults.sampler,
+    scheduler: scheduler === 'simple' ? scheduler : defaults.scheduler,
+    steps: Number.isFinite(steps) ? Math.max(1, Math.trunc(steps)) : defaults.steps,
+    cfgScale: clampFiniteNumber(patch.cfgScale, defaults.cfgScale, 0, Number.POSITIVE_INFINITY),
+    seed: Number.isFinite(seed) ? Math.trunc(seed) : defaults.seed,
+    schemaVersion: TAB_PARAMS_SCHEMA_VERSION,
+  }
+}
+
+function shouldPersistWan14bStageSamplingBackfill(raw: unknown): boolean {
   const patch = asRecordObject(raw)
   const high = asRecordObject(patch.high)
   const low = asRecordObject(patch.low)
@@ -1565,8 +1694,11 @@ function normalizeParamsForType<T extends BaseTabType>(
   defaultsOverride?: TabParamsByType[T],
 ): TabParamsByType[T] {
   const defaults = defaultsOverride ?? defaultParams(type)
-  if (type === 'wan') {
-    return normalizeWanParams(raw, defaults as TabParamsByType['wan']) as TabParamsByType[T]
+  if (type === 'wan22_14b') {
+    return normalizeWan14bParams(raw, defaults as Wan14bTabParams) as TabParamsByType[T]
+  }
+  if (type === 'wan22_5b') {
+    return normalizeWan5bParams(raw, defaults as Wan5bTabParams) as TabParamsByType[T]
   }
   if (type === 'ltx2') {
     return normalizeLtxParams(raw, defaults as TabParamsByType['ltx2']) as TabParamsByType[T]
@@ -1598,7 +1730,7 @@ function normalizeTab(
   }
 }
 
-const BASE_REQUIRED_TYPES: BaseTabType[] = ['sd15', 'sdxl', 'flux1', 'flux2', 'chroma', 'zimage', 'wan']
+const BASE_REQUIRED_TYPES: BaseTabType[] = ['sd15', 'sdxl', 'flux1', 'flux2', 'chroma', 'zimage', 'wan22_14b', 'wan22_5b']
 
 export function requiredTypesFromCapabilities(engines: Record<string, unknown>): BaseTabType[] {
   const types: BaseTabType[] = [...BASE_REQUIRED_TYPES]
@@ -1641,7 +1773,7 @@ export const useModelTabsStore = defineStore('modelTabs', () => {
   type PersistSerializationPhase = 'snapshot' | 'patch' | 'persist' | 'rollback'
 
   function syncImageSparsePersistHints(tabId: string, tabType: BaseTabType, rawParams: unknown): void {
-    if (tabType === 'wan' || tabType === 'ltx2') {
+    if (isWanTabFamily(tabType) || tabType === 'ltx2') {
       imageSparsePersistMissingKeysByTabId.delete(tabId)
       return
     }
@@ -1678,7 +1810,7 @@ export const useModelTabsStore = defineStore('modelTabs', () => {
     tabType: BaseTabType,
     patch: Record<string, unknown>,
   ): void {
-    if (tabType === 'wan' || tabType === 'ltx2') return
+    if (isWanTabFamily(tabType) || tabType === 'ltx2') return
     for (const key of IMAGE_PARAM_SPARSE_PERSIST_DEFAULT_KEYS) {
       if (Object.prototype.hasOwnProperty.call(patch, key)) {
         pending.explicitImagePersistKeys.add(key)
@@ -1692,7 +1824,7 @@ export const useModelTabsStore = defineStore('modelTabs', () => {
     params: Record<string, unknown>,
     explicitKeys: ReadonlySet<string>,
   ): Record<string, unknown> {
-    if (tabType === 'wan' || tabType === 'ltx2') return params
+    if (isWanTabFamily(tabType) || tabType === 'ltx2') return params
     const missingKeys = imageSparsePersistMissingKeysByTabId.get(tabId)
     if (!missingKeys || missingKeys.size === 0) return params
     let prunedParams = params
@@ -1714,7 +1846,7 @@ export const useModelTabsStore = defineStore('modelTabs', () => {
     tabType: BaseTabType,
     explicitKeys: ReadonlySet<string>,
   ): string[] | null {
-    if (tabType === 'wan' || tabType === 'ltx2') {
+    if (isWanTabFamily(tabType) || tabType === 'ltx2') {
       imageSparsePersistMissingKeysByTabId.delete(tabId)
       return null
     }
@@ -2047,7 +2179,7 @@ export const useModelTabsStore = defineStore('modelTabs', () => {
   }
 
   function preferredSamplingDefaultsForType(type: BaseTabType): { sampler: string; scheduler: string } | null {
-    if (type === 'wan') return null
+    if (isWanTabFamily(type)) return null
     const capsStore = useEngineCapabilitiesStore()
     const fallback = fallbackSamplingDefaultsForTabFamily(type as TabFamily)
     return capsStore.resolveSamplingDefaults(type, {
@@ -2066,7 +2198,7 @@ export const useModelTabsStore = defineStore('modelTabs', () => {
     let nextOrder = tabs.value.length ? (Math.max(...tabs.value.map(t => t.order)) + 1) : 0
     for (const type of requiredTypes) {
       if (existing.has(type)) continue
-      const title = type === 'wan' ? 'WAN 2.2' : getEngineConfig(type as EngineType).label
+      const title = getEngineConfig(type as EngineType).label
       const params = asParamsRecord(defaultParamsForType(type))
       let createdId = ''
       try {
@@ -2129,9 +2261,9 @@ export const useModelTabsStore = defineStore('modelTabs', () => {
         const rawTab = asRecordObject(rawTabs[index])
         if (!tab) continue
         syncImageSparsePersistHints(tab.id, tab.type, rawTab.params)
-        if (tab.type === 'wan') {
-          if (!shouldPersistWanStageSamplingBackfill(rawTab.params)) continue
-          const params = tab.params as TabParamsByType['wan']
+        if (tab.type === 'wan22_14b') {
+          if (!shouldPersistWan14bStageSamplingBackfill(rawTab.params)) continue
+          const params = tab.params as Wan14bTabParams
           void updateParams<Record<string, unknown>>(tab.id, {
             high: params.high,
             low: params.low,
@@ -2170,7 +2302,7 @@ export const useModelTabsStore = defineStore('modelTabs', () => {
   }
 
   async function create(type: BaseTabType, title?: string): Promise<string> {
-    const resolvedTitle = title?.trim() || (type === 'wan' ? 'WAN 2.2' : getEngineConfig(type as EngineType).label)
+    const resolvedTitle = title?.trim() || getEngineConfig(type as EngineType).label
     const params = asParamsRecord(defaultParamsForType(type))
     let createdId = ''
     try {

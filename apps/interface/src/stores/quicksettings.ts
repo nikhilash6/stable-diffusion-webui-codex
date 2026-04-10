@@ -6,8 +6,8 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: QuickSettings global store (models/options + asset SHA selection).
-Loads lists from `/api/*`, persists option changes via `/api/options`, and maintains cached inventory-driven choice lists plus SHA maps for VAEs/text encoders/WAN GGUF
+Purpose: QuickSettings global store (models/options + asset SHA/variant selection).
+Loads lists from `/api/*`, persists option changes via `/api/options`, and maintains cached inventory-driven choice lists plus SHA/variant maps for VAEs/text encoders/WAN GGUF
 so UI selections resolve to backend SHA-based assets (no raw-path inputs). It also caches IP-Adapter model/image-encoder option lists from the canonical inventory snapshot,
 owns the global runtime-device override plus component storage/compute dtype overrides applied via options, and caches the current `/api/options` revision for generation payload contracts
 (`settings_revision`).
@@ -21,7 +21,8 @@ stays truthful to the current Klein 4B / base-4B slice by keeping at most one `f
 Symbols (top-level; keep in sync; no ghosts):
 - `normalizeTextEncoderSelectionLabels` (function): Normalizes persisted/current TE override labels, deduping values and capping FLUX.2 to one selector.
 - `useQuicksettingsStore` (store): Pinia store that owns QuickSettings state + actions; includes nested loaders (`loadModels/loadVaes/...`),
-  setters that call API updates, inventory hydrators (`fetchInventoryWithLoraHydration` + `hydrateLoraShaMap`), and resolvers that map UI labels → inventory SHA/slot (`resolve*Sha` helpers plus `resolveTextEncoderSlot`, including LoRA).
+  setters that call API updates, inventory hydrators (`fetchInventoryWithLoraHydration` + `hydrateLoraShaMap`), and resolvers that map UI labels → inventory SHA/slot/variant
+  (`resolve*Sha` helpers plus `resolveTextEncoderSlot`, `resolveWanGgufVariant`, including LoRA).
   It also exports checkpoint helpers (`resolveModelInfo`, `requireModelInfo`, `resolveFlux2CheckpointVariant`, `resolveLtxCheckpointExecutionMetadata`) so image/video requests can fail loud on stale checkpoint picks
   and FLUX.2 guidance semantics can be derived from the selected model without extra request fields. Inventory-owned cached choice refs include VAEs, text encoders,
   and IP-Adapter model/image-encoder lists.
@@ -52,6 +53,7 @@ const DEFAULT_VAE_SELECTION = 'built-in'
 const NONE_VAE_SELECTION = 'none'
 const VAE_FAMILIES = ['sd15', 'sdxl', 'flux1', 'flux2', 'chroma', 'zimage', 'anima', 'ltx2'] as const
 type VaeFamily = (typeof VAE_FAMILIES)[number]
+type WanGgufVariant = NonNullable<InventoryResponse['wan22']['gguf'][number]['variant']>
 
 const TEXT_ENCODER_FAMILY_KEYS: Array<[string, string]> = [
   ['sd15', 'sd15_tenc'],
@@ -335,6 +337,7 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
   const vaeShaMap = ref<Map<string, string>>(new Map())
   const loraShaMap = ref<Map<string, string>>(new Map())
   const wanGgufShaMap = ref<Map<string, string>>(new Map())
+  const wanGgufVariantMap = ref<Map<string, WanGgufVariant>>(new Map())
   const deviceChoices = ref<{ value: string; label: string }[]>([
     { value: 'cuda', label: 'CUDA' },
     { value: 'cpu', label: 'CPU' },
@@ -834,11 +837,15 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
     vaeShaMap.value = vaeMap
 
     const wanMap = new Map<string, string>()
+    const wanVariantMap = new Map<string, WanGgufVariant>()
     const wanFiles = (inv as any)?.wan22?.gguf
     if (Array.isArray(wanFiles)) {
       for (const w of wanFiles) {
         const sha = typeof w?.sha256 === 'string' ? w.sha256 : ''
         if (!sha) continue
+        const variant = w?.variant === 'wan22_5b' || w?.variant === 'wan22_14b' || w?.variant === 'wan22_14b_animate'
+          ? w.variant
+          : null
         const name = typeof w?.name === 'string' ? w.name : ''
         const rawPath = typeof w?.path === 'string' ? w.path : ''
         const normPath = rawPath ? rawPath.replace(/\\+/g, '/') : ''
@@ -850,10 +857,12 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
         if (basename) keys.add(basename)
         for (const key of keys) {
           wanMap.set(key, sha)
+          if (variant) wanVariantMap.set(key, variant)
         }
       }
     }
     wanGgufShaMap.value = wanMap
+    wanGgufVariantMap.value = wanVariantMap
 
     hydrateInventoryChoiceCaches(inv)
     hydrateLoraShaMap(inv)
@@ -1068,6 +1077,14 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
     const normalized = raw.replace(/\\+/g, '/')
     const tail = normalized.split('/').pop() || ''
     return wanGgufShaMap.value.get(normalized) || wanGgufShaMap.value.get(tail)
+  }
+
+  function resolveWanGgufVariant(label: string | null | undefined): WanGgufVariant | undefined {
+    const raw = String(label || '').trim()
+    if (!raw) return undefined
+    const normalized = raw.replace(/\\+/g, '/')
+    const tail = normalized.split('/').pop() || ''
+    return wanGgufVariantMap.value.get(normalized) || wanGgufVariantMap.value.get(tail)
   }
 
   function resolveLoraSha(label: string | null | undefined): string | undefined {
@@ -1292,11 +1309,13 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
     requireVaeSelection,
     resolveLoraSha,
     resolveWanGgufSha,
+    resolveWanGgufVariant,
     isModelCoreOnly,
     hydrateLoraShaMap,
     fetchInventoryWithLoraHydration,
     vaeShaMap,
     loraShaMap,
     wanGgufShaMap,
+    wanGgufVariantMap,
   }
 })

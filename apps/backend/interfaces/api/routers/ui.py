@@ -9,9 +9,10 @@ Required Notice: see NOTICE
 Purpose: UI persistence and metadata API routes.
     Handles tabs/workflows JSON persistence, UI blocks filtering, and presets application, with fail-loud tab-type validation for `/api/ui/tabs`
     while filtering stale unsupported top-level tab params during stored-tab load and rejecting unknown top-level LTX keys on create/update.
-    Normalizes WAN tab aliases (`wan22`, `wan22_5b`, `wan22_14b`, `wan22_14b_animate`) into the canonical UI `wan` tab type, keeps workflow
-    snapshot payloads/source-tab bindings normalized and unique, and accepts a dedicated `ltx2` video workspace tab type. Image-tab persistence
-    also owns the allowlist for nested automation-era params such as `runAction`, `initSource`, `supir`, and `ipAdapter`.
+    Live WAN tab/workflow types are exact (`wan22_14b` / `wan22_5b`); stored legacy generic `wan` / `wan22` entries are inferred once from their
+    persisted owner shape, ambiguous legacy WAN payloads now fail loud instead of defaulting to 14B, new generic WAN writes are rejected, and workflow
+    snapshot payloads/source-tab bindings stay normalized and unique. Image-tab persistence also owns the allowlist for nested automation-era params
+    such as `runAction`, `initSource`, `supir`, and `ipAdapter`.
     Image-tab top-level persistence now keeps `inpaintMode` as the only masked runtime-mode owner; removed `maskEnforcement` values must not round-trip.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -145,8 +146,8 @@ def build_router(
 
     # ------------------------------------------------------------------
     # Tabs & Workflows Persistence (JSON files)
-    _ALLOWED_TAB_TYPES = {"sd15", "sdxl", "flux1", "flux2", "chroma", "zimage", "wan", "anima", "ltx2"}
-    _IMAGE_TAB_TYPES = _ALLOWED_TAB_TYPES - {"wan", "ltx2"}
+    _ALLOWED_TAB_TYPES = {"sd15", "sdxl", "flux1", "flux2", "chroma", "zimage", "wan22_14b", "wan22_5b", "anima", "ltx2"}
+    _IMAGE_TAB_TYPES = _ALLOWED_TAB_TYPES - {"wan22_14b", "wan22_5b", "ltx2"}
     _IMAGE_PARAM_TOP_LEVEL_KEYS = {
         "schemaVersion",
         "prompt",
@@ -200,7 +201,7 @@ def build_router(
     _REMOVED_IMAGE_PARAM_KEYS = {
         "maskEnforcement": "inpaintMode",
     }
-    _WAN_PARAM_TOP_LEVEL_KEYS = {
+    _WAN14B_PARAM_TOP_LEVEL_KEYS = {
         "schemaVersion",
         "high",
         "low",
@@ -209,6 +210,22 @@ def build_router(
         "lightx2v",
         "lowFollowsHigh",
     }
+    _WAN5B_PARAM_TOP_LEVEL_KEYS = {
+        "schemaVersion",
+        "prompt",
+        "negativePrompt",
+        "stage",
+        "video",
+        "assets",
+        "sampler",
+        "scheduler",
+        "steps",
+        "cfgScale",
+        "seed",
+    }
+    _WAN_SHARED_PARAM_TOP_LEVEL_KEYS = {"schemaVersion", "video", "assets"}
+    _WAN14B_DISCRIMINATOR_KEYS = _WAN14B_PARAM_TOP_LEVEL_KEYS - _WAN_SHARED_PARAM_TOP_LEVEL_KEYS
+    _WAN5B_DISCRIMINATOR_KEYS = _WAN5B_PARAM_TOP_LEVEL_KEYS - _WAN_SHARED_PARAM_TOP_LEVEL_KEYS
     _LTX_PARAM_TOP_LEVEL_KEYS = {
         "schemaVersion",
         "mode",
@@ -239,14 +256,38 @@ def build_router(
         "ipAdapter",
         "high",
         "low",
+        "stage",
         "video",
         "assets",
     }
 
-    def _normalize_tab_type(value: object) -> str:
+    def _infer_legacy_wan_stored_type(*, raw_params: object, owner: str) -> str:
+        if not isinstance(raw_params, dict):
+            raise ValueError(
+                f"{owner} uses legacy generic WAN type without a persisted owner shape; rewrite it to 'wan22_14b' or 'wan22_5b'"
+            )
+        has_5b_shape = any(key in raw_params for key in _WAN5B_DISCRIMINATOR_KEYS)
+        has_14b_shape = any(key in raw_params for key in _WAN14B_DISCRIMINATOR_KEYS)
+        if has_5b_shape and has_14b_shape:
+            raise ValueError(
+                f"{owner} mixes WAN 2.2 5B and 14B persisted owners; rewrite it to one exact type before loading"
+            )
+        if has_5b_shape:
+            return "wan22_5b"
+        if has_14b_shape:
+            return "wan22_14b"
+        raise ValueError(
+            f"{owner} uses legacy generic WAN type but its persisted params do not distinguish 5B vs 14B"
+        )
+
+    def _normalize_stored_tab_type(value: object, *, raw_params: object = None, owner: str = "stored payload") -> str:
         raw = str(value or "").strip().lower()
-        if raw in ("wan22", "wan22_14b", "wan22_5b", "wan22_14b_animate"):
-            return "wan"
+        if raw in ("wan", "wan22"):
+            return _infer_legacy_wan_stored_type(raw_params=raw_params, owner=owner)
+        if raw in ("wan22_14b", "wan22_14b_animate"):
+            return "wan22_14b"
+        if raw == "wan22_5b":
+            return "wan22_5b"
         if raw == "flux":
             return "flux1"
         if raw in ("flux1_chroma", "flux1-chroma"):
@@ -254,6 +295,12 @@ def build_router(
         if raw in _ALLOWED_TAB_TYPES:
             return raw
         raise ValueError(f"invalid tab type: {raw or '<empty>'}")
+
+    def _normalize_live_tab_type(value: object) -> str:
+        raw = str(value or "").strip().lower()
+        if raw in ("wan", "wan22", "wan22_14b_animate"):
+            raise ValueError(f"invalid tab type: {raw} (use 'wan22_14b' or 'wan22_5b')")
+        return _normalize_stored_tab_type(raw)
 
     def _parse_bool_payload(value: object, *, field: str) -> bool:
         if isinstance(value, bool):
@@ -284,8 +331,10 @@ def build_router(
         return value
 
     def _allowed_param_keys(tab_type: str) -> set[str]:
-        if tab_type == "wan":
-            return _WAN_PARAM_TOP_LEVEL_KEYS
+        if tab_type == "wan22_14b":
+            return _WAN14B_PARAM_TOP_LEVEL_KEYS
+        if tab_type == "wan22_5b":
+            return _WAN5B_PARAM_TOP_LEVEL_KEYS
         if tab_type == "ltx2":
             return _LTX_PARAM_TOP_LEVEL_KEYS
         return _IMAGE_PARAM_TOP_LEVEL_KEYS
@@ -349,7 +398,10 @@ def build_router(
         return sanitized
 
     def _reject_unknown_live_param_keys(tab_type: str) -> bool:
-        return tab_type in _IMAGE_TAB_TYPES or tab_type == "ltx2"
+        return tab_type in _IMAGE_TAB_TYPES or tab_type in {"wan22_14b", "wan22_5b", "ltx2"}
+
+    def _reject_unknown_stored_param_keys(tab_type: str) -> bool:
+        return tab_type in {"wan22_14b", "wan22_5b", "ltx2"}
 
     def _sanitize_stored_tab_params(*, tab_type: str, raw_params: object, tab_id: str) -> Dict[str, Any]:
         if raw_params is None:
@@ -359,7 +411,7 @@ def build_router(
                 tab_type=tab_type,
                 raw_params=raw_params,
                 field="params",
-                reject_unknown=False,
+                reject_unknown=_reject_unknown_stored_param_keys(tab_type),
                 reject_removed_image_keys=False,
                 scrub_invalid_inpaint_mode=True,
             )
@@ -412,7 +464,8 @@ def build_router(
                 mk("flux2", "FLUX.2", 3),
                 mk("chroma", "Chroma", 4),
                 mk("zimage", "Z Image", 5),
-                mk("wan", "WAN 2.2", 6),
+                mk("wan22_14b", "WAN 2.2 14B", 6),
+                mk("wan22_5b", "WAN 2.2 5B", 7),
             ],
         }
 
@@ -444,16 +497,16 @@ def build_router(
         for index, t in enumerate(tabs_in):
             if not isinstance(t, dict):
                 raise HTTPException(status_code=500, detail=f"tabs.json invalid: entry #{index + 1} must be object")
+            tab_id = str(t.get("id") or f"#{index + 1}")
             old_type = t.get("type")
+            params = t.get("params")
             try:
-                new_type = _normalize_tab_type(old_type)
+                new_type = _normalize_stored_tab_type(old_type, raw_params=params, owner=f"tab '{tab_id}'")
             except ValueError as exc:
                 raise HTTPException(status_code=500, detail=f"tabs.json contains {exc}") from exc
             if new_type != old_type:
                 t["type"] = new_type
                 changed = True
-            tab_id = str(t.get("id") or f"#{index + 1}")
-            params = t.get("params")
             sanitized_params = _sanitize_stored_tab_params(tab_type=new_type, raw_params=params, tab_id=tab_id)
             if sanitized_params != params:
                 t["params"] = sanitized_params
@@ -508,7 +561,7 @@ def build_router(
                 tab_type=workflow_type,
                 raw_params=raw_params,
                 field="params_snapshot",
-                reject_unknown=(workflow_type == "ltx2"),
+                reject_unknown=_reject_unknown_stored_param_keys(workflow_type),
                 scrub_invalid_inpaint_mode=True,
             )
         except HTTPException as exc:
@@ -574,7 +627,11 @@ def build_router(
                     detail=f"workflows.json invalid: entry #{index + 1} is missing a non-empty 'id'",
                 )
             try:
-                workflow_type = _normalize_tab_type(workflow.get("type"))
+                workflow_type = _normalize_stored_tab_type(
+                    workflow.get("type"),
+                    raw_params=workflow.get("params_snapshot"),
+                    owner=f"workflow '{workflow_id}'",
+                )
             except ValueError as exc:
                 raise HTTPException(
                     status_code=500,
@@ -611,7 +668,7 @@ def build_router(
                 "source_tab_id": source_tab_id,
                 "type": workflow_type,
                 "created_at": created_at,
-                "engine_semantics": str(workflow.get("engine_semantics") or workflow_type).strip() or workflow_type,
+                "engine_semantics": workflow_type,
                 "params_snapshot": params_snapshot,
             }
             if workflow != normalized_workflow:
@@ -648,12 +705,21 @@ def build_router(
             raise HTTPException(status_code=400, detail="tab type is required")
         if raw_type == "flux":
             raise HTTPException(status_code=400, detail="invalid tab type: flux (use flux1)")
-        if raw_type not in _ALLOWED_TAB_TYPES and raw_type not in ("wan22", "wan22_14b", "wan22_5b", "wan22_14b_animate"):
+        if raw_type not in _ALLOWED_TAB_TYPES:
             raise HTTPException(status_code=400, detail=f"invalid tab type: {raw_type}")
-        ttype = _normalize_tab_type(raw_type)
+        try:
+            ttype = _normalize_live_tab_type(raw_type)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         title = str(
             payload.get("title")
-            or ("FLUX.1" if ttype == "flux1" else "FLUX.2" if ttype == "flux2" else ttype.upper())
+            or (
+                "FLUX.1" if ttype == "flux1"
+                else "FLUX.2" if ttype == "flux2"
+                else "WAN 2.2 14B" if ttype == "wan22_14b"
+                else "WAN 2.2 5B" if ttype == "wan22_5b"
+                else ttype.upper()
+            )
         )
         if "params" in payload:
             params = _sanitize_tab_params_patch(
@@ -697,7 +763,7 @@ def build_router(
                     t["enabled"] = _parse_bool_payload(payload["enabled"], field="enabled")
                 if "params" in payload:
                     try:
-                        tab_type = _normalize_tab_type(t.get("type"))
+                        tab_type = _normalize_stored_tab_type(t.get("type"))
                     except ValueError as exc:
                         raise HTTPException(status_code=500, detail=f"tabs.json contains {exc}") from exc
                     params_patch = _sanitize_tab_params_patch(
@@ -768,9 +834,21 @@ def build_router(
             raise HTTPException(status_code=400, detail="workflow type is required")
         if raw_type == "flux":
             raise HTTPException(status_code=400, detail="invalid workflow type: flux (use flux1)")
-        if raw_type not in _ALLOWED_TAB_TYPES and raw_type not in ("wan22", "wan22_14b", "wan22_5b", "wan22_14b_animate"):
+        if raw_type not in _ALLOWED_TAB_TYPES:
             raise HTTPException(status_code=400, detail=f"invalid workflow type: {raw_type}")
-        wtype = _normalize_tab_type(raw_type)
+        try:
+            wtype = _normalize_live_tab_type(raw_type)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raw_engine_semantics = str(payload.get("engine_semantics") or "").strip().lower()
+        if raw_engine_semantics and raw_engine_semantics != wtype:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"workflow engine_semantics must match exact workflow type '{wtype}', "
+                    f"got '{raw_engine_semantics}'"
+                ),
+            )
         raw_params_snapshot = payload.get("params_snapshot")
         if raw_params_snapshot is None:
             raw_params_snapshot = {}
@@ -791,7 +869,7 @@ def build_router(
             "source_tab_id": source_tab_id,
             "type": wtype,
             "created_at": now,
-            "engine_semantics": payload.get("engine_semantics") or wtype,
+            "engine_semantics": wtype,
             "params_snapshot": params_snapshot,
         }
         wfs.insert(0, wf)
@@ -820,7 +898,7 @@ def build_router(
                     _assert_unique_workflow_source_tab_id(data["workflows"], source_tab_id, exclude_workflow_id=wf_id)
                     w["source_tab_id"] = source_tab_id
                 if "params_snapshot" in payload and isinstance(payload["params_snapshot"], dict):
-                    workflow_type = _normalize_tab_type(w.get("type"))
+                    workflow_type = _normalize_stored_tab_type(w.get("type"))
                     w["params_snapshot"] = _sanitize_tab_params_patch(
                         tab_type=workflow_type,
                         raw_params=payload["params_snapshot"],

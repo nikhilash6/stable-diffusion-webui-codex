@@ -778,12 +778,14 @@ onMounted(() => {
     })
 })
 
-const tab = computed<TabByType<'wan'> | null>(() => {
+type WanTab = TabByType<'wan22_14b'>
+
+const tab = computed<WanTab | null>(() => {
   const candidate = store.tabs.find((entry) => entry.id === props.tabId) || null
-  if (!candidate || candidate.type !== 'wan') return null
-  return candidate as TabByType<'wan'>
+  if (!candidate || candidate.type !== 'wan22_14b') return null
+  return candidate as WanTab
 })
-const wanParams = computed<TabByType<'wan'>['params'] | null>(() => tab.value?.params || null)
+const wanParams = computed<WanTab['params'] | null>(() => tab.value?.params || null)
 const lightx2v = computed<boolean>(() => Boolean(wanParams.value?.lightx2v))
 
 function defaultStage(): WanStageParams {
@@ -2407,7 +2409,7 @@ async function sendToWorkflows(): Promise<void> {
       name: `${tab.value.title} — ${new Date().toLocaleString()}`,
       source_tab_id: tab.value.id,
       type: tab.value.type,
-      engine_semantics: tab.value.type === 'wan' ? 'wan22' : tab.value.type,
+      engine_semantics: 'wan22_14b',
       params_snapshot: tab.value.params as Record<string, unknown>,
     })
     toast(result.action === 'updated' ? 'Snapshot updated in Workflows.' : 'Snapshot saved to Workflows.')

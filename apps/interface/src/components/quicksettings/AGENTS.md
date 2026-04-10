@@ -10,7 +10,8 @@ Status: Active
 ## Key Files
 - `QuickSettingsAssetBlock.vue` — Shared non-WAN quicksettings asset owner for checkpoint/VAE/text-encoder selectors, including the dedicated LTX branch in `QuickSettingsBar.vue`; mode toggles and family-only extras remain header-owned.
 - `QuickSettingsPerf.vue` — Performance toggles shared across engines (Smart Offload/Fallback/Cache/Core Streaming) rendered in the Advanced nested area.
-- `QuickSettingsWan.vue` — WAN22-specific quicksettings (Mode preset selector + `LightX2V` toggle button, high/low model dirs, text encoder/VAE selectors, plus a Refresh button).
+- `QuickSettingsWan.vue` — exact WAN 2.2 14B quicksettings (shared `TXT2VID/IMG2VID` input-mode toggle, `LightX2V`, high/low model dirs, text encoder/VAE selectors, plus a Refresh button).
+- `QuickSettingsWan22_5b.vue` — exact WAN 2.2 5B quicksettings (shared `TXT2VID/IMG2VID` input-mode toggle, single-stage model dir, text encoder/VAE selectors, plus a Refresh button).
 
 ## Notes
 - `QuickSettingsAssetBlock.vue` stays presentational and non-WAN-only; engine-specific filtering, read-only routing, mode toggles, and WAN-only selectors still live in `QuickSettingsBar.vue`.
@@ -31,7 +32,7 @@ Status: Active
 - 2025-12-27: Removed the `hideCheckpoint` toggle/prop; checkpoint selection is always rendered, and on `/models/:tabId` it is tab-scoped (`tab.params.checkpoint`, auto-seeded) while still filtering choices by engine-specific `*_ckpt` roots from `apps/paths.json` (plus user-added paths).
 - 2025-12-14: WAN text encoder selector now lists explicit `.safetensors` / `.gguf` files under `wan22_tenc` and stores values as `wan22/<abs_path>` for consistent labeling; payload builders must normalize before sending to backend.
 - 2025-12-14: WAN Metadata/VAE selectors now prefer concrete inventory paths (VAE constrained by `wan22_vae`), keeping the video endpoints strict about asset paths.
-- 2026-01-17: WAN Metadata selector was removed; WAN preset Mode now drives the metadata repo id used by payloads.
+- 2026-01-17: WAN Metadata selector was removed; WAN payloads now derive the metadata repo from the exact WAN asset lane, not from a generic WAN preset selector.
 - 2025-12-15: QuickSettings WAN groups now use `.qs-group-wan-*` sizing hooks so the header flex layout doesn’t collapse all controls to the left on wide screens.
 - 2026-03-03: WAN model browse now uses a single compact `+` next to `LightX2V` (shared `wan22_ckpt` root); the duplicated per-select model `+` actions were removed.
 - 2025-12-20: Replaced WAN “Format” with a `LightX2V` toggle; per-stage LoRA selection now lives in the WAN tab (High/Low Noise) when enabled.
@@ -41,4 +42,4 @@ Status: Active
 - 2025-12-31: `QuickSettingsWan.vue` now declares `defineEmits(...)` for `browse*` + `update:*` events to avoid Vue “extraneous non-emits listeners” warnings with a fragment root template.
 - 2026-01-03: Added standardized file header blocks to quicksettings components (doc-only change; part of rollout).
 - 2026-02-20: VAE selectors now recognize canonical sentinel `built-in` across families; metadata buttons are disabled for sentinel values (`built-in`/`none`) to avoid invalid metadata lookups.
-- 2026-02-21: `QuickSettingsWan.vue` mode selector now exposes only `I2V/T2V` presets (`14B/5B`); `V2V 14B` was removed to align UI with the current backend vid2vid-disabled contract.
+- 2026-04-09: exact WAN tabs are now split into `wan22_14b` and `wan22_5b`. Keep the header toggle truthful to input mode (`TXT2VID|IMG2VID`) only; do not reintroduce a generic WAN preset/variant selector in quicksettings.

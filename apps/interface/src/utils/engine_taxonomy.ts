@@ -18,6 +18,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `EngineRequestId` (type): Engine ids used in frontend payload dispatch (`flux1_kontext`, `flux1_chroma`, etc.).
 - `normalizeTabFamily` (function): Normalizes raw alias values into `TabFamily` or `null`.
 - `normalizeSemanticEngine` (function): Normalizes raw semantic-engine values into canonical `SemanticEngine` or `null`.
+- `isWanTabFamily` (function): Returns whether a tab family is an exact WAN lane.
 - `semanticEngineFromTabFamily` (function): Converts tab family to semantic engine id.
 - `tabFamilyFromSemanticEngine` (function): Converts semantic engine id to tab family when representable.
 - `resolveImageRequestEngineId` (function): Canonical image request tab/mode -> engine-id mapper.
@@ -28,7 +29,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `fallbackSamplingDefaultsForTabFamily` (function): Stable frontend fallback sampler/scheduler defaults by tab family.
 */
 
-export type TabFamily = 'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'chroma' | 'wan' | 'zimage' | 'anima' | 'ltx2'
+export type TabFamily = 'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'chroma' | 'wan22_14b' | 'wan22_5b' | 'zimage' | 'anima' | 'ltx2'
 
 export type SemanticEngine =
   | 'sd15'
@@ -62,10 +63,8 @@ const TAB_FAMILY_ALIASES: Readonly<Record<string, TabFamily>> = Object.freeze({
   zimage: 'zimage',
   anima: 'anima',
   ltx2: 'ltx2',
-  wan: 'wan',
-  wan22: 'wan',
-  wan22_14b: 'wan',
-  wan22_5b: 'wan',
+  wan22_14b: 'wan22_14b',
+  wan22_5b: 'wan22_5b',
   flux1_chroma: 'chroma',
 })
 
@@ -109,7 +108,8 @@ const TAB_FAMILY_FALLBACK_SAMPLING: Readonly<Record<TabFamily, SamplingDefaults>
   zimage: { sampler: 'euler', scheduler: 'simple' },
   anima: { sampler: 'euler', scheduler: 'simple' },
   ltx2: { sampler: 'euler', scheduler: 'simple' },
-  wan: { sampler: 'uni-pc', scheduler: 'simple' },
+  wan22_14b: { sampler: 'uni-pc', scheduler: 'simple' },
+  wan22_5b: { sampler: 'uni-pc', scheduler: 'simple' },
 })
 
 function normalizeKey(value: unknown): string {
@@ -136,15 +136,19 @@ export function normalizeTabFamily(value: unknown): TabFamily | null {
   return TAB_FAMILY_ALIASES[key] ?? null
 }
 
+export function isWanTabFamily(value: unknown): value is Extract<TabFamily, 'wan22_14b' | 'wan22_5b'> {
+  return value === 'wan22_14b' || value === 'wan22_5b'
+}
+
 export function semanticEngineFromTabFamily(family: TabFamily): SemanticEngine {
-  if (family === 'wan') return 'wan22'
+  if (isWanTabFamily(family)) return 'wan22'
   return family
 }
 
 export function tabFamilyFromSemanticEngine(value: unknown): TabFamily | null {
   const semantic = normalizeSemanticEngine(value)
   if (!semantic) return null
-  if (semantic === 'wan22') return 'wan'
+  if (semantic === 'wan22') return null
   if (semantic === 'hunyuan_video' || semantic === 'svd' || semantic === 'netflix_void') return null
   return semantic
 }
@@ -154,7 +158,7 @@ export function resolveImageRequestEngineId(tabType: string, useInitImage: boole
   if (!family) {
     throw new Error(`Unsupported image tab type '${String(tabType)}'.`)
   }
-  if (family === 'wan' || family === 'ltx2') {
+  if (isWanTabFamily(family) || family === 'ltx2') {
     throw new Error(`Unsupported image tab type '${String(tabType)}'.`)
   }
   if (family === 'chroma') return 'flux1_chroma'

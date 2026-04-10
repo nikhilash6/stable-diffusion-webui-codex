@@ -26,7 +26,8 @@ Symbols (top-level; keep in sync; no ghosts):
             <option value="zimage">Z Image</option>
             <option v-if="showAnimaOption" value="anima">Anima</option>
             <option v-if="showLtx2Option" value="ltx2">LTX 2.3</option>
-            <option value="wan">WAN 2.2</option>
+            <option value="wan22_14b">WAN 2.2 14B</option>
+            <option value="wan22_5b">WAN 2.2 5B</option>
           </select>
           <button class="btn btn-sm btn-primary" type="button" @click="createTab">New Tab</button>
         </div>
@@ -62,7 +63,7 @@ Symbols (top-level; keep in sync; no ghosts):
 	const router = useRouter()
 	const store = useModelTabsStore()
 	const engineCaps = useEngineCapabilitiesStore()
-	const newType = ref<BaseTabType>('wan')
+const newType = ref<BaseTabType>('sdxl')
   const { notice: modelsNotice, toast: modelsToast } = useResultsCard({ noticeDurationMs: 4000 })
 
 	onMounted(async () => {

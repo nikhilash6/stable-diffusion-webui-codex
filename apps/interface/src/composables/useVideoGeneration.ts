@@ -6,10 +6,10 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Unified video generation composable for WAN (txt2vid/img2vid).
+Purpose: WAN 2.2 14B video generation composable (txt2vid/img2vid).
 Owns per-tab video generation state (progress/frames/video result/history/queue), builds typed WAN payloads, starts tasks, and consumes task SSE events
 to update UI state and fetch final results. Delegates the shared task-stream/resume/history shell to `useTaskRunLifecycle.ts`, while keeping
-WAN-specific queueing, summary/snapshot builders, and result shaping local. Every start payload includes `settings_revision`, and stale-revision conflicts (`409` + `current_revision`)
+WAN 2.2 14B-specific queueing, summary/snapshot builders, and result shaping local. Every start payload includes `settings_revision`, and stale-revision conflicts (`409` + `current_revision`)
 trigger revision refresh + manual-retry UX. Persists a minimal resume marker to `localStorage` and auto-reattaches to in-flight tasks after reload
 via SSE replay (`after` / `lastEventId`) and snapshot refresh on `gap`. WAN payload ownership is explicit: top-level core owners (`prompt`, `negativePrompt`,
 `sampler`, `scheduler`, `steps`, `cfgScale`, `seed`) stay top-level in the typed builder input, while `wan_high` carries only model/Lora/flow overrides and
@@ -41,7 +41,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `parseResumeMode` (function): Strict parser for persisted WAN resume mode (`txt2vid|img2vid`), returns null for unsupported/legacy modes.
 - `assertRunPayloadObject` (function): Runtime invariant guard that fails loud when a prepared run carries a non-object payload.
 - `assertNeverMode` (function): Exhaustiveness guard for prepared-run dispatch by `mode`.
-- `useVideoGeneration` (function): Main composable API; wires payload building, task start/cancel, SSE handling, queued runs, and history updates
+- `useVideoGeneration` (function): Main 14B composable API; wires payload building, task start/cancel, SSE handling, queued runs, and history updates
   (contains nested handlers for events, queue progression, and per-mode payload assembly).
 */
 
@@ -356,12 +356,14 @@ export function useVideoGeneration(tabId: string) {
   const state = ref(getTabState(tabId))
   const resumeNotice = ref('')
 
-  const tab = computed<TabByType<'wan'> | null>(() => {
+  type WanTab = TabByType<'wan22_14b'>
+
+  const tab = computed<WanTab | null>(() => {
     const candidate = modelTabs.tabs.find((entry) => entry.id === tabId) || null
-    if (!candidate || candidate.type !== 'wan') return null
-    return candidate as TabByType<'wan'>
+    if (!candidate || candidate.type !== 'wan22_14b') return null
+    return candidate as WanTab
   })
-  const params = computed<TabByType<'wan'>['params'] | null>(() => tab.value?.params || null)
+  const params = computed<WanTab['params'] | null>(() => tab.value?.params || null)
 
   const video = computed<WanVideoParams>(() => params.value?.video || defaultVideo())
   const high = computed<WanStageParams>(() => params.value?.high || defaultStage())
@@ -423,6 +425,12 @@ export function useVideoGeneration(tabId: string) {
     }
     if (!quicksettings.resolveWanGgufSha(lo.modelDir)) {
       return 'WAN Low model must resolve to a sha256. Click Refresh and re-select the Low model.'
+    }
+    if (quicksettings.resolveWanGgufVariant(hi.modelDir) !== 'wan22_14b') {
+      return 'WAN High model must resolve to a structurally 14B GGUF. Click Refresh and re-select the High model.'
+    }
+    if (quicksettings.resolveWanGgufVariant(lo.modelDir) !== 'wan22_14b') {
+      return 'WAN Low model must resolve to a structurally 14B GGUF. Click Refresh and re-select the Low model.'
     }
 
     const teLabel = String(assets.value.textEncoder || '').trim()
@@ -892,7 +900,7 @@ export function useVideoGeneration(tabId: string) {
       setError(`useVideoGeneration: tab '${tabId}' not found or not available.`)
       return
     }
-    if (tab.value.type !== 'wan') {
+    if (tab.value.type !== 'wan22_14b') {
       setError(`useVideoGeneration: unsupported tab type '${String(tab.value.type)}'`)
       return
     }

@@ -90,7 +90,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `UiPresetsResponse` (interface): `/api/ui/presets` response shape.
 - `UiPresetApplyResponse` (interface): `/api/ui/presets/apply` response shape.
 - `ApiTabMeta` (interface): Per-tab metadata timestamps.
-- `ApiTab` (interface): Persisted model tab definition (`sd15|sdxl|flux1|flux2|zimage|chroma|wan|ltx2|anima`).
+- `ApiTab` (interface): Persisted model tab definition (`sd15|sdxl|flux1|flux2|zimage|chroma|wan22_14b|wan22_5b|ltx2|anima`).
 - `TabsResponse` (interface): `/api/ui/tabs` response shape.
 - `WorkflowsResponse` (interface): `/api/ui/workflows` response shape.
 - `InventoryResponse` (interface): `/api/models/inventory` response shape.
@@ -714,7 +714,7 @@ export interface UiPresetApplyResponse { applied: boolean; model: string; checkp
 
 // Tabs/workflows persistence
 export interface ApiTabMeta { createdAt: string; updatedAt: string }
-export interface ApiTab { id: string; type: 'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'zimage' | 'chroma' | 'wan' | 'anima' | 'ltx2'; title: string; order: number; enabled: boolean; params: Record<string, unknown>; meta: ApiTabMeta }
+export interface ApiTab { id: string; type: 'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'zimage' | 'chroma' | 'wan22_14b' | 'wan22_5b' | 'anima' | 'ltx2'; title: string; order: number; enabled: boolean; params: Record<string, unknown>; meta: ApiTabMeta }
 export interface TabsResponse { version: number; tabs: ApiTab[] }
 export interface WorkflowItem { id: string; name: string; source_tab_id: string; type: string; created_at: string; engine_semantics: string; params_snapshot: Record<string, unknown> }
 export interface WorkflowsResponse { version: number; workflows: WorkflowItem[] }
@@ -729,6 +729,15 @@ export interface InventoryResponse {
   loras: Array<{ name: string; path: string; sha256?: string }>
   ip_adapter_models: Array<{ name: string; path: string; sha256?: string }>
   ip_adapter_image_encoders: Array<{ name: string; path: string; sha256?: string }>
-  wan22: { gguf: Array<{ name: string; path: string; sha256?: string; stage: 'high' | 'low' | 'unknown' }> }
+  wan22: {
+    gguf: Array<{
+      name: string
+      path: string
+      sha256?: string
+      stage: 'high' | 'low' | 'unknown'
+      variant?: 'wan22_5b' | 'wan22_14b' | 'wan22_14b_animate'
+      repo_hint?: string
+    }>
+  }
   metadata: Array<{ name: string; path: string }>
 }

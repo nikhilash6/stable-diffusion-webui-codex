@@ -16,6 +16,7 @@ Symbols (top-level; keep in sync; no ghosts):
 
 import { useRouter } from 'vue-router'
 import { useModelTabsStore, type BaseTabType } from '../stores/model_tabs'
+import { isWanTabFamily } from '../utils/engine_taxonomy'
 
 export function useModelTabNavigation(): {
   openModelTab: (type: BaseTabType, options?: { initImage?: { dataUrl: string; name: string } }) => Promise<void>
@@ -30,7 +31,7 @@ export function useModelTabNavigation(): {
     if (!id) throw new Error('failed to resolve a model tab id')
 
     if (options?.initImage) {
-      if (type === 'wan') {
+      if (isWanTabFamily(type)) {
         throw new Error('WAN init-image navigation is not implemented in useModelTabNavigation.')
       }
       if (type === 'ltx2') {

@@ -7,9 +7,13 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: WAN22 GGUF run entrypoints (txt2vid/img2vid; batch + streaming).
-Orchestrates text context, per-stage sampling, ordered stage-LoRA application (`high/low.loras`), and VAE encode/decode (including file-VAE metadata config forwarding) while keeping GGUF support anchored in the shared quantization/ops layer.
-For img2vid, forwards no-stretch guide controls from `RunConfig` (`img2vid_image_scale` + crop offsets) into VAE init-image preprocessing so runtime framing matches UI projection.
-Shared scheduler resolution now requires explicit normalized stage scheduler values and fail-loud continuity checks before runtime scheduler construction.
+Orchestrates exact WAN 2.2 stage layouts: truthful single-stage 5B entrypoints (`cfg.single`) and dual-stage 14B entrypoints
+(`cfg.high` + `cfg.low`), including ordered stage-LoRA application and VAE encode/decode (with file-VAE metadata config forwarding),
+while keeping GGUF support anchored in the shared quantization/ops layer.
+For img2vid, forwards no-stretch guide controls from `RunConfig` (`img2vid_image_scale` + crop offsets) into VAE init-image preprocessing
+so runtime framing matches UI projection, and keeps non-solo 5B temporal modes fail-loud at the use-case seam until a truthful single-stage
+runtime exists for them. Shared scheduler resolution now requires explicit normalized stage scheduler values and fail-loud continuity checks
+before runtime scheduler construction.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_USE_CFG_SEED` (constant): Sentinel that distinguishes implicit cfg-seed usage from explicit random (`None`) override in chunked seeding.
@@ -31,6 +35,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_build_shared_scheduler` (function): Build a single shared scheduler instance for high/low stage continuity with fail-loud sampler/scheduler lane mismatch checks.
 - `_resolve_frame_counts` (function): Resolve output vs latent frame counts for the WAN VAE temporal scale.
 - `_infer_stage_variant` (function): Infer WAN model variant (`5b`/`14b`) from a stage GGUF filename.
+- `_resolve_single_stage_variant` (function): Resolve the exact single-stage WAN model variant with API variant authority and fail-loud mismatches.
 - `_resolve_stage_pair_variant` (function): Resolve a single variant for high/low stages with API variant authority and fail loud mismatches.
 - `_build_i2v_seed_state` (function): Build the initial I2V state `[lat16 + mask4 + img16]` (RNG noise scaled by `init_noise_sigma` + deterministic condition).
 - `_extract_i2v_decode_latents` (function): Extract pure latent channels from I2V model state before VAE decode (order-aware `lat_first`/`lat_last`).
@@ -42,13 +47,19 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_assemble_svi2_pro_condition_latents` (function): Build SVI 2.0 Pro conditioning latents (`slot0=anchor`, `slot1=prev_tail`, `slot2..=zero`).
 - `_sample_chunk_stage_with_progress` (function): Run a chunk stage sampler and project local progress into a global phase percent.
 - `_resolve_stage_prompt_pairs` (function): Resolve high/low stage prompt+negative pairs (stage prompts required; negative falls back only when missing).
+- `_resolve_single_stage_prompt_pair` (function): Resolve the single-stage prompt+negative pair from the truthful `cfg.single` owner.
 - `_resolve_stage_text_embeddings` (function): Build stage-specific high/low embeddings from a single text-encoder load.
+- `_resolve_single_stage_text_embeddings` (function): Build single-stage prompt+negative embeddings from a single text-encoder load.
 - `_resolve_sram_attention_summary_mode_for_run` (function): Resolves the effective SRAM attention mode once from deterministic run intent.
 - `_resolve_sram_attention_run_label` (function): Builds stable run labels for SRAM-attention observability lifecycle.
 - `_with_sram_attention_runtime_metrics` (function): Decorator that wraps WAN run/stream entrypoints with SRAM metrics reset + end-of-run summary.
+- `run_txt2vid_single` (function): Batch txt2vid runner for truthful WAN 2.2 5B single-stage GGUF execution.
 - `run_txt2vid` (function): Batch txt2vid runner; orchestrates text context, stage sampling, and VAE decode.
+- `stream_txt2vid_single` (function): Streaming single-stage txt2vid generator; yields progress while sampling/decoding.
 - `stream_txt2vid` (function): Streaming txt2vid generator; yields progress while sampling/decoding.
+- `run_img2vid_single` (function): Batch img2vid runner for truthful WAN 2.2 5B single-stage GGUF execution.
 - `run_img2vid` (function): Batch img2vid runner; builds I2V conditioning + seeded noise state, runs stages, decodes frames (with explicit VAE config-dir forwarding).
+- `stream_img2vid_single` (function): Streaming single-stage img2vid generator; yields progress while sampling/decoding.
 - `stream_img2vid` (function): Streaming img2vid generator; yields progress while sampling/decoding (I2V conditioning + seeded noise state, with explicit VAE config-dir forwarding).
 - `stream_img2vid_chunked` (function): Chunked img2vid runner with chunk-major sequencing (for each chunk: high pass -> low pass in latent space, then final decode/stitch pass), configurable anchor-reset continuity policy, and shared VAE decode-session reuse.
 - `stream_img2vid_sliding_window` (function): Sliding-window img2vid runner built on the chunked runtime with explicit window/stride/commit controls.
@@ -700,6 +711,33 @@ def _resolve_stage_pair_variant(
     return inferred
 
 
+def _resolve_single_stage_variant(
+    stage_path: str,
+    *,
+    mode: str,
+    requested_variant: str | None,
+) -> str:
+    inferred = _infer_stage_variant(stage_path, stage="single", mode=mode)
+    if requested_variant is not None:
+        normalized_requested = str(requested_variant).strip().lower()
+        if normalized_requested not in {"5b", "14b"}:
+            raise RuntimeError(
+                f"WAN22 GGUF ({mode}) invalid requested variant={requested_variant!r}; expected '5b' or '14b'."
+            )
+        if inferred is not None and inferred != normalized_requested:
+            raise RuntimeError(
+                f"WAN22 GGUF ({mode}) variant mismatch: requested={normalized_requested} inferred={inferred} "
+                f"(single={stage_path!r})"
+            )
+        return normalized_requested
+    if inferred is None:
+        raise RuntimeError(
+            f"WAN22 GGUF ({mode}) could not infer 5b/14b from the single-stage filename and no explicit variant was provided "
+            f"(single={stage_path!r})."
+        )
+    return inferred
+
+
 def _build_i2v_seed_state(
     *,
     cfg: RunConfig,
@@ -1154,6 +1192,25 @@ def _resolve_stage_prompt_pairs(cfg: RunConfig) -> tuple[str, str, str, str]:
     return high_prompt, high_negative, low_prompt, low_negative
 
 
+def _resolve_single_stage_prompt_pair(cfg: RunConfig) -> tuple[str, str]:
+    single_stage = getattr(cfg, "single", None)
+    raw_prompt = getattr(single_stage, "prompt", None)
+    if not isinstance(raw_prompt, str):
+        raise RuntimeError("WAN22 GGUF: single-stage prompt is required and must be a string.")
+    prompt = raw_prompt.strip()
+    if not prompt:
+        raise RuntimeError("WAN22 GGUF: single-stage prompt must not be empty.")
+
+    raw_negative = getattr(single_stage, "negative_prompt", None)
+    if raw_negative is None:
+        negative = str(getattr(cfg, "negative_prompt", "") or "").strip()
+    elif isinstance(raw_negative, str):
+        negative = raw_negative.strip()
+    else:
+        raise RuntimeError("WAN22 GGUF: single-stage negative prompt must be a string when provided.")
+    return prompt, negative
+
+
 def _resolve_stage_text_embeddings(
     *,
     cfg: RunConfig,
@@ -1229,6 +1286,341 @@ def _resolve_stage_text_embeddings(
         str(high_prompt_embeds.device),
     )
     return high_prompt_embeds, high_negative_embeds, low_prompt_embeds, low_negative_embeds
+
+
+def _resolve_single_stage_text_embeddings(
+    *,
+    cfg: RunConfig,
+    model_dir: str,
+    model_key: str,
+    dev_name: str,
+    dev: torch.device,
+    dt: torch.dtype,
+    te_device: str,
+    logger: Any,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    prompt, negative = _resolve_single_stage_prompt_pair(cfg)
+    _wan_trace(
+        logger,
+        "te.resolve.single.start: model_key=%s te_device=%s runtime_device=%s runtime_dtype=%s",
+        model_key,
+        te_device,
+        dev_name,
+        str(dt),
+    )
+    prompt_embeds, negative_embeds = get_text_context(
+        model_dir=model_dir,
+        prompt=[prompt],
+        negative=[negative],
+        device=dev_name,
+        dtype=cfg.dtype,
+        text_encoder_dir=cfg.text_encoder_dir,
+        tokenizer_dir=cfg.tokenizer_dir,
+        vae_dir=cfg.vae_dir,
+        model_key=model_key,
+        metadata_dir=cfg.metadata_dir,
+        logger=logger,
+        offload_after=smart_offload_enabled(),
+        te_device=te_device,
+    )
+    if int(prompt_embeds.shape[0]) != 1 or int(negative_embeds.shape[0]) != 1:
+        raise RuntimeError(
+            "WAN22 GGUF: single-stage text context batch mismatch "
+            f"(prompt={tuple(prompt_embeds.shape)} negative={tuple(negative_embeds.shape)} expected_batch=1)."
+        )
+    prompt_embeds = prompt_embeds.to(device=dev, dtype=dt)
+    negative_embeds = negative_embeds.to(device=dev, dtype=dt)
+    _wan_trace(
+        logger,
+        "te.resolve.single.done: prompt=%s negative=%s dtype=%s device=%s",
+        tuple(prompt_embeds.shape),
+        tuple(negative_embeds.shape),
+        str(prompt_embeds.dtype),
+        str(prompt_embeds.device),
+    )
+    return prompt_embeds, negative_embeds
+
+
+@_with_sram_attention_runtime_metrics
+def run_txt2vid_single(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) -> list[object]:
+    log = get_logger(logger)
+    single_path = pick_stage_gguf(getattr(cfg.single, "model_dir", None) if cfg.single else None, stage="single")
+    if not single_path:
+        raise RuntimeError("WAN22 GGUF (txt2vid single-stage) requires a .gguf single stage")
+    log.info("[wan22.gguf] single=%s", single_path)
+
+    set_sdpa_settings(
+        getattr(cfg, "sdpa_policy", None),
+        getattr(cfg, "attn_chunk_size", None),
+        getattr(cfg, "attention_mode", None),
+    )
+    if on_progress:
+        try:
+            on_progress(stage="prepare", step=0, total=1, percent=0.0)
+        except Exception:
+            pass
+
+    dev_name = resolve_device_name(getattr(cfg, "device", None))
+    dev = torch.device(dev_name)
+    dt = as_torch_dtype(cfg.dtype)
+    flow_multiplier = resolve_wan_flow_multiplier(str(cfg.metadata_dir or ""))
+    variant = _resolve_single_stage_variant(
+        single_path,
+        mode="txt2vid",
+        requested_variant=getattr(cfg, "wan_engine_variant", None),
+    )
+    if variant != "5b":
+        raise RuntimeError(f"WAN22 GGUF (txt2vid) single-stage runtime is only implemented for 5B, got {variant!r}.")
+    model_key = f"wan_t2v_{variant}"
+    lvl = _resolve_offload_level(cfg)
+
+    single_model: torch.nn.Module | None = None
+    single_mm: _MemoryManagedModule | None = None
+    try:
+        single_model = mount_stage_model_from_gguf(
+            single_path,
+            stage="single",
+            dtype=dt,
+            loras=(getattr(cfg.single, "loras", ()) if cfg.single else ()),
+            logger=log,
+        )
+        single_mm = _MemoryManagedModule(single_model, load_device=dev)
+        if on_progress:
+            try:
+                on_progress(stage="prepare", step=0, total=1, percent=0.05)
+            except Exception:
+                pass
+
+        te_dev_eff = getattr(cfg, "te_device", None) or dev_name
+        t_out, t_lat = _resolve_frame_counts(int(cfg.num_frames), logger=log)
+        h_lat = max(8, int(cfg.height) // 8)
+        w_lat = max(8, int(cfg.width) // 8)
+        t = int(t_lat)
+        geom = infer_patch_geometry(single_model, t=t, h_lat=h_lat, w_lat=w_lat)
+        prompt_embeds, negative_embeds = _resolve_single_stage_text_embeddings(
+            cfg=cfg,
+            model_dir=os.path.dirname(single_path),
+            model_key=model_key,
+            dev_name=dev_name,
+            dev=dev,
+            dt=dt,
+            te_device=(cfg.te_device or te_dev_eff),
+            logger=log,
+        )
+        flow_shift_value = _require_flow_shift("single", getattr(cfg.single, "flow_shift", None) if cfg.single else None)
+        scheduler, total_steps, sampler_configured, sampler_effective = make_scheduler(
+            int(getattr(cfg.single, "steps", 0) or 0),
+            metadata_dir=str(cfg.metadata_dir or ""),
+            flow_shift=float(flow_shift_value),
+            sampler=(getattr(cfg.single, "sampler", None) if cfg.single else None),
+            scheduler=(getattr(cfg.single, "scheduler", None) if cfg.single else None),
+            return_effective_sampler=True,
+        )
+        log.info(
+            "[wan22.gguf] SINGLE: steps=%s sampler_effective=%s sampler_configured=%s scheduler=%s cfg_scale=%s seed=%s",
+            total_steps,
+            sampler_effective,
+            sampler_configured,
+            getattr(cfg.single, "scheduler", None),
+            (getattr(cfg.single, "cfg_scale", None) if cfg.single else cfg.guidance_scale),
+            cfg.seed,
+        )
+
+        memory_management.manager.load_model(single_mm)
+        progress_adapter = _WanUnifiedBlockProgressAdapter(stage_name="single")
+        try:
+            transformer_options = progress_adapter.transformer_options()
+            progress_adapter.assert_wired(branch="run_txt2vid.single")
+            latents = sample_stage_latents(
+                model=single_model,
+                geom=geom,
+                steps=total_steps,
+                cfg_scale=(getattr(cfg.single, "cfg_scale", None) if cfg.single else cfg.guidance_scale),
+                prompt_embeds=prompt_embeds,
+                negative_embeds=negative_embeds,
+                device=dev,
+                dtype=dt,
+                logger=log,
+                sampler_name=sampler_effective,
+                scheduler_name=(getattr(cfg.single, "scheduler", None) if cfg.single else None),
+                metadata_dir=cfg.metadata_dir,
+                scheduler_obj=scheduler,
+                timestep_start=0,
+                timestep_end=total_steps,
+                seed=cfg.seed,
+                state_init=None,
+                on_progress=(lambda **p: on_progress(stage="single", **p)) if on_progress else None,
+                log_mem_interval=getattr(cfg, "log_mem_interval", None),
+                flow_shift=flow_shift_value,
+                flow_multiplier=flow_multiplier,
+                stage_name="single",
+                transformer_options=transformer_options,
+            )
+            progress_adapter.assert_emitted(branch="run_txt2vid.single")
+        finally:
+            progress_adapter.close()
+        del prompt_embeds
+        del negative_embeds
+    finally:
+        single_mm, single_model = _teardown_stage(
+            stage="single",
+            mm=single_mm,
+            model=single_model,
+            offload_level=lvl,
+            logger=log,
+        )
+
+    _stage_transition_barrier(logger=log, label="txt2vid:single->decode", offload_level=lvl, force_clear=True)
+    latents_backup = _backup_decode_latents(latents=latents, logger=log, source="run_txt2vid_single")
+    del latents
+    frames = decode_latents_to_frames(
+        latents=latents_backup,
+        model_dir=os.path.dirname(single_path),
+        cfg=cfg,
+        logger=log,
+        expected_frames=t_out,
+    )
+    del latents_backup
+    if not frames:
+        raise RuntimeError("WAN22 GGUF: single stage produced no frames")
+    return frames
+
+
+@_with_sram_attention_runtime_metrics
+def stream_txt2vid_single(cfg: RunConfig, *, logger: Any = None):
+    log = get_logger(logger)
+    single_path = pick_stage_gguf(getattr(cfg.single, "model_dir", None) if cfg.single else None, stage="single")
+    if not single_path:
+        raise RuntimeError("WAN22 GGUF (txt2vid single-stage) requires a .gguf single stage")
+
+    set_sdpa_settings(
+        getattr(cfg, "sdpa_policy", None),
+        getattr(cfg, "attn_chunk_size", None),
+        getattr(cfg, "attention_mode", None),
+    )
+    dev_name = resolve_device_name(getattr(cfg, "device", None))
+    dev = torch.device(dev_name)
+    dt = as_torch_dtype(cfg.dtype)
+    flow_multiplier = resolve_wan_flow_multiplier(str(cfg.metadata_dir or ""))
+    variant = _resolve_single_stage_variant(
+        single_path,
+        mode="txt2vid",
+        requested_variant=getattr(cfg, "wan_engine_variant", None),
+    )
+    if variant != "5b":
+        raise RuntimeError(f"WAN22 GGUF (txt2vid) single-stage runtime is only implemented for 5B, got {variant!r}.")
+    model_key = f"wan_t2v_{variant}"
+    lvl = _resolve_offload_level(cfg)
+
+    single_model: torch.nn.Module | None = None
+    single_mm: _MemoryManagedModule | None = None
+    try:
+        single_model = mount_stage_model_from_gguf(
+            single_path,
+            stage="single",
+            dtype=dt,
+            loras=(getattr(cfg.single, "loras", ()) if cfg.single else ()),
+            logger=log,
+        )
+        single_mm = _MemoryManagedModule(single_model, load_device=dev)
+        te_dev_eff = getattr(cfg, "te_device", None) or dev_name
+        t_out, t_lat = _resolve_frame_counts(int(cfg.num_frames), logger=log)
+        h_lat = max(8, int(cfg.height) // 8)
+        w_lat = max(8, int(cfg.width) // 8)
+        t = int(t_lat)
+        geom = infer_patch_geometry(single_model, t=t, h_lat=h_lat, w_lat=w_lat)
+        prompt_embeds, negative_embeds = _resolve_single_stage_text_embeddings(
+            cfg=cfg,
+            model_dir=os.path.dirname(single_path),
+            model_key=model_key,
+            dev_name=dev_name,
+            dev=dev,
+            dt=dt,
+            te_device=(cfg.te_device or te_dev_eff),
+            logger=log,
+        )
+        flow_shift_value = _require_flow_shift("single", getattr(cfg.single, "flow_shift", None) if cfg.single else None)
+        scheduler, total_steps, sampler_configured, sampler_effective = make_scheduler(
+            int(getattr(cfg.single, "steps", 0) or 0),
+            metadata_dir=str(cfg.metadata_dir or ""),
+            flow_shift=float(flow_shift_value),
+            sampler=(getattr(cfg.single, "sampler", None) if cfg.single else None),
+            scheduler=(getattr(cfg.single, "scheduler", None) if cfg.single else None),
+            return_effective_sampler=True,
+        )
+        log.info(
+            "[wan22.gguf] SINGLE: steps=%s sampler_effective=%s sampler_configured=%s scheduler=%s",
+            total_steps,
+            sampler_effective,
+            sampler_configured,
+            getattr(cfg.single, "scheduler", None),
+        )
+
+        memory_management.manager.load_model(single_mm)
+        progress_adapter = _WanUnifiedBlockProgressAdapter(stage_name="single")
+        try:
+            transformer_options = progress_adapter.transformer_options()
+            progress_adapter.assert_wired(branch="stream_txt2vid.single")
+            latents = yield from sample_stage_latents_generator(
+                model=single_model,
+                geom=geom,
+                steps=total_steps,
+                cfg_scale=(getattr(cfg.single, "cfg_scale", None) if cfg.single else cfg.guidance_scale),
+                prompt_embeds=prompt_embeds,
+                negative_embeds=negative_embeds,
+                device=dev,
+                dtype=dt,
+                logger=log,
+                sampler_name=sampler_effective,
+                scheduler_name=(getattr(cfg.single, "scheduler", None) if cfg.single else None),
+                metadata_dir=cfg.metadata_dir,
+                scheduler_obj=scheduler,
+                timestep_start=0,
+                timestep_end=total_steps,
+                seed=cfg.seed,
+                state_init=None,
+                log_mem_interval=getattr(cfg, "log_mem_interval", None),
+                flow_shift=flow_shift_value,
+                flow_multiplier=flow_multiplier,
+                stage_name="single",
+                emit_logs=False,
+                transformer_options=transformer_options,
+            )
+            progress_adapter.assert_emitted(branch="stream_txt2vid.single")
+        finally:
+            progress_adapter.close()
+        del prompt_embeds
+        del negative_embeds
+    finally:
+        single_mm, single_model = _teardown_stage(
+            stage="single",
+            mm=single_mm,
+            model=single_model,
+            offload_level=lvl,
+            logger=log,
+        )
+
+    _stage_transition_barrier(logger=log, label="stream_txt2vid:single->decode", offload_level=lvl, force_clear=True)
+    latents_backup = _backup_decode_latents(latents=latents, logger=log, source="stream_txt2vid_single")
+    del latents
+    yield _coarse_progress_event(
+        stage="decode",
+        step=0,
+        total=1,
+        percent=95.0,
+        reason="vae_decode_no_block_progress",
+    )
+    frames = decode_latents_to_frames(
+        latents=latents_backup,
+        model_dir=os.path.dirname(single_path),
+        cfg=cfg,
+        logger=log,
+        expected_frames=t_out,
+    )
+    del latents_backup
+    if not frames:
+        raise RuntimeError("WAN22 GGUF: single stage produced no frames")
+    yield {"type": "result", "frames": frames}
 
 
 @_with_sram_attention_runtime_metrics
@@ -1816,6 +2208,361 @@ def stream_txt2vid(cfg: RunConfig, *, logger: Any = None):
     del latents_lo_decode_backup
     if not frames:
         raise RuntimeError("WAN22 GGUF: Low stage produced no frames")
+    yield {"type": "result", "frames": frames}
+
+
+@_with_sram_attention_runtime_metrics
+def run_img2vid_single(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) -> list[object]:
+    log = get_logger(logger)
+    single_path = pick_stage_gguf(getattr(cfg.single, "model_dir", None) if cfg.single else None, stage="single")
+    if not single_path:
+        raise RuntimeError("WAN22 GGUF (img2vid single-stage) requires a .gguf single stage")
+    if cfg.init_image is None:
+        raise RuntimeError("img2vid requires init_image for GGUF path")
+
+    set_sdpa_settings(
+        getattr(cfg, "sdpa_policy", None),
+        getattr(cfg, "attn_chunk_size", None),
+        getattr(cfg, "attention_mode", None),
+    )
+    if on_progress:
+        try:
+            on_progress(stage="prepare", step=0, total=1, percent=0.0)
+        except Exception:
+            pass
+
+    dev_name = resolve_device_name(getattr(cfg, "device", None))
+    dev = torch.device(dev_name)
+    dt = as_torch_dtype(cfg.dtype)
+    flow_multiplier = resolve_wan_flow_multiplier(str(cfg.metadata_dir or ""))
+    lvl = _resolve_offload_level(cfg)
+    variant = _resolve_single_stage_variant(
+        single_path,
+        mode="img2vid",
+        requested_variant=getattr(cfg, "wan_engine_variant", None),
+    )
+    if variant != "5b":
+        raise RuntimeError(f"WAN22 GGUF (img2vid) single-stage runtime is only implemented for 5B, got {variant!r}.")
+    model_key = f"wan_i2v_{variant}"
+
+    t_out, t_lat = _resolve_frame_counts(int(cfg.num_frames), logger=log)
+    h_lat = max(8, int(cfg.height) // 8)
+    w_lat = max(8, int(cfg.width) // 8)
+    t = int(t_lat)
+    latent_condition = vae_encode_video_condition(
+        cfg.init_image,
+        num_frames=t_out,
+        height=int(cfg.height),
+        width=int(cfg.width),
+        device=dev_name,
+        dtype=cfg.dtype,
+        img2vid_image_scale=getattr(cfg, "img2vid_image_scale", None),
+        img2vid_crop_offset_x=float(getattr(cfg, "img2vid_crop_offset_x", 0.5)),
+        img2vid_crop_offset_y=float(getattr(cfg, "img2vid_crop_offset_y", 0.5)),
+        vae_dir=cfg.vae_dir,
+        vae_config_dir=cfg.vae_config_dir,
+        logger=log,
+    )
+    if latent_condition.ndim == 4:
+        latent_condition = latent_condition.unsqueeze(2)
+    latent_condition = resize_latents_hw(latent_condition, height=h_lat, width=w_lat)
+    if int(latent_condition.shape[2]) != int(t):
+        raise RuntimeError(
+            "WAN22 GGUF: unexpected latent_condition temporal size after VAE encode "
+            f"(got_T={int(latent_condition.shape[2])} expected_T_lat={int(t)})"
+        )
+
+    single_model: torch.nn.Module | None = None
+    single_mm: _MemoryManagedModule | None = None
+    try:
+        single_model = mount_stage_model_from_gguf(
+            single_path,
+            stage="single",
+            dtype=dt,
+            loras=(getattr(cfg.single, "loras", ()) if cfg.single else ()),
+            logger=log,
+        )
+        latent_channels = int(getattr(getattr(single_model, "config", None), "latent_channels", 0) or 0)
+        if latent_channels <= 0:
+            raise RuntimeError(
+                "WAN22 GGUF: single-stage model is missing a valid latent_channels config for I2V decode "
+                f"(got {latent_channels})."
+            )
+        single_mm = _MemoryManagedModule(single_model, load_device=dev)
+        geom = infer_patch_geometry(single_model, t=t, h_lat=h_lat, w_lat=w_lat)
+        te_dev_eff = getattr(cfg, "te_device", None) or dev_name
+        prompt_embeds, negative_embeds = _resolve_single_stage_text_embeddings(
+            cfg=cfg,
+            model_dir=os.path.dirname(single_path),
+            model_key=model_key,
+            dev_name=dev_name,
+            dev=dev,
+            dt=dt,
+            te_device=(cfg.te_device or te_dev_eff),
+            logger=log,
+        )
+        flow_shift_value = _require_flow_shift("single", getattr(cfg.single, "flow_shift", None) if cfg.single else None)
+        scheduler, total_steps, sampler_configured, sampler_effective = make_scheduler(
+            int(getattr(cfg.single, "steps", 0) or 0),
+            metadata_dir=str(cfg.metadata_dir or ""),
+            flow_shift=float(flow_shift_value),
+            sampler=(getattr(cfg.single, "sampler", None) if cfg.single else None),
+            scheduler=(getattr(cfg.single, "scheduler", None) if cfg.single else None),
+            return_effective_sampler=True,
+        )
+        seed_state = _build_i2v_seed_state(
+            cfg=cfg,
+            scheduler=scheduler,
+            geom_hi=geom,
+            latent_condition=latent_condition,
+            num_frames=t_out,
+            latent_frames=t,
+            h_lat=h_lat,
+            w_lat=w_lat,
+            flow_multiplier=flow_multiplier,
+            device=dev,
+            dtype=dt,
+            logger=log,
+        )
+        del latent_condition
+
+        memory_management.manager.load_model(single_mm)
+        progress_adapter = _WanUnifiedBlockProgressAdapter(stage_name="single")
+        try:
+            transformer_options = progress_adapter.transformer_options()
+            progress_adapter.assert_wired(branch="run_img2vid.single")
+            latents = sample_stage_latents(
+                model=single_model,
+                geom=geom,
+                steps=total_steps,
+                cfg_scale=(getattr(cfg.single, "cfg_scale", None) if cfg.single else cfg.guidance_scale),
+                prompt_embeds=prompt_embeds,
+                negative_embeds=negative_embeds,
+                device=dev,
+                dtype=dt,
+                logger=log,
+                sampler_name=sampler_effective,
+                scheduler_name=(getattr(cfg.single, "scheduler", None) if cfg.single else None),
+                metadata_dir=cfg.metadata_dir,
+                scheduler_obj=scheduler,
+                timestep_start=0,
+                timestep_end=total_steps,
+                seed=None,
+                state_init=seed_state,
+                on_progress=(lambda **p: on_progress(stage="single", **p)) if on_progress else None,
+                log_mem_interval=getattr(cfg, "log_mem_interval", None),
+                flow_shift=flow_shift_value,
+                flow_multiplier=flow_multiplier,
+                stage_name="single",
+                transformer_options=transformer_options,
+            )
+            progress_adapter.assert_emitted(branch="run_img2vid.single")
+        finally:
+            progress_adapter.close()
+        del prompt_embeds
+        del negative_embeds
+    finally:
+        single_mm, single_model = _teardown_stage(
+            stage="single",
+            mm=single_mm,
+            model=single_model,
+            offload_level=lvl,
+            logger=log,
+        )
+
+    latents_decode = _extract_i2v_decode_latents(state=latents, latent_channels=latent_channels, logger=log)
+    del latents
+    _stage_transition_barrier(logger=log, label="img2vid:single->decode", offload_level=lvl, force_clear=True)
+    latents_backup = _backup_decode_latents(latents=latents_decode, logger=log, source="run_img2vid_single")
+    del latents_decode
+    frames = decode_latents_to_frames(
+        latents=latents_backup,
+        model_dir=os.path.dirname(single_path),
+        cfg=cfg,
+        logger=log,
+        expected_frames=t_out,
+    )
+    del latents_backup
+    if not frames:
+        raise RuntimeError("WAN22 GGUF: single stage produced no frames")
+    return frames
+
+
+@_with_sram_attention_runtime_metrics
+def stream_img2vid_single(cfg: RunConfig, *, logger: Any = None):
+    log = get_logger(logger)
+    single_path = pick_stage_gguf(getattr(cfg.single, "model_dir", None) if cfg.single else None, stage="single")
+    if not single_path:
+        raise RuntimeError("WAN22 GGUF (img2vid single-stage) requires a .gguf single stage")
+    if cfg.init_image is None:
+        raise RuntimeError("img2vid requires init_image for GGUF path")
+
+    set_sdpa_settings(
+        getattr(cfg, "sdpa_policy", None),
+        getattr(cfg, "attn_chunk_size", None),
+        getattr(cfg, "attention_mode", None),
+    )
+    dev_name = resolve_device_name(getattr(cfg, "device", None))
+    dev = torch.device(dev_name)
+    dt = as_torch_dtype(cfg.dtype)
+    flow_multiplier = resolve_wan_flow_multiplier(str(cfg.metadata_dir or ""))
+    lvl = _resolve_offload_level(cfg)
+    variant = _resolve_single_stage_variant(
+        single_path,
+        mode="img2vid",
+        requested_variant=getattr(cfg, "wan_engine_variant", None),
+    )
+    if variant != "5b":
+        raise RuntimeError(f"WAN22 GGUF (img2vid) single-stage runtime is only implemented for 5B, got {variant!r}.")
+    model_key = f"wan_i2v_{variant}"
+
+    t_out, t_lat = _resolve_frame_counts(int(cfg.num_frames), logger=log)
+    h_lat = max(8, int(cfg.height) // 8)
+    w_lat = max(8, int(cfg.width) // 8)
+    t = int(t_lat)
+    latent_condition = vae_encode_video_condition(
+        cfg.init_image,
+        num_frames=t_out,
+        height=int(cfg.height),
+        width=int(cfg.width),
+        device=dev_name,
+        dtype=cfg.dtype,
+        img2vid_image_scale=getattr(cfg, "img2vid_image_scale", None),
+        img2vid_crop_offset_x=float(getattr(cfg, "img2vid_crop_offset_x", 0.5)),
+        img2vid_crop_offset_y=float(getattr(cfg, "img2vid_crop_offset_y", 0.5)),
+        vae_dir=cfg.vae_dir,
+        vae_config_dir=cfg.vae_config_dir,
+        logger=log,
+    )
+    if latent_condition.ndim == 4:
+        latent_condition = latent_condition.unsqueeze(2)
+    latent_condition = resize_latents_hw(latent_condition, height=h_lat, width=w_lat)
+    if int(latent_condition.shape[2]) != int(t):
+        raise RuntimeError(
+            "WAN22 GGUF: unexpected latent_condition temporal size after VAE encode "
+            f"(got_T={int(latent_condition.shape[2])} expected_T_lat={int(t)})"
+        )
+
+    single_model: torch.nn.Module | None = None
+    single_mm: _MemoryManagedModule | None = None
+    try:
+        single_model = mount_stage_model_from_gguf(
+            single_path,
+            stage="single",
+            dtype=dt,
+            loras=(getattr(cfg.single, "loras", ()) if cfg.single else ()),
+            logger=log,
+        )
+        latent_channels = int(getattr(getattr(single_model, "config", None), "latent_channels", 0) or 0)
+        if latent_channels <= 0:
+            raise RuntimeError(
+                "WAN22 GGUF: single-stage model is missing a valid latent_channels config for I2V decode "
+                f"(got {latent_channels})."
+            )
+        single_mm = _MemoryManagedModule(single_model, load_device=dev)
+        geom = infer_patch_geometry(single_model, t=t, h_lat=h_lat, w_lat=w_lat)
+        te_dev_eff = getattr(cfg, "te_device", None) or dev_name
+        prompt_embeds, negative_embeds = _resolve_single_stage_text_embeddings(
+            cfg=cfg,
+            model_dir=os.path.dirname(single_path),
+            model_key=model_key,
+            dev_name=dev_name,
+            dev=dev,
+            dt=dt,
+            te_device=(cfg.te_device or te_dev_eff),
+            logger=log,
+        )
+        flow_shift_value = _require_flow_shift("single", getattr(cfg.single, "flow_shift", None) if cfg.single else None)
+        scheduler, total_steps, sampler_configured, sampler_effective = make_scheduler(
+            int(getattr(cfg.single, "steps", 0) or 0),
+            metadata_dir=str(cfg.metadata_dir or ""),
+            flow_shift=float(flow_shift_value),
+            sampler=(getattr(cfg.single, "sampler", None) if cfg.single else None),
+            scheduler=(getattr(cfg.single, "scheduler", None) if cfg.single else None),
+            return_effective_sampler=True,
+        )
+        seed_state = _build_i2v_seed_state(
+            cfg=cfg,
+            scheduler=scheduler,
+            geom_hi=geom,
+            latent_condition=latent_condition,
+            num_frames=t_out,
+            latent_frames=t,
+            h_lat=h_lat,
+            w_lat=w_lat,
+            flow_multiplier=flow_multiplier,
+            device=dev,
+            dtype=dt,
+            logger=log,
+        )
+        del latent_condition
+
+        memory_management.manager.load_model(single_mm)
+        progress_adapter = _WanUnifiedBlockProgressAdapter(stage_name="single")
+        try:
+            transformer_options = progress_adapter.transformer_options()
+            progress_adapter.assert_wired(branch="stream_img2vid.single")
+            latents = yield from sample_stage_latents_generator(
+                model=single_model,
+                geom=geom,
+                steps=total_steps,
+                cfg_scale=(getattr(cfg.single, "cfg_scale", None) if cfg.single else cfg.guidance_scale),
+                prompt_embeds=prompt_embeds,
+                negative_embeds=negative_embeds,
+                device=dev,
+                dtype=dt,
+                logger=log,
+                sampler_name=sampler_effective,
+                scheduler_name=(getattr(cfg.single, "scheduler", None) if cfg.single else None),
+                metadata_dir=cfg.metadata_dir,
+                scheduler_obj=scheduler,
+                timestep_start=0,
+                timestep_end=total_steps,
+                seed=None,
+                state_init=seed_state,
+                log_mem_interval=getattr(cfg, "log_mem_interval", None),
+                flow_shift=flow_shift_value,
+                flow_multiplier=flow_multiplier,
+                stage_name="single",
+                emit_logs=False,
+                transformer_options=transformer_options,
+            )
+            progress_adapter.assert_emitted(branch="stream_img2vid.single")
+        finally:
+            progress_adapter.close()
+        del prompt_embeds
+        del negative_embeds
+    finally:
+        single_mm, single_model = _teardown_stage(
+            stage="single",
+            mm=single_mm,
+            model=single_model,
+            offload_level=lvl,
+            logger=log,
+        )
+
+    latents_decode = _extract_i2v_decode_latents(state=latents, latent_channels=latent_channels, logger=log)
+    del latents
+    _stage_transition_barrier(logger=log, label="stream_img2vid:single->decode", offload_level=lvl, force_clear=True)
+    latents_backup = _backup_decode_latents(latents=latents_decode, logger=log, source="stream_img2vid_single")
+    del latents_decode
+    yield _coarse_progress_event(
+        stage="decode",
+        step=0,
+        total=1,
+        percent=95.0,
+        reason="vae_decode_no_block_progress",
+    )
+    frames = decode_latents_to_frames(
+        latents=latents_backup,
+        model_dir=os.path.dirname(single_path),
+        cfg=cfg,
+        logger=log,
+        expected_frames=t_out,
+    )
+    del latents_backup
+    if not frames:
+        raise RuntimeError("WAN22 GGUF: single stage produced no frames")
     yield {"type": "result", "frames": frames}
 
 

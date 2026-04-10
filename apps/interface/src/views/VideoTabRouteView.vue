@@ -33,6 +33,7 @@ import { computed } from 'vue'
 
 import VideoModelTab from './VideoModelTab.vue'
 import { useModelTabsStore, type BaseTabType } from '../stores/model_tabs'
+import { isWanTabFamily } from '../utils/engine_taxonomy'
 
 const props = defineProps<{
   tabId: string
@@ -40,12 +41,12 @@ const props = defineProps<{
 
 const store = useModelTabsStore()
 
-type VideoTabType = Extract<BaseTabType, 'wan' | 'ltx2'>
+type VideoTabType = Extract<BaseTabType, 'wan22_14b' | 'wan22_5b' | 'ltx2'>
 
 const tab = computed(() => store.tabs.find((entry) => entry.id === props.tabId) || null)
 const videoTabType = computed<VideoTabType | null>(() => {
   const value = tab.value?.type
-  if (value === 'wan' || value === 'ltx2') return value
+  if (value === 'ltx2' || isWanTabFamily(value)) return value
   return null
 })
 </script>

@@ -11,12 +11,12 @@ Runs the selected video execution path (active WAN22 Diffusers/GGUF lanes plus t
 truthful LTX2 `executionProfile` stage flow (`distilled` and `one_stage` execute the one-stage native lane; `two_stage`
 runs `stage1_sampling -> latent_upsample -> stage2_refine -> decode`), applies shared SeedVR2
 upscaling/interpolation stages when requested, exports video, and yields progress/result events.
-WAN22 Diffusers high-stage execution reads prompt/negative from the top-level request owner, while
-the second stage still uses explicit `extras.wan_low.prompt` / `extras.wan_low.negative_prompt`.
-Temporal routing requires explicit `extras.img2vid_mode` (`solo|sliding|svi2|svi2_pro`) and rejects implicit
-mode fallbacks; sliding defaults to fixed chunk seeding for temporal continuity while SVI modes default to incremented
-per-window seeding. The native LTX2 branch consumes a local `Ltx2RunResult` (`frames + AudioExportAsset + metadata`)
-and owns cleanup of generated temp audio after export.
+WAN22 keeps exact stage ownership truthful across runtimes: GGUF 5B runs the single-stage lane from `extras.wan_single`,
+while dual-stage 14B keeps top-level prompt/negative on the request owner plus explicit second-stage
+`extras.wan_low.prompt` / `extras.wan_low.negative_prompt`. Temporal routing requires explicit `extras.img2vid_mode`
+(`solo|sliding|svi2|svi2_pro`) and rejects implicit mode fallbacks; WAN22 5B currently only supports the truthful
+single-stage `solo` path, while non-solo temporal modes fail loud as not yet implemented. The native LTX2 branch consumes
+a local `Ltx2RunResult` (`frames + AudioExportAsset + metadata`) and owns cleanup of generated temp audio after export.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_build_pipeline_telemetry_scope` (function): Creates a mutable task-scoped telemetry context owner for img2vid run/stage events.
@@ -831,7 +831,8 @@ def run_img2vid(
                 logger=logger,
             )
 
-            for ev in gguf.stream_img2vid(cfg, logger=logger):
+            stream_gguf = gguf.stream_img2vid_single if cfg.single is not None else gguf.stream_img2vid
+            for ev in stream_gguf(cfg, logger=logger):
                 if not isinstance(ev, dict):
                     raise RuntimeError(f"WAN22 GGUF: invalid stream event type: {type(ev)}")
                 if ev.get("type") == "progress":
@@ -855,6 +856,14 @@ def run_img2vid(
                     break
                 raise RuntimeError(f"WAN22 GGUF: unknown stream event type: {ev.get('type')!r}")
         elif temporal_opts.mode == "sliding":
+            cfg = build_wan22_gguf_run_config(
+                request=request,
+                device=getattr(comp, "device", None),
+                dtype=getattr(comp, "dtype", "fp16"),
+                logger=logger,
+            )
+            if cfg.single is not None:
+                raise NotImplementedError("WAN22 5B img2vid temporal mode 'sliding' not yet implemented")
             if temporal_opts.sliding is None:
                 raise RuntimeError("img2vid_mode='sliding' selected but sliding options are missing.")
             sliding_opts = temporal_opts.sliding
@@ -875,13 +884,6 @@ def run_img2vid(
                         "prefer 'fixed' for stable motion.",
                         str(sliding_opts.chunk_seed_mode),
                     )
-
-            cfg = build_wan22_gguf_run_config(
-                request=request,
-                device=getattr(comp, "device", None),
-                dtype=getattr(comp, "dtype", "fp16"),
-                logger=logger,
-            )
 
             for ev in gguf.stream_img2vid_sliding_window(
                 cfg,
@@ -917,6 +919,14 @@ def run_img2vid(
                     break
                 raise RuntimeError(f"WAN22 GGUF: unknown stream event type: {ev.get('type')!r}")
         elif temporal_opts.mode == "svi2":
+            cfg = build_wan22_gguf_run_config(
+                request=request,
+                device=getattr(comp, "device", None),
+                dtype=getattr(comp, "dtype", "fp16"),
+                logger=logger,
+            )
+            if cfg.single is not None:
+                raise NotImplementedError("WAN22 5B img2vid temporal mode 'svi2' not yet implemented")
             if temporal_opts.svi2 is None:
                 raise RuntimeError("img2vid_mode='svi2' selected but svi2 options are missing.")
             svi_opts = temporal_opts.svi2
@@ -937,13 +947,6 @@ def run_img2vid(
                         "prefer 'increment' or 'random' for long-form variation.",
                         str(svi_opts.chunk_seed_mode),
                     )
-
-            cfg = build_wan22_gguf_run_config(
-                request=request,
-                device=getattr(comp, "device", None),
-                dtype=getattr(comp, "dtype", "fp16"),
-                logger=logger,
-            )
 
             for ev in gguf.stream_img2vid_svi2(
                 cfg,
@@ -978,6 +981,14 @@ def run_img2vid(
                     break
                 raise RuntimeError(f"WAN22 GGUF: unknown stream event type: {ev.get('type')!r}")
         elif temporal_opts.mode == "svi2_pro":
+            cfg = build_wan22_gguf_run_config(
+                request=request,
+                device=getattr(comp, "device", None),
+                dtype=getattr(comp, "dtype", "fp16"),
+                logger=logger,
+            )
+            if cfg.single is not None:
+                raise NotImplementedError("WAN22 5B img2vid temporal mode 'svi2_pro' not yet implemented")
             if temporal_opts.svi2_pro is None:
                 raise RuntimeError("img2vid_mode='svi2_pro' selected but svi2_pro options are missing.")
             svi_opts = temporal_opts.svi2_pro
@@ -998,13 +1009,6 @@ def run_img2vid(
                         "prefer 'increment' or 'random' for long-form variation.",
                         str(svi_opts.chunk_seed_mode),
                     )
-
-            cfg = build_wan22_gguf_run_config(
-                request=request,
-                device=getattr(comp, "device", None),
-                dtype=getattr(comp, "dtype", "fp16"),
-                logger=logger,
-            )
 
             for ev in gguf.stream_img2vid_svi2_pro(
                 cfg,
@@ -1182,6 +1186,8 @@ def run_img2vid(
                 "scheduler": cfg.low.scheduler,
             }
 
+        primary_stage = cfg.single if cfg.single is not None else cfg.high
+
         elapsed = time.perf_counter() - start
         result = build_video_result(
             engine,
@@ -1190,8 +1196,16 @@ def run_img2vid(
             _SamplerOutcome(
                 sampler_in=getattr(request, "sampler", None),
                 scheduler_in=getattr(request, "scheduler", None),
-                sampler_effective=(cfg.high.sampler if cfg.high is not None else getattr(request, "sampler", None)),
-                scheduler_effective=(cfg.high.scheduler if cfg.high is not None else getattr(request, "scheduler", None)),
+                sampler_effective=(
+                    primary_stage.sampler
+                    if primary_stage is not None
+                    else getattr(request, "sampler", None)
+                ),
+                scheduler_effective=(
+                    primary_stage.scheduler
+                    if primary_stage is not None
+                    else getattr(request, "scheduler", None)
+                ),
             ),
             elapsed=elapsed,
             task="img2vid",

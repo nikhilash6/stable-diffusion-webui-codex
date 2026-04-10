@@ -9,7 +9,8 @@ Required Notice: see NOTICE
 Purpose: Model-asset inventory scanning and caching.
 Builds a snapshot of local model files (VAEs, text encoders, LoRAs, IP-Adapter models, IP-Adapter image encoders, WAN22 GGUF) and
 exposes cached helpers used by backend inventory endpoints and asset resolution. Text encoder entries also include an optional `slot`
-field (e.g. `clip_l`, `clip_g`) derived via header-only inspection.
+field (e.g. `clip_l`, `clip_g`) derived via header-only inspection, while WAN22 GGUF entries now carry authoritative `variant` and
+`repo_hint` metadata from header-safe structural detection.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `Inventory` (dataclass): Container for scanned model inventories (vaes/text_encoders/loras/ip_adapter_models/ip_adapter_image_encoders/wan22/metadata).
@@ -19,6 +20,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_hf_root` (function): Returns the default Hugging Face metadata root path under `apps/backend/huggingface`.
 - `_hash_file_sha256` (function): Computes sha256 by directly reading the file (fallback when the registry cache fails).
 - `_get_file_sha256` (function): Computes/loads SHA256 for a file via the model registry cache.
+- `_inspect_wan22_gguf` (function): Resolves authoritative WAN GGUF `variant`/`repo_hint` metadata from header-safe structural inspection.
 - `resolve_asset_by_sha` (function): Resolves a SHA256 hash to a file path using the current inventory snapshot.
 - `resolve_vae_path_by_sha` (function): Resolves a SHA256 hash to a VAE file path only.
 - `resolve_text_encoder_slot_by_sha` (function): Resolves a SHA256 hash to a cached text-encoder slot (when available).
@@ -60,7 +62,6 @@ class Inventory:
     ip_adapter_image_encoders: List[Dict[str, str]]
     wan22: List[Dict[str, str]]  # .gguf files under WAN22 roots
     metadata: List[Dict[str, str]]  # org/repo roots under backend/huggingface
-
 
 _CACHE: Inventory | None = None
 
@@ -105,6 +106,19 @@ def _get_file_sha256(path: str) -> str:
             exc.__class__.__name__,
         )
         return _hash_file_sha256(path)
+
+
+def _inspect_wan22_gguf(gguf_path: str) -> Dict[str, str]:
+    from apps.backend.runtime.model_registry.detectors.wan22 import inspect_wan22_gguf_path
+
+    try:
+        metadata = inspect_wan22_gguf_path(gguf_path)
+    except Exception as exc:
+        raise RuntimeError(f"WAN22 inventory metadata detection failed for {gguf_path}: {exc}") from exc
+    return {
+        "variant": metadata.family.value,
+        "repo_hint": metadata.repo_hint,
+    }
 
 
 # SHA256 -> Path resolution cache (populated during scan)
@@ -232,10 +246,11 @@ def scan_all(models_root: str | None = None, hf_root: str | None = None) -> Inve
         name = os.path.basename(full)
         stage = infer_wan22_stage(name)
         entry: Dict[str, str] = {"name": name, "path": full, "stage": stage}
+        entry.update(_inspect_wan22_gguf(full))
         entry["sha256"] = _get_file_sha256(full)
         wan22.append(entry)
     if wan22:
-        wan22.sort(key=lambda d: d["name"].lower())
+        wan22.sort(key=lambda d: (d["name"].lower(), d["path"].lower()))
 
     # Metadata folders: org/repo roots under hf_root
     metadata: List[Dict[str, str]] = []

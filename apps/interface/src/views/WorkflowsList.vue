@@ -42,6 +42,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useWorkflowsStore } from '../stores/workflows'
 import { defaultImageParamsForType, useModelTabsStore, type BaseTabType, type ImageTabType } from '../stores/model_tabs'
+import { isWanTabFamily } from '../utils/engine_taxonomy'
 
 const router = useRouter()
 const tabs = useModelTabsStore()
@@ -72,7 +73,7 @@ async function restore(itemId: string): Promise<void> {
     }
     const paramsSnapshot = { ...wf.params_snapshot }
     if (
-      wf.type !== 'wan' &&
+      !isWanTabFamily(wf.type) &&
       wf.type !== 'ltx2' &&
       !Object.prototype.hasOwnProperty.call(paramsSnapshot, 'inpaintMode')
     ) {

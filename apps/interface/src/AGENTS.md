@@ -24,7 +24,7 @@ Status: Active
 - Follow the frontend guidelines in `.sangoi/frontend/guidelines/` when adding new modules.
 - Keep API types and schemas synchronized with `.sangoi/backend/interfaces/`.
 - 2026-02-28: Source area follows root testing policy: manual validation by default; automated/unit tests are not maintained unless explicitly requested by the repo owner.
-- 2025-12-04: Legacy `/txt2vid` and `/img2vid` SPA routes were removed; current video workflows now enter exclusively via model tabs (`/models/:tabId` with `type === 'wan' | 'ltx2'`), and the frontend routes every live video family through `VideoTabRouteView.vue -> VideoModelTab.vue`.
+- 2025-12-04: Legacy `/txt2vid` and `/img2vid` SPA routes were removed; current video workflows now enter exclusively via model tabs (`/models/:tabId` with `type === 'wan22_14b' | 'wan22_5b' | 'ltx2'`), and the frontend routes every live video family through `VideoTabRouteView.vue -> VideoModelTab.vue`.
 - 2025-12-17: Added a shared `stores/workflows.ts` and guided-gen UI primitives (`styles/components/guided-gen.css`) to support WAN guided generation and reactive snapshots under `/workflows`.
 - 2025-12-23: Added shared slider primitives under `components/ui/` (SliderField + NumberStepperInput) with matching styles under `styles/components/`.
 - 2025-12-29: `App.vue` derives `--sticky-offset` from the `.main-header` height (via `ResizeObserver`) so `RunCard` can stay sticky below the header.

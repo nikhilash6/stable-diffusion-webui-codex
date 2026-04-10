@@ -23,10 +23,12 @@ Last Review: 2026-03-31
 
 ## Expectations
 - Keep runtime behavior aligned with `apps/backend/engines/wan22/`.
+- 2026-04-09: `config.py` now re-checks selected GGUF family truth through `runtime/model_registry/detectors/wan22.py::inspect_wan22_gguf_path(...)`; `wan_single` accepts only structural `WAN22_5B`, while `wan_high` / `wan_low` accept only structural `WAN22_14B`. Do not trust filename tokens or repo hints alone at this seam.
 - Current Phase 1 SRAM integration is self-attention-only. WAN22 cross-attention stays on the PyTorch SDPA path until the generic backend proves speed and VRAM advantage on the narrow self-attention slice.
 - WAN22 self-attention may hand the generic SRAM bridge non-overlapping dense `[B,H,S,D]` permute views. Do not force blind `.contiguous()` materialization on Q/K/V just to enter the SRAM path.
 - `sdpa.py`, `run.py`, `sampling.py`, and `stage_loader.py` must use generic SRAM naming/telemetry; do not reintroduce WAN-only backend naming or `attn_core` selectors into the active path.
 - Base `.gguf` artifacts are the supported root-path input; unsupported packed artifacts must fail loud.
+- Exact stage ownership now matters in config/runtime too: WAN 2.2 5B uses `RunConfig.single` plus dedicated single-stage txt2vid/img2vid entrypoints, while 14B keeps `RunConfig.high` + `RunConfig.low`. Do not fabricate empty `high/low` stages for 5B convenience.
 - WAN22 GGUF sampler support is intentionally narrow: `uni-pc` (optional solver hint), `euler`, and `euler a`. Non-lane labels (`uni-pc bh2`, `euler cfg++`, `euler a cfg++`) must fail loud and must not collapse to executable lanes.
 - `text_context.py` must keep tokenizer/model loading local-files-only and strict on device/key mismatches.
 - Stage and VAE placement remain owned by the memory manager.

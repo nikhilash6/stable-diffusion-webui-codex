@@ -153,6 +153,50 @@ Drift Also counts as drift when any of this changes per engine for the same mode
   - No hidden/store-only `swap_model` surfaces.
   - No request/runtime surfaces that quietly do nothing.
 
+**Recurring failure classes: stop recreating these.**
+
+- **Owner-path drift**
+  - Symptom: a router, engine, or convenience helper starts owning mode/stage work that belongs to a canonical use-case or shared stage.
+  - Do: keep mode ownership in `apps/backend/use_cases/*.py`; if exact sampling mutation is needed, install it from `apps/backend/use_cases/img2img.py` and enter it from `apps/backend/runtime/pipeline_stages/sampling_execute.py` after canonical LoRA activation.
+  - Do **not**: wrap whole runtime branches earlier, add engine-specific mode pipelines, or move slot/layout ownership out of owner modules such as `apps/backend/runtime/adapters/ip_adapter/layout.py`.
+
+- **Contract drift**
+  - Symptom: UI, request, parser, processing, and runtime names/defaults/allowlists stop matching each other.
+  - Do: cut over the whole seam in one tranche across `apps/interface/**`, `apps/backend/interfaces/api/routers/generation.py`, and the runtime/processing owners.
+  - Do **not**: keep alias readers, stale allowlists, or half-renamed payloads.
+  - Examples: `inpaintMode` / `img2img_inpaint_mode`; `switch_at_step`; `apps/backend/runtime/families/supir/runtime.py` resolving the loaded checkpoint from the canonical model reference.
+
+- **Lazy/load-path drift**
+  - Symptom: checkpoint helpers materialize mappings into `dict(...)`, move tensors too early, or rebuild IO semantics in convenience glue.
+  - Do: keep mapping/view ownership in `apps/backend/runtime/state_dict/views.py`; keep checkpoint IO in `apps/backend/runtime/checkpoint/io.py`; keep logical-shape load truth at the loader seam.
+  - Do **not**: materialize eager copies, normalize keys in helpers, or move load semantics into family-local shortcuts.
+
+- **Keymap/keyspace drift**
+  - Symptom: family-specific remap logic reappears in runtime helpers, stage loaders, or patch code instead of canonical keymap owners.
+  - Do: put keyspace rules in `apps/backend/runtime/state_dict/*.py`, for example `apps/backend/runtime/state_dict/keymap_wan22_transformer.py`, then have runtime consumers call that owner.
+  - Do **not**: add prefix strippers, rekey helpers, or stage-local logical remappers.
+
+- **Parity drift**
+  - Symptom: the same mode takes a different trip or emits different public semantics across engines/tabs without an approved canonical hook.
+  - Do: keep mode trips aligned through shared owners such as `apps/backend/use_cases/img2img.py`, `apps/backend/runtime/pipeline_stages/video.py`, and the shared frontend results/history owners.
+  - Do **not**: special-case one engine/tab by cloning request/result/progress logic into a peer-owned surface.
+  - Example: Z-Image masked img2img stays on its truthful runtime path in `apps/backend/runtime/families/zimage/model.py`; it does **not** get shoved through SD-style image-conditioning just because another family uses that seam.
+
+- **Fail-loud erosion**
+  - Symptom: unsupported or incomplete states survive as silent fallback, quiet no-op, or “best effort” continuation.
+  - Do: reject stale state at UI/request/runtime boundaries and raise explicit errors when a required seam has no real execution owner.
+  - Do **not**: keep hidden/store-only surfaces, default missing mandatory stages, or silently accept zero compatible layers.
+  - Examples: `apps/backend/patchers/lora_apply.py` must fail when compatibility is zero; `apps/backend/interfaces/api/routers/generation.py` must reject unsupported request surfaces before task creation.
+
+**Pre-merge anti-rerun checklist**
+
+- Is the owner path still singular and canonical?
+- Did every public field/default/allowlist change across UI/request/runtime in the same tranche?
+- Did the loader/keymap path stay lazy and single-owner?
+- Did family-specific mapping/layout logic stay in the canonical owner module?
+- Does the same mode still take the same trip across engines and tabs?
+- Will unsupported or stale state fail loud instead of degrading quietly?
+
 If an engine needs special behavior, you add a hook that the canonical use-case calls.
 If you can't express it as a hook, you stop and redesign until you can.
 No engine-specific pipelines. No zoo.

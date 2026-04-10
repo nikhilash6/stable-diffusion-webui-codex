@@ -34,10 +34,10 @@ Resolves `extras.lora_sha` / `img2img_extras.lora_sha` into server-side `lora_pa
 and when SHA ownership matches LoRA inventory (`inventory.loras`, `.safetensors`), rejecting unsupported-engine/non-LoRA resolution fail-loud.
 Enforces generation settings contracts: top-level `smart_*` payload keys are rejected and `settings_revision` must match persisted options revision.
 Uses backend API-owned WAN video request key allowlists from `interfaces/api/wan_video_request_keys.py`,
-resolves WAN variant engine keys from metadata repo/dir hints (`wan22_5b`/`wan22_14b`/`wan22_14b_animate`),
-and derives WAN sampler/scheduler defaults from metadata scheduler assets while validating `gguf_sdpa_policy` (`auto|mem_efficient|flash|math`) fail-loud.
-WAN video keeps top-level prompt/negative plus other core lane fields on the request owner, while `wan_high` stays selector-only
-(`model_sha`, `loras`, `flow_shift`) and `wan_low` remains the explicit second-stage execution owner.
+resolves exact WAN22 5B/14B engine dispatch from payload shape plus metadata/inventory cross-checks, and derives WAN
+sampler/scheduler defaults from metadata scheduler assets while validating `gguf_sdpa_policy` (`auto|mem_efficient|flash|math`) fail-loud.
+WAN 2.2 5B keeps top-level prompt/negative plus other core lane fields on the request owner while `wan_single` stays selector-only
+(`model_sha`, `loras`, `flow_shift`); WAN 2.2 14B keeps `wan_high` selector-only and `wan_low` as the explicit second-stage execution owner.
 The generic LTX video route now owns its own request contract (checkpoint-owned `ltx_execution_profile`, `32px` base geometry or `%64` final geometry
 for `two_stage`, `8n+1` frames, explicit safe defaults, derived `euler` / `simple`, negative-seed random semantics, required `img2vid_init_image`,
 and rejection of WAN-only `*_styles` baggage plus raw LTX `*_sampler` / `*_scheduler` wire keys)
@@ -49,8 +49,9 @@ Legacy WAN sampler aliases (`txt2vid_sampling`/`img2vid_sampling`) are rejected;
 WAN sampler fields are strict at API parse-time: values must resolve to real WAN22 runtime lanes (`uni-pc` with metadata-compatible optional solver hint, `euler`, or `euler a`); scheduler fields remain strict (`simple`) for WAN22 requests.
 Img2vid temporal execution now requires explicit `img2vid_mode` (`solo|sliding|svi2|svi2_pro`) with mode-scoped validation for chunk/window fields,
 and no-stretch guide controls (`img2vid_image_scale`, `img2vid_crop_offset_x`, `img2vid_crop_offset_y`) are parsed into WAN extras for runtime preprocessing.
-Requires a non-empty top-level WAN prompt owner and a non-empty `wan_low.prompt` second-stage prompt for video routes; top-level
-`negative_prompt` remains the high-stage negative owner while `wan_low.negative_prompt` is optional. WAN stage LoRAs are provided via `wan_high/wan_low.loras[]`
+Requires a non-empty top-level WAN prompt owner, uses exact lane-owned stage containers (`wan_single` for 5B or `wan_high` + `wan_low` for 14B),
+and still requires a non-empty `wan_low.prompt` second-stage prompt for 14B routes; top-level `negative_prompt` remains the 5B/high-stage negative owner
+while `wan_low.negative_prompt` is optional. WAN stage LoRAs are provided via `wan_single` / `wan_high` / `wan_low.loras[]`
 (frontend parses `<lora:...>` tags) and duplicate stage entries are deduplicated by SHA (last wins).
 Video task workers emit optional contract-trace JSONL events (`CODEX_TRACE_CONTRACT=1`) with prompt hashing only (no raw prompt text) and
 resolve WAN core dtype overrides from persisted options (`codex_core_compute_dtype`/`codex_core_dtype`) before orchestrator dispatch.
@@ -279,6 +280,7 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         | _NETFLIX_VOID_VID2VID_CORE_KEYS
         | _VID2VID_INTERNAL_ALLOWED_KEYS
     )
+    _WAN_SINGLE_ALLOWED_KEYS = set(WAN_VIDEO_REQUEST_KEYS.WAN_SINGLE_ALLOWED)
     _WAN_HIGH_ALLOWED_KEYS = set(WAN_VIDEO_REQUEST_KEYS.WAN_HIGH_ALLOWED)
     _WAN_LOW_ALLOWED_KEYS = set(WAN_VIDEO_REQUEST_KEYS.WAN_LOW_ALLOWED)
     _WAN_STAGE_LORA_ALLOWED_KEYS = {"sha", "weight"}
@@ -569,6 +571,32 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                 ),
             )
         return prompt, negative_prompt, []
+
+    def _parse_wan_request_prompt_loras(
+        *,
+        prompt_field_name: str,
+        negative_prompt_field_name: str,
+        lora_owner_field_name: str,
+        prompt: str,
+        negative_prompt: str | None,
+    ) -> tuple[str, str | None]:
+        if _WAN_PROMPT_LORA_TAG_RE.search(prompt):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"'{prompt_field_name}' must not contain '<lora:...>' tags; "
+                    f"use '{lora_owner_field_name}.loras[]' with sha/weight entries."
+                ),
+            )
+        if negative_prompt is not None and _WAN_PROMPT_LORA_TAG_RE.search(negative_prompt):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"'{negative_prompt_field_name}' must not contain '<lora:...>' tags; "
+                    f"use '{lora_owner_field_name}.loras[]' with sha/weight entries."
+                ),
+            )
+        return prompt, negative_prompt
 
     def _normalize_wan_stage_loras(
         *,
@@ -1258,27 +1286,100 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         )
 
     def _resolve_wan22_engine_key(
-        payload: Dict[str, Any], *, metadata_dir: str, task_type: TaskType
+        payload: Dict[str, Any],
+        *,
+        metadata_dir: str,
+        task_type: TaskType,
+        requested_engine_key: str,
+        resolved_stage_paths: tuple[str, ...],
     ) -> Tuple[str, str]:
         from apps.backend.core.exceptions import EngineNotFoundError
         from apps.backend.core.registry import registry as _engine_registry
 
-        repo_hint = payload.get("wan_metadata_repo")
-        candidate = "wan22_5b"
-        has_hint = False
-        if isinstance(repo_hint, str) and repo_hint.strip():
-            hint_candidate = _engine_key_from_wan_hint(repo_hint)
-            if hint_candidate:
-                candidate = hint_candidate
-                has_hint = True
+        del task_type
 
-        dir_candidate = _engine_key_from_wan_hint(metadata_dir)
-        if (not has_hint) and dir_candidate:
-            candidate = dir_candidate
-            has_hint = True
+        has_single = isinstance(payload.get("wan_single"), dict)
+        has_high = isinstance(payload.get("wan_high"), dict)
+        has_low = isinstance(payload.get("wan_low"), dict)
+        if has_single:
+            if has_high or has_low:
+                raise HTTPException(
+                    status_code=400,
+                    detail="WAN22 requests must use either 'wan_single' or ('wan_high' + 'wan_low'), not both.",
+                )
+            candidate = "wan22_5b"
+        elif has_high or has_low:
+            if not (has_high and has_low):
+                missing_stage = "wan_high" if not has_high else "wan_low"
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"WAN22 14B requests must provide both 'wan_high' and 'wan_low' (missing '{missing_stage}').",
+                )
+            candidate = "wan22_14b"
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="WAN22 requests must include either 'wan_single' or both 'wan_high' and 'wan_low'.",
+            )
+
+        if requested_engine_key:
+            normalized_requested = str(requested_engine_key).strip().lower()
+            if normalized_requested != candidate:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "WAN22 request shape does not match the selected engine. "
+                        f"Expected '{candidate}' from payload shape, got engine '{normalized_requested}'."
+                    ),
+                )
+
+        def _cross_check_signal(*, source: str, raw_value: object | None) -> None:
+            if not isinstance(raw_value, str) or not raw_value.strip():
+                return
+            signal_engine = _engine_key_from_wan_hint(raw_value)
+            if signal_engine is None:
+                return
+            if signal_engine != candidate:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "WAN22 request shape does not match metadata/inventory evidence. "
+                        f"Payload shape requires '{candidate}', but {source} indicates '{signal_engine}'."
+                    ),
+                )
+
+        _cross_check_signal(source="wan_metadata_repo", raw_value=payload.get("wan_metadata_repo"))
+        _cross_check_signal(source="wan_metadata_dir", raw_value=metadata_dir)
+        for index, stage_path in enumerate(resolved_stage_paths):
+            _cross_check_signal(source=f"resolved_stage_path[{index}]", raw_value=stage_path)
+
+        from apps.backend.runtime.model_registry.detectors.wan22 import inspect_wan22_gguf_path
+        from apps.backend.runtime.model_registry.specs import ModelFamily
+
+        expected_family = ModelFamily.WAN22_5B if candidate == "wan22_5b" else ModelFamily.WAN22_14B
+        for index, stage_path in enumerate(resolved_stage_paths):
+            try:
+                structural_metadata = inspect_wan22_gguf_path(stage_path)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "WAN22 request could not structurally inspect the selected GGUF. "
+                        f"resolved_stage_path[{index}]={stage_path}: {exc}"
+                    ),
+                ) from exc
+            if structural_metadata.family != expected_family:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "WAN22 request shape does not match the structurally detected GGUF family. "
+                        f"Payload shape requires '{candidate}', but resolved_stage_path[{index}] "
+                        f"detected '{structural_metadata.family.value}'."
+                    ),
+                )
 
         model_index_path = Path(os.path.expanduser(str(metadata_dir))) / "model_index.json"
-        if (not has_hint) and model_index_path.is_file():
+        if model_index_path.is_file():
             try:
                 model_index = json.loads(model_index_path.read_text(encoding="utf-8"))
             except Exception:
@@ -1295,16 +1396,23 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                 has_transformer_2 = _has_component(model_index.get("transformer_2"))
                 has_image_encoder = _has_component(model_index.get("image_encoder"))
 
+                metadata_candidate = None
                 if "wananimatepipeline" in class_name or "animate" in str(model_index_path).lower():
-                    candidate = "wan22_14b_animate"
+                    metadata_candidate = "wan22_14b_animate"
                 elif has_image_encoder and not has_transformer_2:
-                    candidate = "wan22_14b_animate"
+                    metadata_candidate = "wan22_14b_animate"
                 elif has_transformer_2:
-                    candidate = "wan22_14b"
+                    metadata_candidate = "wan22_14b"
                 elif model_index.get("expand_timesteps") is not None:
-                    candidate = "wan22_5b"
-
-        requested_variant = candidate
+                    metadata_candidate = "wan22_5b"
+                if metadata_candidate is not None and metadata_candidate != candidate:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "WAN22 request shape does not match metadata model_index.json evidence. "
+                            f"Payload shape requires '{candidate}', but metadata indicates '{metadata_candidate}'."
+                        ),
+                    )
 
         try:
             _ensure_default_engines_registered()
@@ -1315,7 +1423,7 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                 detail=public_http_error_detail(exc, fallback="Engine registry init failed"),
             ) from exc
         try:
-            return _engine_registry.get_descriptor(candidate).key, requested_variant
+            return _engine_registry.get_descriptor(candidate).key, candidate
         except EngineNotFoundError as exc:
             raise HTTPException(
                 status_code=409,
@@ -5253,107 +5361,162 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         def _require_sha_field(key: str) -> str:
             return _require_sha256_field(payload, key)
 
-        high_prompt, high_negative_prompt, high_prompt_stage_loras = _parse_wan_stage_prompt_loras(
-            stage_key="wan_high",
-            prompt=str(prompt or "").strip(),
-            negative_prompt=str(negative_prompt or "").strip(),
-        )
-        if not high_prompt:
-            raise HTTPException(status_code=400, detail="'txt2vid_prompt' resolved empty after WAN LoRA parsing")
-        prompt = high_prompt
-        negative_prompt = high_negative_prompt
+        has_wan_single = isinstance(payload.get("wan_single"), dict)
+        has_wan_high = isinstance(payload.get("wan_high"), dict)
+        has_wan_low = isinstance(payload.get("wan_low"), dict)
+        if has_wan_single:
+            if has_wan_high or has_wan_low:
+                raise HTTPException(
+                    status_code=400,
+                    detail="WAN22 requests must use either 'wan_single' or ('wan_high' + 'wan_low'), not both.",
+                )
+        elif has_wan_high or has_wan_low:
+            if not (has_wan_high and has_wan_low):
+                missing_stage = "wan_high" if not has_wan_high else "wan_low"
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"WAN22 14B requests must provide both 'wan_high' and 'wan_low' (missing '{missing_stage}').",
+                )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="WAN22 requests must include either 'wan_single' or both 'wan_high' and 'wan_low'.",
+            )
 
-        def _resolve_wan_stage(stage_key: str) -> dict[str, object]:
-            raw = payload.get(stage_key)
-            if not isinstance(raw, dict):
-                raise HTTPException(status_code=400, detail=f"'{stage_key}' is required and must be an object")
-            _reject_legacy_wan_stage_lora_keys(stage_key=stage_key, stage_raw=raw)
-            allowed_stage_keys = _WAN_HIGH_ALLOWED_KEYS if stage_key == "wan_high" else _WAN_LOW_ALLOWED_KEYS
-            _reject_unknown_keys(raw, allowed_stage_keys, stage_key)
+        def _resolve_wan_stage_model_path(*, stage_key: str, raw: Mapping[str, Any]) -> str:
             if isinstance(raw.get("model_dir"), str) and str(raw.get("model_dir")).strip():
-                raise HTTPException(status_code=400, detail=f"'{stage_key}.model_dir' is unsupported; use '{stage_key}.model_sha'")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'{stage_key}.model_dir' is unsupported; use '{stage_key}.model_sha'",
+                )
             sha = _require_sha256_field(raw, "model_sha")
             model_path = resolve_asset_by_sha(sha)
             if not model_path:
                 raise HTTPException(status_code=409, detail=f"WAN stage model not found for sha: {sha}")
             if not str(model_path).lower().endswith(".gguf"):
                 raise HTTPException(status_code=409, detail=f"WAN stage sha does not resolve to a .gguf file: {sha}")
-            out: dict[str, object] = dict(raw)
-            out.pop("model_sha", None)
-            out["model_dir"] = model_path
-            if stage_key == "wan_high":
-                stage_prompt = str(prompt or "").strip()
-                stage_negative_prompt = str(negative_prompt or "").strip()
-            else:
-                raw_stage_prompt = out.get("prompt")
-                if not isinstance(raw_stage_prompt, str):
-                    raise HTTPException(status_code=400, detail=f"'{stage_key}.prompt' is required and must be a string")
-                stage_prompt = str(raw_stage_prompt).strip()
-                if not stage_prompt:
-                    raise HTTPException(status_code=400, detail=f"'{stage_key}.prompt' must be a non-empty string")
-                raw_stage_negative_prompt = out.get("negative_prompt")
-                if raw_stage_negative_prompt is not None and not isinstance(raw_stage_negative_prompt, str):
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"'{stage_key}.negative_prompt' must be a string when provided",
-                    )
-                stage_negative_prompt = (
-                    str(raw_stage_negative_prompt).strip()
-                    if isinstance(raw_stage_negative_prompt, str)
-                    else None
-                )
-            stage_prompt, stage_negative_prompt, prompt_stage_loras = _parse_wan_stage_prompt_loras(
-                stage_key=stage_key,
-                prompt=stage_prompt,
-                negative_prompt=stage_negative_prompt,
+            return str(model_path)
+
+        if has_wan_single:
+            prompt, negative_prompt = _parse_wan_request_prompt_loras(
+                prompt_field_name="txt2vid_prompt",
+                negative_prompt_field_name="txt2vid_neg_prompt",
+                lora_owner_field_name="wan_single",
+                prompt=str(prompt or "").strip(),
+                negative_prompt=str(negative_prompt or "").strip(),
             )
-            if stage_key != "wan_high":
-                out["prompt"] = stage_prompt
-                out["negative_prompt"] = stage_negative_prompt
-            raw_stage_sampler = out.get("sampler")
-            if raw_stage_sampler is not None:
-                if not isinstance(raw_stage_sampler, str):
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"'{stage_key}.sampler' must be a string when provided",
-                    )
-                stage_sampler = raw_stage_sampler.strip()
-                if stage_sampler:
-                    out["sampler"] = _validate_wan22_sampler_field(
-                        field_name=f"{stage_key}.sampler",
-                        value=stage_sampler,
-                        expected_unipc_solver_hint=expected_unipc_solver_hint,
-                    )
-                else:
-                    out.pop("sampler", None)
-            raw_stage_scheduler = out.get("scheduler")
-            if raw_stage_scheduler is not None:
-                if not isinstance(raw_stage_scheduler, str):
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"'{stage_key}.scheduler' must be a string when provided",
-                    )
-                stage_scheduler = raw_stage_scheduler.strip()
-                if stage_scheduler:
-                    out["scheduler"] = _validate_wan22_scheduler_field(
-                        field_name=f"{stage_key}.scheduler",
-                        value=stage_scheduler,
-                    )
-                else:
-                    out.pop("scheduler", None)
-            explicit_stage_loras = _normalize_wan_stage_loras(
-                stage_raw=raw,
-                stage_key=stage_key,
+            if not prompt:
+                raise HTTPException(status_code=400, detail="'txt2vid_prompt' resolved empty after WAN LoRA parsing")
+
+            raw_single = payload.get("wan_single")
+            assert isinstance(raw_single, dict)
+            _reject_legacy_wan_stage_lora_keys(stage_key="wan_single", stage_raw=raw_single)
+            _reject_unknown_keys(raw_single, _WAN_SINGLE_ALLOWED_KEYS, "wan_single")
+            explicit_single_loras = _normalize_wan_stage_loras(
+                stage_raw=raw_single,
+                stage_key="wan_single",
                 resolve_asset_by_sha_fn=resolve_asset_by_sha,
             )
-            if stage_key == "wan_high":
-                out["loras"] = _merge_wan_stage_loras(high_prompt_stage_loras, explicit_stage_loras)
-            else:
-                out["loras"] = _merge_wan_stage_loras(prompt_stage_loras, explicit_stage_loras)
-            return out
+            extras["wan_single"] = {
+                "model_dir": _resolve_wan_stage_model_path(stage_key="wan_single", raw=raw_single),
+                "loras": _merge_wan_stage_loras(explicit_single_loras),
+                **(
+                    {"flow_shift": raw_single.get("flow_shift")}
+                    if raw_single.get("flow_shift") is not None
+                    else {}
+                ),
+            }
+        else:
+            prompt, negative_prompt = _parse_wan_request_prompt_loras(
+                prompt_field_name="txt2vid_prompt",
+                negative_prompt_field_name="txt2vid_neg_prompt",
+                lora_owner_field_name="wan_high",
+                prompt=str(prompt or "").strip(),
+                negative_prompt=str(negative_prompt or "").strip(),
+            )
+            if not prompt:
+                raise HTTPException(status_code=400, detail="'txt2vid_prompt' resolved empty after WAN LoRA parsing")
 
-        extras["wan_high"] = _resolve_wan_stage("wan_high")
-        extras["wan_low"] = _resolve_wan_stage("wan_low")
+            def _resolve_wan_stage(stage_key: str) -> dict[str, object]:
+                raw = payload.get(stage_key)
+                if not isinstance(raw, dict):
+                    raise HTTPException(status_code=400, detail=f"'{stage_key}' is required and must be an object")
+                _reject_legacy_wan_stage_lora_keys(stage_key=stage_key, stage_raw=raw)
+                allowed_stage_keys = _WAN_HIGH_ALLOWED_KEYS if stage_key == "wan_high" else _WAN_LOW_ALLOWED_KEYS
+                _reject_unknown_keys(raw, allowed_stage_keys, stage_key)
+                out: dict[str, object] = dict(raw)
+                out.pop("model_sha", None)
+                out["model_dir"] = _resolve_wan_stage_model_path(stage_key=stage_key, raw=raw)
+                if stage_key == "wan_high":
+                    stage_prompt = str(prompt or "").strip()
+                    stage_negative_prompt = str(negative_prompt or "").strip()
+                else:
+                    raw_stage_prompt = out.get("prompt")
+                    if not isinstance(raw_stage_prompt, str):
+                        raise HTTPException(status_code=400, detail=f"'{stage_key}.prompt' is required and must be a string")
+                    stage_prompt = str(raw_stage_prompt).strip()
+                    if not stage_prompt:
+                        raise HTTPException(status_code=400, detail=f"'{stage_key}.prompt' must be a non-empty string")
+                    raw_stage_negative_prompt = out.get("negative_prompt")
+                    if raw_stage_negative_prompt is not None and not isinstance(raw_stage_negative_prompt, str):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"'{stage_key}.negative_prompt' must be a string when provided",
+                        )
+                    stage_negative_prompt = (
+                        str(raw_stage_negative_prompt).strip()
+                        if isinstance(raw_stage_negative_prompt, str)
+                        else None
+                    )
+                stage_prompt, stage_negative_prompt, prompt_stage_loras = _parse_wan_stage_prompt_loras(
+                    stage_key=stage_key,
+                    prompt=stage_prompt,
+                    negative_prompt=stage_negative_prompt,
+                )
+                if stage_key != "wan_high":
+                    out["prompt"] = stage_prompt
+                    out["negative_prompt"] = stage_negative_prompt
+                raw_stage_sampler = out.get("sampler")
+                if raw_stage_sampler is not None:
+                    if not isinstance(raw_stage_sampler, str):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"'{stage_key}.sampler' must be a string when provided",
+                        )
+                    stage_sampler = raw_stage_sampler.strip()
+                    if stage_sampler:
+                        out["sampler"] = _validate_wan22_sampler_field(
+                            field_name=f"{stage_key}.sampler",
+                            value=stage_sampler,
+                            expected_unipc_solver_hint=expected_unipc_solver_hint,
+                        )
+                    else:
+                        out.pop("sampler", None)
+                raw_stage_scheduler = out.get("scheduler")
+                if raw_stage_scheduler is not None:
+                    if not isinstance(raw_stage_scheduler, str):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"'{stage_key}.scheduler' must be a string when provided",
+                        )
+                    stage_scheduler = raw_stage_scheduler.strip()
+                    if stage_scheduler:
+                        out["scheduler"] = _validate_wan22_scheduler_field(
+                            field_name=f"{stage_key}.scheduler",
+                            value=stage_scheduler,
+                        )
+                    else:
+                        out.pop("scheduler", None)
+                explicit_stage_loras = _normalize_wan_stage_loras(
+                    stage_raw=raw,
+                    stage_key=stage_key,
+                    resolve_asset_by_sha_fn=resolve_asset_by_sha,
+                )
+                out["loras"] = _merge_wan_stage_loras(prompt_stage_loras, explicit_stage_loras)
+                return out
+
+            extras["wan_high"] = _resolve_wan_stage("wan_high")
+            extras["wan_low"] = _resolve_wan_stage("wan_low")
 
         # Resolve sha-selected WAN assets
         if payload.get("wan_vae_path") or payload.get("wan_text_encoder_path") or payload.get("wan_text_encoder_dir"):
@@ -5410,10 +5573,17 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         _normalize_gguf_te_device(extras)
         _normalize_gguf_cache_controls(extras)
 
+        resolved_stage_paths = (
+            (str(extras["wan_single"]["model_dir"]),)
+            if "wan_single" in extras
+            else (str(extras["wan_high"]["model_dir"]), str(extras["wan_low"]["model_dir"]))
+        )
         engine_key, wan_engine_variant = _resolve_wan22_engine_key(
             payload,
             metadata_dir=wan_metadata_dir,
             task_type=TaskType.TXT2VID,
+            requested_engine_key=video_engine_key,
+            resolved_stage_paths=resolved_stage_paths,
         )
         extras["wan_engine_variant"] = wan_engine_variant
         extras["wan_engine_dispatch"] = engine_key
@@ -5442,7 +5612,7 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
             },
         )
 
-        model_ref = str(extras["wan_high"]["model_dir"])  # type: ignore[index]
+        model_ref = str(resolved_stage_paths[0])
         return req, engine_key, model_ref
 
     def prepare_img2vid(payload: Dict[str, Any]) -> Tuple[Img2VidRequest, str, Optional[str]]:
@@ -5591,107 +5761,162 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         def _require_sha_field(key: str) -> str:
             return _require_sha256_field(payload, key)
 
-        high_prompt, high_negative_prompt, high_prompt_stage_loras = _parse_wan_stage_prompt_loras(
-            stage_key="wan_high",
-            prompt=str(prompt or "").strip(),
-            negative_prompt=str(negative_prompt or "").strip(),
-        )
-        if not high_prompt:
-            raise HTTPException(status_code=400, detail="'img2vid_prompt' resolved empty after WAN LoRA parsing")
-        prompt = high_prompt
-        negative_prompt = high_negative_prompt
+        has_wan_single = isinstance(payload.get("wan_single"), dict)
+        has_wan_high = isinstance(payload.get("wan_high"), dict)
+        has_wan_low = isinstance(payload.get("wan_low"), dict)
+        if has_wan_single:
+            if has_wan_high or has_wan_low:
+                raise HTTPException(
+                    status_code=400,
+                    detail="WAN22 requests must use either 'wan_single' or ('wan_high' + 'wan_low'), not both.",
+                )
+        elif has_wan_high or has_wan_low:
+            if not (has_wan_high and has_wan_low):
+                missing_stage = "wan_high" if not has_wan_high else "wan_low"
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"WAN22 14B requests must provide both 'wan_high' and 'wan_low' (missing '{missing_stage}').",
+                )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="WAN22 requests must include either 'wan_single' or both 'wan_high' and 'wan_low'.",
+            )
 
-        def _resolve_wan_stage(stage_key: str) -> dict[str, object]:
-            raw = payload.get(stage_key)
-            if not isinstance(raw, dict):
-                raise HTTPException(status_code=400, detail=f"'{stage_key}' is required and must be an object")
-            _reject_legacy_wan_stage_lora_keys(stage_key=stage_key, stage_raw=raw)
-            allowed_stage_keys = _WAN_HIGH_ALLOWED_KEYS if stage_key == "wan_high" else _WAN_LOW_ALLOWED_KEYS
-            _reject_unknown_keys(raw, allowed_stage_keys, stage_key)
+        def _resolve_wan_stage_model_path(*, stage_key: str, raw: Mapping[str, Any]) -> str:
             if isinstance(raw.get("model_dir"), str) and str(raw.get("model_dir")).strip():
-                raise HTTPException(status_code=400, detail=f"'{stage_key}.model_dir' is unsupported; use '{stage_key}.model_sha'")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'{stage_key}.model_dir' is unsupported; use '{stage_key}.model_sha'",
+                )
             sha = _require_sha256_field(raw, "model_sha")
             model_path = resolve_asset_by_sha(sha)
             if not model_path:
                 raise HTTPException(status_code=409, detail=f"WAN stage model not found for sha: {sha}")
             if not str(model_path).lower().endswith(".gguf"):
                 raise HTTPException(status_code=409, detail=f"WAN stage sha does not resolve to a .gguf file: {sha}")
-            out: dict[str, object] = dict(raw)
-            out.pop("model_sha", None)
-            out["model_dir"] = model_path
-            if stage_key == "wan_high":
-                stage_prompt = str(prompt or "").strip()
-                stage_negative_prompt = str(negative_prompt or "").strip()
-            else:
-                raw_stage_prompt = out.get("prompt")
-                if not isinstance(raw_stage_prompt, str):
-                    raise HTTPException(status_code=400, detail=f"'{stage_key}.prompt' is required and must be a string")
-                stage_prompt = str(raw_stage_prompt).strip()
-                if not stage_prompt:
-                    raise HTTPException(status_code=400, detail=f"'{stage_key}.prompt' must be a non-empty string")
-                raw_stage_negative_prompt = out.get("negative_prompt")
-                if raw_stage_negative_prompt is not None and not isinstance(raw_stage_negative_prompt, str):
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"'{stage_key}.negative_prompt' must be a string when provided",
-                    )
-                stage_negative_prompt = (
-                    str(raw_stage_negative_prompt).strip()
-                    if isinstance(raw_stage_negative_prompt, str)
-                    else None
-                )
-            stage_prompt, stage_negative_prompt, prompt_stage_loras = _parse_wan_stage_prompt_loras(
-                stage_key=stage_key,
-                prompt=stage_prompt,
-                negative_prompt=stage_negative_prompt,
+            return str(model_path)
+
+        if has_wan_single:
+            prompt, negative_prompt = _parse_wan_request_prompt_loras(
+                prompt_field_name="img2vid_prompt",
+                negative_prompt_field_name="img2vid_neg_prompt",
+                lora_owner_field_name="wan_single",
+                prompt=str(prompt or "").strip(),
+                negative_prompt=str(negative_prompt or "").strip(),
             )
-            if stage_key != "wan_high":
-                out["prompt"] = stage_prompt
-                out["negative_prompt"] = stage_negative_prompt
-            raw_stage_sampler = out.get("sampler")
-            if raw_stage_sampler is not None:
-                if not isinstance(raw_stage_sampler, str):
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"'{stage_key}.sampler' must be a string when provided",
-                    )
-                stage_sampler = raw_stage_sampler.strip()
-                if stage_sampler:
-                    out["sampler"] = _validate_wan22_sampler_field(
-                        field_name=f"{stage_key}.sampler",
-                        value=stage_sampler,
-                        expected_unipc_solver_hint=expected_unipc_solver_hint,
-                    )
-                else:
-                    out.pop("sampler", None)
-            raw_stage_scheduler = out.get("scheduler")
-            if raw_stage_scheduler is not None:
-                if not isinstance(raw_stage_scheduler, str):
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"'{stage_key}.scheduler' must be a string when provided",
-                    )
-                stage_scheduler = raw_stage_scheduler.strip()
-                if stage_scheduler:
-                    out["scheduler"] = _validate_wan22_scheduler_field(
-                        field_name=f"{stage_key}.scheduler",
-                        value=stage_scheduler,
-                    )
-                else:
-                    out.pop("scheduler", None)
-            explicit_stage_loras = _normalize_wan_stage_loras(
-                stage_raw=raw,
-                stage_key=stage_key,
+            if not prompt:
+                raise HTTPException(status_code=400, detail="'img2vid_prompt' resolved empty after WAN LoRA parsing")
+
+            raw_single = payload.get("wan_single")
+            assert isinstance(raw_single, dict)
+            _reject_legacy_wan_stage_lora_keys(stage_key="wan_single", stage_raw=raw_single)
+            _reject_unknown_keys(raw_single, _WAN_SINGLE_ALLOWED_KEYS, "wan_single")
+            explicit_single_loras = _normalize_wan_stage_loras(
+                stage_raw=raw_single,
+                stage_key="wan_single",
                 resolve_asset_by_sha_fn=resolve_asset_by_sha,
             )
-            if stage_key == "wan_high":
-                out["loras"] = _merge_wan_stage_loras(high_prompt_stage_loras, explicit_stage_loras)
-            else:
-                out["loras"] = _merge_wan_stage_loras(prompt_stage_loras, explicit_stage_loras)
-            return out
+            extras["wan_single"] = {
+                "model_dir": _resolve_wan_stage_model_path(stage_key="wan_single", raw=raw_single),
+                "loras": _merge_wan_stage_loras(explicit_single_loras),
+                **(
+                    {"flow_shift": raw_single.get("flow_shift")}
+                    if raw_single.get("flow_shift") is not None
+                    else {}
+                ),
+            }
+        else:
+            prompt, negative_prompt = _parse_wan_request_prompt_loras(
+                prompt_field_name="img2vid_prompt",
+                negative_prompt_field_name="img2vid_neg_prompt",
+                lora_owner_field_name="wan_high",
+                prompt=str(prompt or "").strip(),
+                negative_prompt=str(negative_prompt or "").strip(),
+            )
+            if not prompt:
+                raise HTTPException(status_code=400, detail="'img2vid_prompt' resolved empty after WAN LoRA parsing")
 
-        extras["wan_high"] = _resolve_wan_stage("wan_high")
-        extras["wan_low"] = _resolve_wan_stage("wan_low")
+            def _resolve_wan_stage(stage_key: str) -> dict[str, object]:
+                raw = payload.get(stage_key)
+                if not isinstance(raw, dict):
+                    raise HTTPException(status_code=400, detail=f"'{stage_key}' is required and must be an object")
+                _reject_legacy_wan_stage_lora_keys(stage_key=stage_key, stage_raw=raw)
+                allowed_stage_keys = _WAN_HIGH_ALLOWED_KEYS if stage_key == "wan_high" else _WAN_LOW_ALLOWED_KEYS
+                _reject_unknown_keys(raw, allowed_stage_keys, stage_key)
+                out: dict[str, object] = dict(raw)
+                out.pop("model_sha", None)
+                out["model_dir"] = _resolve_wan_stage_model_path(stage_key=stage_key, raw=raw)
+                if stage_key == "wan_high":
+                    stage_prompt = str(prompt or "").strip()
+                    stage_negative_prompt = str(negative_prompt or "").strip()
+                else:
+                    raw_stage_prompt = out.get("prompt")
+                    if not isinstance(raw_stage_prompt, str):
+                        raise HTTPException(status_code=400, detail=f"'{stage_key}.prompt' is required and must be a string")
+                    stage_prompt = str(raw_stage_prompt).strip()
+                    if not stage_prompt:
+                        raise HTTPException(status_code=400, detail=f"'{stage_key}.prompt' must be a non-empty string")
+                    raw_stage_negative_prompt = out.get("negative_prompt")
+                    if raw_stage_negative_prompt is not None and not isinstance(raw_stage_negative_prompt, str):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"'{stage_key}.negative_prompt' must be a string when provided",
+                        )
+                    stage_negative_prompt = (
+                        str(raw_stage_negative_prompt).strip()
+                        if isinstance(raw_stage_negative_prompt, str)
+                        else None
+                    )
+                stage_prompt, stage_negative_prompt, prompt_stage_loras = _parse_wan_stage_prompt_loras(
+                    stage_key=stage_key,
+                    prompt=stage_prompt,
+                    negative_prompt=stage_negative_prompt,
+                )
+                if stage_key != "wan_high":
+                    out["prompt"] = stage_prompt
+                    out["negative_prompt"] = stage_negative_prompt
+                raw_stage_sampler = out.get("sampler")
+                if raw_stage_sampler is not None:
+                    if not isinstance(raw_stage_sampler, str):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"'{stage_key}.sampler' must be a string when provided",
+                        )
+                    stage_sampler = raw_stage_sampler.strip()
+                    if stage_sampler:
+                        out["sampler"] = _validate_wan22_sampler_field(
+                            field_name=f"{stage_key}.sampler",
+                            value=stage_sampler,
+                            expected_unipc_solver_hint=expected_unipc_solver_hint,
+                        )
+                    else:
+                        out.pop("sampler", None)
+                raw_stage_scheduler = out.get("scheduler")
+                if raw_stage_scheduler is not None:
+                    if not isinstance(raw_stage_scheduler, str):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"'{stage_key}.scheduler' must be a string when provided",
+                        )
+                    stage_scheduler = raw_stage_scheduler.strip()
+                    if stage_scheduler:
+                        out["scheduler"] = _validate_wan22_scheduler_field(
+                            field_name=f"{stage_key}.scheduler",
+                            value=stage_scheduler,
+                        )
+                    else:
+                        out.pop("scheduler", None)
+                explicit_stage_loras = _normalize_wan_stage_loras(
+                    stage_raw=raw,
+                    stage_key=stage_key,
+                    resolve_asset_by_sha_fn=resolve_asset_by_sha,
+                )
+                out["loras"] = _merge_wan_stage_loras(prompt_stage_loras, explicit_stage_loras)
+                return out
+
+            extras["wan_high"] = _resolve_wan_stage("wan_high")
+            extras["wan_low"] = _resolve_wan_stage("wan_low")
 
         # Resolve sha-selected WAN assets
         if payload.get("wan_vae_path") or payload.get("wan_text_encoder_path") or payload.get("wan_text_encoder_dir"):
@@ -5900,10 +6125,17 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                 )
             extras['img2vid_chunk_buffer_mode'] = chunk_buffer_mode
 
+        resolved_stage_paths = (
+            (str(extras["wan_single"]["model_dir"]),)
+            if "wan_single" in extras
+            else (str(extras["wan_high"]["model_dir"]), str(extras["wan_low"]["model_dir"]))
+        )
         engine_key, wan_engine_variant = _resolve_wan22_engine_key(
             payload,
             metadata_dir=wan_metadata_dir,
             task_type=TaskType.IMG2VID,
+            requested_engine_key=video_engine_key,
+            resolved_stage_paths=resolved_stage_paths,
         )
         extras["wan_engine_variant"] = wan_engine_variant
         extras["wan_engine_dispatch"] = engine_key
@@ -5933,7 +6165,7 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
             },
         )
 
-        model_ref = str(extras["wan_high"]["model_dir"])  # type: ignore[index]
+        model_ref = str(resolved_stage_paths[0])
         get_backend_logger('backend.api').info('[api] DEBUG: exit prepare_img2vid engine=%s model_ref=%s size=%dx%d frames=%d', engine_key, model_ref, width_val, height_val, frames_val)
         return req, engine_key, model_ref
 

@@ -8,15 +8,15 @@ Required Notice: see NOTICE
 
 Purpose: WAN 2.2 GGUF runtime config types and small parsing helpers.
 Defines the dataclasses used by the WAN22 GGUF runners (RunConfig/StageConfig) and small env-driven knobs, including
-geometry validation (e.g. `height/width % 16 == 0`), metadata-derived sampler/scheduler defaults, and strict WAN VAE
+geometry validation (e.g. `height/width % 16 == 0`), metadata-derived sampler/scheduler defaults, strict WAN VAE
 config-source contract checks (bundle dir or file+config), plus strict `gguf_sdpa_policy` validation and WAN scheduler contract validation.
-Also parses no-stretch img2vid guide controls (`img2vid_image_scale` + normalized crop offsets) into run config and resolves explicit stage
-scheduler values before shared runtime scheduler continuity checks.
+Also parses no-stretch img2vid guide controls (`img2vid_image_scale` + normalized crop offsets) into run config and now keeps the exact
+WAN 2.2 stage owner truthful: `single` for 5B, `high` + `low` for 14B.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `WAN_FLOW_MULTIPLIER` (constant): Multiplier applied to shifted sigma to build the model timestep input.
 - `StageConfig` (dataclass): Stage-level configuration (stage model selection + prompt/negative + sampler/scheduler/steps/cfg/flow_shift + ordered LoRA sequence).
-- `RunConfig` (dataclass): Full run configuration (geometry, prompts, devices/dtypes, assets, and both stages).
+- `RunConfig` (dataclass): Full run configuration (geometry, prompts, devices/dtypes, assets, and the truthful exact stage owner: `single` or `high` + `low`).
 - `_coerce_int` (function): Best-effort coercion of optional values to `int` (returns `None` on failure).
 - `_coerce_float` (function): Best-effort coercion of optional values to `float` (returns `None` on failure).
 - `_coerce_bool` (function): Best-effort coercion of optional values to `bool` (returns `None` on failure).
@@ -78,7 +78,8 @@ class RunConfig:
     text_encoder_dir: Optional[str] = None
     tokenizer_dir: Optional[str] = None
     metadata_dir: Optional[str] = None
-    wan_engine_variant: Optional[str] = None  # '5b' | '14b' when provided by API dispatch
+    wan_engine_variant: Optional[str] = None  # exact API dispatch hint ('5b'/'14b' or exact WAN22 engine key)
+    single: Optional[StageConfig] = None
     high: Optional[StageConfig] = None
     low: Optional[StageConfig] = None
     # Memory/attention controls (optional)
@@ -411,11 +412,34 @@ def build_wan22_gguf_run_config(
     else:
         raise RuntimeError(f"WAN22 GGUF: VAE path not found: {vae_path}")
 
+    ws_raw = extras.get("wan_single") if isinstance(extras.get("wan_single"), dict) else None
     wh_raw = extras.get("wan_high") if isinstance(extras.get("wan_high"), dict) else None
     wl_raw = extras.get("wan_low") if isinstance(extras.get("wan_low"), dict) else None
 
+    has_single = isinstance(ws_raw, dict)
+    has_high = isinstance(wh_raw, dict)
+    has_low = isinstance(wl_raw, dict)
+    if has_single:
+        if has_high or has_low:
+            raise RuntimeError(
+                "WAN22 GGUF: mixed stage shape is unsupported; use either 'wan_single' or ('wan_high' + 'wan_low')."
+            )
+        stage_layout = "single"
+    elif has_high or has_low:
+        if not (has_high and has_low):
+            missing_stage = "wan_high" if not has_high else "wan_low"
+            raise RuntimeError(
+                f"WAN22 GGUF: 14B stage shape requires both 'wan_high' and 'wan_low' (missing {missing_stage})."
+            )
+        stage_layout = "dual"
+    else:
+        raise RuntimeError(
+            "WAN22 GGUF requires either 'wan_single' or both 'wan_high' and 'wan_low' in request.extras."
+        )
+
     forbidden = ("lightning", "lora_path", "lora_sha", "lora_weight")
-    for stage_name, stage_cfg in (("wan_high", wh_raw), ("wan_low", wl_raw)):
+    stage_items = (("wan_single", ws_raw),) if stage_layout == "single" else (("wan_high", wh_raw), ("wan_low", wl_raw))
+    for stage_name, stage_cfg in stage_items:
         if not isinstance(stage_cfg, dict):
             continue
         for key in forbidden:
@@ -450,97 +474,156 @@ def build_wan22_gguf_run_config(
         raise RuntimeError(f"WAN22 GGUF: invalid model_index.json under {vendor_dir!r}: {exc}") from exc
     if not isinstance(model_index, dict):
         raise RuntimeError(f"WAN22 GGUF: model_index.json must be a JSON object: {model_index_path}")
-    boundary_ratio_raw = model_index.get("boundary_ratio")
-    if boundary_ratio_raw is None:
-        raise RuntimeError(f"WAN22 GGUF: model_index.json missing boundary_ratio: {model_index_path}")
-    try:
-        boundary_ratio = float(boundary_ratio_raw)
-    except Exception as exc:  # noqa: BLE001 - strict parsing
-        raise RuntimeError(f"WAN22 GGUF: invalid boundary_ratio={boundary_ratio_raw!r} in {model_index_path}") from exc
-    if not (0.0 < boundary_ratio < 1.0):
-        raise RuntimeError(
-            f"WAN22 GGUF: boundary_ratio must be in (0,1), got {boundary_ratio} in {model_index_path}"
-        )
+    def _has_component(value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, (list, tuple)):
+            return any(item is not None for item in value)
+        return True
+
+    class_name = str(model_index.get("_class_name") or "").strip().lower()
+    has_transformer_2 = _has_component(model_index.get("transformer_2"))
+    has_image_encoder = _has_component(model_index.get("image_encoder"))
+    metadata_variant_hint: str | None = None
+    if "wananimatepipeline" in class_name or "animate" in str(model_index_path).lower():
+        metadata_variant_hint = "14b_animate"
+    elif has_image_encoder and not has_transformer_2:
+        metadata_variant_hint = "14b_animate"
+    elif has_transformer_2:
+        metadata_variant_hint = "14b"
+    elif model_index.get("expand_timesteps") is not None:
+        metadata_variant_hint = "5b"
+
+    boundary_ratio = None
+    if stage_layout == "dual":
+        boundary_ratio_raw = model_index.get("boundary_ratio")
+        if boundary_ratio_raw is None:
+            raise RuntimeError(f"WAN22 GGUF: model_index.json missing boundary_ratio: {model_index_path}")
+        try:
+            boundary_ratio = float(boundary_ratio_raw)
+        except Exception as exc:  # noqa: BLE001 - strict parsing
+            raise RuntimeError(f"WAN22 GGUF: invalid boundary_ratio={boundary_ratio_raw!r} in {model_index_path}") from exc
+        if not (0.0 < boundary_ratio < 1.0):
+            raise RuntimeError(
+                f"WAN22 GGUF: boundary_ratio must be in (0,1), got {boundary_ratio} in {model_index_path}"
+            )
 
     from apps.backend.runtime.model_registry.flow_shift import flow_shift_spec_from_repo_dir
 
     default_flow_shift = flow_shift_spec_from_repo_dir(vendor_dir).resolve()
-    hi_flow_shift_override = None
-    if isinstance(wh_raw, dict) and wh_raw.get("flow_shift") is not None:
-        hi_flow_shift_override = _coerce_float(wh_raw.get("flow_shift"))
-        if hi_flow_shift_override is None:
+    if stage_layout == "single":
+        if metadata_variant_hint is not None and metadata_variant_hint != "5b":
             raise RuntimeError(
-                f"WAN22 GGUF: wan_high.flow_shift must be a float, got: {wh_raw.get('flow_shift')!r}"
+                "WAN22 GGUF: single-stage payload requires 5B metadata, "
+                f"but metadata hints {metadata_variant_hint!r} under {model_index_path}."
             )
-    lo_flow_shift_override = None
-    if isinstance(wl_raw, dict) and wl_raw.get("flow_shift") is not None:
-        lo_flow_shift_override = _coerce_float(wl_raw.get("flow_shift"))
-        if lo_flow_shift_override is None:
+        if wan_engine_variant is not None and wan_engine_variant != "5b":
             raise RuntimeError(
-                f"WAN22 GGUF: wan_low.flow_shift must be a float, got: {wl_raw.get('flow_shift')!r}"
+                "WAN22 GGUF: single-stage payload requires requested variant '5b', "
+                f"got {raw_wan_engine_variant!r}."
             )
-    if hi_flow_shift_override is not None and lo_flow_shift_override is not None:
-        if float(hi_flow_shift_override) != float(lo_flow_shift_override):
-            raise RuntimeError(
-                "WAN22 GGUF: high/low flow_shift mismatch. "
-                f"wan_high.flow_shift={hi_flow_shift_override} wan_low.flow_shift={lo_flow_shift_override}. "
-                "Schedule must be continuous."
-            )
-    if hi_flow_shift_override is not None:
-        effective_flow_shift = float(hi_flow_shift_override)
-    elif lo_flow_shift_override is not None:
-        effective_flow_shift = float(lo_flow_shift_override)
-    else:
-        effective_flow_shift = float(default_flow_shift)
-
-    hi_steps_override = None
-    if isinstance(wh_raw, dict) and wh_raw.get("steps") is not None:
-        raise RuntimeError("WAN22 GGUF: wan_high.steps is unsupported; use request.steps.")
-    lo_steps_override = None
-    if isinstance(wl_raw, dict) and wl_raw.get("steps") is not None:
-        lo_steps_override = _coerce_int(wl_raw.get("steps"))
-        if lo_steps_override is None:
-            raise RuntimeError(f"WAN22 GGUF: wan_low.steps must be an int, got: {wl_raw.get('steps')!r}")
-
-    if hi_steps_override is not None and lo_steps_override is not None:
-        default_steps_high = int(hi_steps_override)
-        default_steps_low = int(lo_steps_override)
-        if default_steps_high < 1 or default_steps_low < 1:
-            raise RuntimeError(
-                f"WAN22 GGUF: stage steps must be >= 1 (wan_high.steps={default_steps_high} wan_low.steps={default_steps_low})."
-            )
-        if (default_steps_high + default_steps_low) != int(total_steps):
-            raise RuntimeError(
-                "WAN22 GGUF: stage steps must sum to request.steps for schedule continuity "
-                f"(request.steps={total_steps} wan_high.steps={default_steps_high} wan_low.steps={default_steps_low})."
-            )
-    elif hi_steps_override is not None:
-        default_steps_high = int(hi_steps_override)
-        default_steps_low = int(total_steps - default_steps_high)
-        if default_steps_high < 1 or default_steps_low < 1:
-            raise RuntimeError(
-                "WAN22 GGUF: stage steps must sum to request.steps for schedule continuity "
-                f"(request.steps={total_steps} wan_high.steps={default_steps_high} wan_low.steps={default_steps_low})."
-            )
-    elif lo_steps_override is not None:
-        default_steps_low = int(lo_steps_override)
-        default_steps_high = int(total_steps - default_steps_low)
-        if default_steps_high < 1 or default_steps_low < 1:
-            raise RuntimeError(
-                "WAN22 GGUF: stage steps must sum to request.steps for schedule continuity "
-                f"(request.steps={total_steps} wan_high.steps={default_steps_high} wan_low.steps={default_steps_low})."
-            )
-    else:
-        from .scheduler import infer_high_steps_from_boundary_ratio
-
-        hi_steps = infer_high_steps_from_boundary_ratio(
-            total_steps=total_steps,
-            boundary_ratio=boundary_ratio,
-            vendor_dir=vendor_dir,
-            flow_shift=float(effective_flow_shift),
+        single_flow_shift_override = None
+        if isinstance(ws_raw, dict) and ws_raw.get("flow_shift") is not None:
+            single_flow_shift_override = _coerce_float(ws_raw.get("flow_shift"))
+            if single_flow_shift_override is None:
+                raise RuntimeError(
+                    f"WAN22 GGUF: wan_single.flow_shift must be a float, got: {ws_raw.get('flow_shift')!r}"
+                )
+        effective_flow_shift = (
+            float(single_flow_shift_override)
+            if single_flow_shift_override is not None
+            else float(default_flow_shift)
         )
-        default_steps_high = int(hi_steps)
-        default_steps_low = int(total_steps - hi_steps)
+        default_steps_single = int(total_steps)
+    else:
+        if metadata_variant_hint is not None and metadata_variant_hint != "14b":
+            raise RuntimeError(
+                "WAN22 GGUF: dual-stage payload requires 14B metadata, "
+                f"but metadata hints {metadata_variant_hint!r} under {model_index_path}."
+            )
+        if wan_engine_variant is not None and wan_engine_variant != "14b":
+            raise RuntimeError(
+                "WAN22 GGUF: dual-stage payload requires requested variant '14b', "
+                f"got {raw_wan_engine_variant!r}."
+            )
+        hi_flow_shift_override = None
+        if isinstance(wh_raw, dict) and wh_raw.get("flow_shift") is not None:
+            hi_flow_shift_override = _coerce_float(wh_raw.get("flow_shift"))
+            if hi_flow_shift_override is None:
+                raise RuntimeError(
+                    f"WAN22 GGUF: wan_high.flow_shift must be a float, got: {wh_raw.get('flow_shift')!r}"
+                )
+        lo_flow_shift_override = None
+        if isinstance(wl_raw, dict) and wl_raw.get("flow_shift") is not None:
+            lo_flow_shift_override = _coerce_float(wl_raw.get("flow_shift"))
+            if lo_flow_shift_override is None:
+                raise RuntimeError(
+                    f"WAN22 GGUF: wan_low.flow_shift must be a float, got: {wl_raw.get('flow_shift')!r}"
+                )
+        if hi_flow_shift_override is not None and lo_flow_shift_override is not None:
+            if float(hi_flow_shift_override) != float(lo_flow_shift_override):
+                raise RuntimeError(
+                    "WAN22 GGUF: high/low flow_shift mismatch. "
+                    f"wan_high.flow_shift={hi_flow_shift_override} wan_low.flow_shift={lo_flow_shift_override}. "
+                    "Schedule must be continuous."
+                )
+        if hi_flow_shift_override is not None:
+            effective_flow_shift = float(hi_flow_shift_override)
+        elif lo_flow_shift_override is not None:
+            effective_flow_shift = float(lo_flow_shift_override)
+        else:
+            effective_flow_shift = float(default_flow_shift)
+
+        hi_steps_override = None
+        if isinstance(wh_raw, dict) and wh_raw.get("steps") is not None:
+            raise RuntimeError("WAN22 GGUF: wan_high.steps is unsupported; use request.steps.")
+        lo_steps_override = None
+        if isinstance(wl_raw, dict) and wl_raw.get("steps") is not None:
+            lo_steps_override = _coerce_int(wl_raw.get("steps"))
+            if lo_steps_override is None:
+                raise RuntimeError(f"WAN22 GGUF: wan_low.steps must be an int, got: {wl_raw.get('steps')!r}")
+
+        if hi_steps_override is not None and lo_steps_override is not None:
+            default_steps_high = int(hi_steps_override)
+            default_steps_low = int(lo_steps_override)
+            if default_steps_high < 1 or default_steps_low < 1:
+                raise RuntimeError(
+                    f"WAN22 GGUF: stage steps must be >= 1 (wan_high.steps={default_steps_high} wan_low.steps={default_steps_low})."
+                )
+            if (default_steps_high + default_steps_low) != int(total_steps):
+                raise RuntimeError(
+                    "WAN22 GGUF: stage steps must sum to request.steps for schedule continuity "
+                    f"(request.steps={total_steps} wan_high.steps={default_steps_high} wan_low.steps={default_steps_low})."
+                )
+        elif hi_steps_override is not None:
+            default_steps_high = int(hi_steps_override)
+            default_steps_low = int(total_steps - default_steps_high)
+            if default_steps_high < 1 or default_steps_low < 1:
+                raise RuntimeError(
+                    "WAN22 GGUF: stage steps must sum to request.steps for schedule continuity "
+                    f"(request.steps={total_steps} wan_high.steps={default_steps_high} wan_low.steps={default_steps_low})."
+                )
+        elif lo_steps_override is not None:
+            default_steps_low = int(lo_steps_override)
+            default_steps_high = int(total_steps - default_steps_low)
+            if default_steps_high < 1 or default_steps_low < 1:
+                raise RuntimeError(
+                    "WAN22 GGUF: stage steps must sum to request.steps for schedule continuity "
+                    f"(request.steps={total_steps} wan_high.steps={default_steps_high} wan_low.steps={default_steps_low})."
+                )
+        else:
+            from .scheduler import infer_high_steps_from_boundary_ratio
+
+            if boundary_ratio is None:
+                raise RuntimeError("WAN22 GGUF: dual-stage scheduler split requires metadata boundary_ratio.")
+            hi_steps = infer_high_steps_from_boundary_ratio(
+                total_steps=total_steps,
+                boundary_ratio=boundary_ratio,
+                vendor_dir=vendor_dir,
+                flow_shift=float(effective_flow_shift),
+            )
+            default_steps_high = int(hi_steps)
+            default_steps_low = int(total_steps - hi_steps)
 
     def _metadata_sampler_scheduler_defaults() -> tuple[str, str]:
         scheduler_dir = os.path.join(vendor_dir, "scheduler")
@@ -624,8 +707,21 @@ def build_wan22_gguf_run_config(
             raise RuntimeError(f"WAN22 GGUF: {stage} model must be a .gguf file, got: {model_dir}")
         if not os.path.isfile(model_dir):
             raise RuntimeError(f"WAN22 GGUF: {stage} model not found: {model_dir}")
+        from apps.backend.runtime.model_registry.detectors.wan22 import inspect_wan22_gguf_path
+        from apps.backend.runtime.model_registry.specs import ModelFamily
 
-        if stage == "wan_high":
+        expected_family = ModelFamily.WAN22_5B if stage == "wan_single" else ModelFamily.WAN22_14B
+        try:
+            structural_metadata = inspect_wan22_gguf_path(model_dir)
+        except Exception as exc:
+            raise RuntimeError(f"WAN22 GGUF: failed structural inspection for {stage} model {model_dir}: {exc}") from exc
+        if structural_metadata.family != expected_family:
+            raise RuntimeError(
+                f"WAN22 GGUF: {stage} model family mismatch; expected {expected_family.value}, "
+                f"detected {structural_metadata.family.value}: {model_dir}"
+            )
+
+        if stage in {"wan_single", "wan_high"}:
             for removed_key in ("prompt", "negative_prompt", "steps", "cfg_scale", "sampler", "scheduler", "seed"):
                 if raw.get(removed_key) is not None:
                     raise RuntimeError(
@@ -633,7 +729,7 @@ def build_wan22_gguf_run_config(
                     )
             stage_prompt = str(getattr(request, "prompt", None) or "").strip() or None
             if stage_prompt is None:
-                raise RuntimeError("WAN22 GGUF: request.prompt must be a non-empty string for wan_high.")
+                raise RuntimeError(f"WAN22 GGUF: request.prompt must be a non-empty string for {stage}.")
             stage_negative_prompt = str(getattr(request, "negative_prompt", None) or "").strip()
         else:
             raw_prompt = raw.get("prompt")
@@ -654,7 +750,7 @@ def build_wan22_gguf_run_config(
                     f"WAN22 GGUF: {stage}.negative_prompt must be a string, got: {raw_negative_prompt!r}"
                 )
 
-        if stage == "wan_high":
+        if stage in {"wan_single", "wan_high"}:
             steps = int(default_steps)
             if int(steps) < 1:
                 raise RuntimeError(f"WAN22 GGUF: {stage}.steps must be >= 1, got: {steps}")
@@ -702,7 +798,7 @@ def build_wan22_gguf_run_config(
             if flow_shift is None:
                 raise RuntimeError(f"WAN22 GGUF: {stage}.flow_shift must be a float, got: {raw_flow_shift!r}")
 
-        if stage == "wan_high":
+        if stage in {"wan_single", "wan_high"}:
             seed = None
         else:
             raw_seed = raw.get("seed")
@@ -790,25 +886,69 @@ def build_wan22_gguf_run_config(
             tuple(loras),
         )
 
-    hi_dir, hi_prompt, hi_negative_prompt, hi_steps, hi_cfg, hi_sampler, hi_scheduler, hi_flow_shift, hi_seed, hi_loras = _stage_opts(
-        wh_raw, stage="wan_high", default_steps=default_steps_high
-    )
-    lo_dir, lo_prompt, lo_negative_prompt, lo_steps, lo_cfg, lo_sampler, lo_scheduler, lo_flow_shift, _lo_seed, lo_loras = _stage_opts(
-        wl_raw, stage="wan_low", default_steps=default_steps_low
-    )
+    single_dir = single_prompt = single_negative_prompt = single_sampler = single_scheduler = None
+    single_steps = single_cfg = single_flow_shift = single_seed = None
+    single_loras: tuple[tuple[str, float], ...] = ()
+    hi_dir = hi_prompt = hi_negative_prompt = hi_sampler = hi_scheduler = None
+    hi_steps = hi_cfg = hi_flow_shift = hi_seed = None
+    hi_loras: tuple[tuple[str, float], ...] = ()
+    lo_dir = lo_prompt = lo_negative_prompt = lo_sampler = lo_scheduler = None
+    lo_steps = lo_cfg = lo_flow_shift = None
+    lo_loras: tuple[tuple[str, float], ...] = ()
 
-    explicit_stage_steps = bool((wh_raw and wh_raw.get("steps") is not None) or (wl_raw and wl_raw.get("steps") is not None))
-    if explicit_stage_steps and (int(hi_steps) + int(lo_steps)) != int(total_steps):
-        raise RuntimeError(
-            "WAN22 GGUF: stage steps must sum to request.steps for schedule continuity "
-            f"(request.steps={total_steps} wan_high.steps={hi_steps} wan_low.steps={lo_steps})."
-        )
+    if stage_layout == "single":
+        (
+            single_dir,
+            single_prompt,
+            single_negative_prompt,
+            single_steps,
+            single_cfg,
+            single_sampler,
+            single_scheduler,
+            single_flow_shift,
+            single_seed,
+            single_loras,
+        ) = _stage_opts(ws_raw, stage="wan_single", default_steps=default_steps_single)
+        single_flow_shift = effective_flow_shift
+        explicit_stage_steps = False
+    else:
+        (
+            hi_dir,
+            hi_prompt,
+            hi_negative_prompt,
+            hi_steps,
+            hi_cfg,
+            hi_sampler,
+            hi_scheduler,
+            hi_flow_shift,
+            hi_seed,
+            hi_loras,
+        ) = _stage_opts(wh_raw, stage="wan_high", default_steps=default_steps_high)
+        (
+            lo_dir,
+            lo_prompt,
+            lo_negative_prompt,
+            lo_steps,
+            lo_cfg,
+            lo_sampler,
+            lo_scheduler,
+            lo_flow_shift,
+            _lo_seed,
+            lo_loras,
+        ) = _stage_opts(wl_raw, stage="wan_low", default_steps=default_steps_low)
 
-    hi_flow_shift = effective_flow_shift
-    lo_flow_shift = effective_flow_shift
+        explicit_stage_steps = bool((wh_raw and wh_raw.get("steps") is not None) or (wl_raw and wl_raw.get("steps") is not None))
+        if explicit_stage_steps and (int(hi_steps) + int(lo_steps)) != int(total_steps):
+            raise RuntimeError(
+                "WAN22 GGUF: stage steps must sum to request.steps for schedule continuity "
+                f"(request.steps={total_steps} wan_high.steps={hi_steps} wan_low.steps={lo_steps})."
+            )
+
+        hi_flow_shift = effective_flow_shift
+        lo_flow_shift = effective_flow_shift
 
     seed = getattr(request, "seed", None)
-    if hi_seed is not None:
+    if stage_layout == "dual" and hi_seed is not None:
         seed = hi_seed
 
     request_sampler = getattr(request, "sampler", None)
@@ -984,16 +1124,26 @@ def build_wan22_gguf_run_config(
             "WAN22 GGUF: 'gguf_cache_limit_mb' must be omitted or 0 when cache policy is 'none'/'off'."
         )
 
-    resolved_high_scheduler = str(hi_scheduler or scheduler_fallback).strip().lower()
-    resolved_low_scheduler = str(lo_scheduler or scheduler_fallback).strip().lower()
-    if not resolved_high_scheduler:
-        raise RuntimeError(
-            "WAN22 GGUF: failed to resolve wan_high.scheduler from stage/request/metadata defaults."
-        )
-    if not resolved_low_scheduler:
-        raise RuntimeError(
-            "WAN22 GGUF: failed to resolve wan_low.scheduler from stage/request/metadata defaults."
-        )
+    resolved_single_scheduler = None
+    resolved_high_scheduler = None
+    resolved_low_scheduler = None
+    if stage_layout == "single":
+        resolved_single_scheduler = str(single_scheduler or scheduler_fallback).strip().lower()
+        if not resolved_single_scheduler:
+            raise RuntimeError(
+                "WAN22 GGUF: failed to resolve wan_single.scheduler from stage/request/metadata defaults."
+            )
+    else:
+        resolved_high_scheduler = str(hi_scheduler or scheduler_fallback).strip().lower()
+        resolved_low_scheduler = str(lo_scheduler or scheduler_fallback).strip().lower()
+        if not resolved_high_scheduler:
+            raise RuntimeError(
+                "WAN22 GGUF: failed to resolve wan_high.scheduler from stage/request/metadata defaults."
+            )
+        if not resolved_low_scheduler:
+            raise RuntimeError(
+                "WAN22 GGUF: failed to resolve wan_low.scheduler from stage/request/metadata defaults."
+            )
 
     return RunConfig(
         width=width,
@@ -1028,26 +1178,49 @@ def build_wan22_gguf_run_config(
         img2vid_crop_offset_x=img2vid_crop_offset_x,
         img2vid_crop_offset_y=img2vid_crop_offset_y,
         te_device=(str(extras.get("gguf_te_device")).lower() if extras.get("gguf_te_device") is not None else None),
-        high=StageConfig(
-            model_dir=hi_dir,
-            prompt=hi_prompt,
-            negative_prompt=hi_negative_prompt,
-            sampler=str(hi_sampler or sampler_fallback),
-            scheduler=resolved_high_scheduler,
-            steps=max(1, int(hi_steps)),
-            cfg_scale=hi_cfg,
-            flow_shift=float(hi_flow_shift),
-            loras=hi_loras,
+        single=(
+            StageConfig(
+                model_dir=str(single_dir),
+                prompt=single_prompt,
+                negative_prompt=single_negative_prompt,
+                sampler=str(single_sampler or sampler_fallback),
+                scheduler=str(resolved_single_scheduler),
+                steps=max(1, int(single_steps)),
+                cfg_scale=single_cfg,
+                flow_shift=float(single_flow_shift),
+                loras=single_loras,
+            )
+            if stage_layout == "single"
+            else None
         ),
-        low=StageConfig(
-            model_dir=lo_dir,
-            prompt=lo_prompt,
-            negative_prompt=lo_negative_prompt,
-            sampler=str(lo_sampler or sampler_fallback),
-            scheduler=resolved_low_scheduler,
-            steps=max(1, int(lo_steps)),
-            cfg_scale=lo_cfg,
-            flow_shift=float(lo_flow_shift),
-            loras=lo_loras,
+        high=(
+            StageConfig(
+                model_dir=str(hi_dir),
+                prompt=hi_prompt,
+                negative_prompt=hi_negative_prompt,
+                sampler=str(hi_sampler or sampler_fallback),
+                scheduler=str(resolved_high_scheduler),
+                steps=max(1, int(hi_steps)),
+                cfg_scale=hi_cfg,
+                flow_shift=float(hi_flow_shift),
+                loras=hi_loras,
+            )
+            if stage_layout == "dual"
+            else None
+        ),
+        low=(
+            StageConfig(
+                model_dir=str(lo_dir),
+                prompt=lo_prompt,
+                negative_prompt=lo_negative_prompt,
+                sampler=str(lo_sampler or sampler_fallback),
+                scheduler=str(resolved_low_scheduler),
+                steps=max(1, int(lo_steps)),
+                cfg_scale=lo_cfg,
+                flow_shift=float(lo_flow_shift),
+                loras=lo_loras,
+            )
+            if stage_layout == "dual"
+            else None
         ),
     )

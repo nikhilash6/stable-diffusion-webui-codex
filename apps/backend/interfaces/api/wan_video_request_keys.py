@@ -8,9 +8,8 @@ Required Notice: see NOTICE
 
 Purpose: Backend API-owned WAN video request-key contracts for strict route validation.
 Defines the shared top-level/stage allowlists consumed by generation routers for txt2vid/img2vid unknown-key rejection, keeps WAN stage payloads on the
-canonical `loras[]` contract (no legacy single-field stage LoRA keys), splits `wan_high` from `wan_low` so the public high-stage container no longer
-mirrors top-level request owners, and exposes the legacy alias mapping used to fail loud on removed WAN request keys
-before task dispatch.
+canonical `loras[]` contract (no legacy single-field stage LoRA keys), distinguishes the exact WAN22 lane owners (`wan_single` for 5B,
+`wan_high`/`wan_low` for 14B), and exposes the legacy alias mapping used to fail loud on removed WAN request keys before task dispatch.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `WanVideoRequestKeys` (dataclass): Canonical WAN video request-key allowlists for txt2vid/img2vid and WAN stage controls.
@@ -49,7 +48,15 @@ class WanVideoRequestKeys:
     )
     VIDEO_INTERPOLATION: FrozenSet[str] = frozenset({"video_interpolation"})
     VIDEO_UPSCALING: FrozenSet[str] = frozenset({"video_upscaling"})
-    WAN_STAGE_CONTAINERS: FrozenSet[str] = frozenset({"wan_high", "wan_low"})
+    WAN_STAGE_CONTAINERS: FrozenSet[str] = frozenset({"wan_single", "wan_high", "wan_low"})
+    WAN_SINGLE_ALLOWED: FrozenSet[str] = frozenset(
+        {
+            "model_sha",
+            "model_dir",
+            "loras",
+            "flow_shift",
+        }
+    )
     WAN_HIGH_ALLOWED: FrozenSet[str] = frozenset(
         {
             "model_sha",

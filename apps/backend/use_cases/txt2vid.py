@@ -11,8 +11,9 @@ Runs the selected video execution path (active WAN22 Diffusers/GGUF lanes plus t
 truthful LTX2 `executionProfile` stage flow (`distilled` and `one_stage` execute the one-stage native lane; `two_stage`
 runs `stage1_sampling -> latent_upsample -> stage2_refine -> decode`), applies shared SeedVR2
 upscaling/interpolation stages when requested, exports the resulting video, and yields progress/result events.
-WAN22 Diffusers high-stage execution reads prompt/negative from the top-level request owner while `extras.wan_high`
-remains selector-only for stage assets/LoRAs. The native LTX2 branch consumes a local
+WAN22 keeps exact stage ownership truthful across runtimes: GGUF 5B runs the single-stage lane from `extras.wan_single`,
+while dual-stage 14B keeps top-level prompt/negative on the request owner plus selector-only `extras.wan_high` and explicit
+second-stage `extras.wan_low`. The native LTX2 branch consumes a local
 `Ltx2RunResult` (`frames + AudioExportAsset + metadata`) and owns cleanup of generated temp audio after export.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -595,8 +596,10 @@ def run_txt2vid(
             logger=logger,
         )
 
+        stream_gguf = gguf.stream_txt2vid_single if cfg.single is not None else gguf.stream_txt2vid
+
         frames: list[Any] | None = None
-        for ev in gguf.stream_txt2vid(cfg, logger=logger):
+        for ev in stream_gguf(cfg, logger=logger):
             if not isinstance(ev, dict):
                 raise RuntimeError(f"WAN22 GGUF: invalid stream event type: {type(ev)}")
             if ev.get("type") == "progress":
@@ -739,6 +742,8 @@ def run_txt2vid(
                 "scheduler": cfg.low.scheduler,
             }
 
+        primary_stage = cfg.single if cfg.single is not None else cfg.high
+
         elapsed = time.perf_counter() - start
         result = build_video_result(
             engine,
@@ -747,8 +752,16 @@ def run_txt2vid(
             _SamplerOutcome(
                 sampler_in=getattr(request, "sampler", None),
                 scheduler_in=getattr(request, "scheduler", None),
-                sampler_effective=(cfg.high.sampler if cfg.high is not None else getattr(request, "sampler", None)),
-                scheduler_effective=(cfg.high.scheduler if cfg.high is not None else getattr(request, "scheduler", None)),
+                sampler_effective=(
+                    primary_stage.sampler
+                    if primary_stage is not None
+                    else getattr(request, "sampler", None)
+                ),
+                scheduler_effective=(
+                    primary_stage.scheduler
+                    if primary_stage is not None
+                    else getattr(request, "scheduler", None)
+                ),
             ),
             elapsed=elapsed,
             task="txt2vid",

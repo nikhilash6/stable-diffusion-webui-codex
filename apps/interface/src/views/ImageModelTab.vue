@@ -571,7 +571,7 @@ import { useQuicksettingsStore } from '../stores/quicksettings'
 import { useBootstrapStore } from '../stores/bootstrap'
 import { useUpscalersStore } from '../stores/upscalers'
 import { useXyzStore } from '../stores/xyz'
-import { fallbackSamplingDefaultsForTabFamily, normalizeTabFamily } from '../utils/engine_taxonomy'
+import { fallbackSamplingDefaultsForTabFamily, isWanTabFamily, normalizeTabFamily } from '../utils/engine_taxonomy'
 import { filterModelTitlesForFamily } from '../utils/model_family_filters'
 import {
   img2imgResizeModeOptionsForEngine,
@@ -683,7 +683,7 @@ const {
 } = useWorkflowSnapshotActions({
   getTab: () => tab.value ?? null,
   getWorkflowParamsSnapshot: () => (tab.value?.params as unknown as Record<string, unknown> | null) ?? null,
-  resolveEngineSemantics: (currentTab) => (currentTab.type === 'wan' ? 'wan22' : currentTab.type),
+  resolveEngineSemantics: (currentTab) => currentTab.type,
 })
 type ImageTab = TabByType<ImageTabType>
 
@@ -731,7 +731,7 @@ watch(
 
 const imageTab = computed<ImageTab | null>(() => {
   const candidate = tab.value
-  if (!candidate || candidate.type === 'wan') return null
+  if (!candidate || isWanTabFamily(candidate.type) || candidate.type === 'ltx2') return null
   return candidate as unknown as ImageTab
 })
 const fallbackParams = computed<ImageBaseParams>(() => defaultImageParamsForType(props.type))
@@ -1040,7 +1040,7 @@ const showClipSkip = computed(() => Boolean(familyCapabilities.value?.shows_clip
 const minClipSkip = computed(() => 0)
 const swapModelChoices = computed(() => {
   const family = normalizeTabFamily(props.type)
-  if (!family || family === 'wan') return []
+  if (!family || isWanTabFamily(family)) return []
   return filterModelTitlesForFamily(quicksettingsStore.models, family, modelPaths.value)
 })
 
@@ -1094,7 +1094,7 @@ const recommendedSchedulers = computed(() =>
 
 function resolveLiveSamplingDefaults(): { sampler: string; scheduler: string } {
   const family = normalizeTabFamily(props.type)
-  if (!family || family === 'wan') {
+  if (!family || isWanTabFamily(family)) {
     return {
       sampler: String(engineSurface.value?.default_sampler || '').trim(),
       scheduler: String(engineSurface.value?.default_scheduler || '').trim(),

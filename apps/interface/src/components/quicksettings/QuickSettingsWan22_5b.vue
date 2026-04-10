@@ -6,12 +6,12 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: WAN 2.2 14B quicksettings selectors.
-Renders the exact 14B header surface: the shared `TXT2VID|IMG2VID` input-mode toggle, optional LightX2V toggle, high/low GGUF selectors,
-text encoder, and VAE selectors for the dedicated `wan22_14b` tab family.
+Purpose: WAN 2.2 5B quicksettings selectors.
+Renders the exact 5B header surface: the shared `TXT2VID|IMG2VID` input-mode toggle, one single-stage GGUF selector, and WAN text encoder/VAE selectors
+for the dedicated `wan22_5b` tab family. The header never mirrors the 14B dual-stage owner shape.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `QuickSettingsWan` (component): WAN 2.2 14B quicksettings row used by the main quicksettings bar.
+- `QuickSettingsWan22_5b` (component): WAN 2.2 5B quicksettings row used by the main quicksettings bar.
 - `dirLabel` (function): Produces compact directory/file labels from absolute paths.
 - `encoderLabel` (function): Produces compact `family/basename` labels for WAN text encoder values.
 -->
@@ -20,7 +20,7 @@ Symbols (top-level; keep in sync; no ghosts):
   <div class="quicksettings-group qs-group-wan-mode">
     <label class="label-muted">Mode</label>
     <div class="qs-row">
-      <div class="qs-toggle-group" role="group" aria-label="WAN 2.2 14B mode">
+      <div class="qs-toggle-group" role="group" aria-label="WAN 2.2 5B mode">
         <button
           type="button"
           class="btn qs-toggle-btn"
@@ -43,69 +43,25 @@ Symbols (top-level; keep in sync; no ghosts):
     </div>
   </div>
 
-  <div class="quicksettings-group qs-group-wan-lightx2v">
-    <div class="qs-row">
-      <button
-        :class="['btn', 'qs-toggle-btn', lightx2v ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
-        type="button"
-        :aria-pressed="lightx2v"
-        title="Enable LightX2V runtime"
-        @click="$emit('update:lightx2v', !lightx2v)"
-      >
-        LightX2V
-      </button>
-      <button
-        class="btn qs-btn-outline qs-inline-btn"
-        type="button"
-        title="Browse WAN models…"
-        aria-label="Browse WAN models…"
-        @click="$emit('browseModels')"
-      >
-        +
-      </button>
-    </div>
-  </div>
-
-  <div class="quicksettings-group qs-group-wan-high">
-    <label class="label-muted">WAN High model</label>
+  <div class="quicksettings-group qs-group-wan-model">
+    <label class="label-muted">WAN Model</label>
     <div class="qs-row">
       <div class="qs-pair">
-        <select id="qs-wan-high" class="select-md" :value="highModel" @change="$emit('update:highModel', ($event.target as HTMLSelectElement).value)">
+        <select id="qs-wan-single" class="select-md" :value="model" @change="$emit('update:model', ($event.target as HTMLSelectElement).value)">
           <option value="">{{ builtInLabel }}</option>
-          <option v-for="m in highChoices" :key="m" :value="m">{{ dirLabel(m) }}</option>
+          <option v-for="entry in modelChoices" :key="entry" :value="entry">{{ dirLabel(entry) }}</option>
         </select>
         <button
           class="btn qs-btn-outline qs-inline-btn qs-info-btn"
           type="button"
-          :disabled="!highModel"
+          :disabled="!model"
           title="Show model metadata"
           aria-label="Show model metadata"
-          @click="$emit('showMetadata', { kind: 'wan_high_model', value: highModel })"
+          @click="$emit('showMetadata', { kind: 'wan_model', value: model })"
         >
           i
         </button>
-      </div>
-    </div>
-  </div>
-
-  <div class="quicksettings-group qs-group-wan-low">
-    <label class="label-muted">WAN Low model</label>
-    <div class="qs-row">
-      <div class="qs-pair">
-        <select id="qs-wan-low" class="select-md" :value="lowModel" @change="$emit('update:lowModel', ($event.target as HTMLSelectElement).value)">
-          <option value="">{{ builtInLabel }}</option>
-          <option v-for="m in lowChoices" :key="m" :value="m">{{ dirLabel(m) }}</option>
-        </select>
-        <button
-          class="btn qs-btn-outline qs-inline-btn qs-info-btn"
-          type="button"
-          :disabled="!lowModel"
-          title="Show model metadata"
-          aria-label="Show model metadata"
-          @click="$emit('showMetadata', { kind: 'wan_low_model', value: lowModel })"
-        >
-          i
-        </button>
+        <button class="btn qs-btn-outline qs-inline-btn" type="button" title="Browse WAN models…" aria-label="Browse WAN models…" @click="$emit('browseModels')">+</button>
       </div>
     </div>
   </div>
@@ -114,7 +70,7 @@ Symbols (top-level; keep in sync; no ghosts):
     <label class="label-muted">WAN Text Encoder</label>
     <div class="qs-row">
       <div class="qs-pair">
-        <select id="qs-wan-text-encoder" class="select-md" :value="textEncoder" @change="$emit('update:textEncoder', ($event.target as HTMLSelectElement).value)">
+        <select id="qs-wan5b-text-encoder" class="select-md" :value="textEncoder" @change="$emit('update:textEncoder', ($event.target as HTMLSelectElement).value)">
           <option value="">{{ builtInLabel }}</option>
           <option v-for="te in textEncoderChoices" :key="te" :value="te">{{ encoderLabel(te) }}</option>
         </select>
@@ -137,9 +93,9 @@ Symbols (top-level; keep in sync; no ghosts):
     <label class="label-muted">WAN VAE</label>
     <div class="qs-row">
       <div class="qs-pair">
-        <select id="qs-wan-vae" class="select-md" :value="vae" @change="$emit('update:vae', ($event.target as HTMLSelectElement).value)">
+        <select id="qs-wan5b-vae" class="select-md" :value="vae" @change="$emit('update:vae', ($event.target as HTMLSelectElement).value)">
           <option value="">{{ builtInLabel }}</option>
-          <option v-for="v in vaeChoices" :key="v" :value="v">{{ dirLabel(v) }}</option>
+          <option v-for="entry in vaeChoices" :key="entry" :value="entry">{{ dirLabel(entry) }}</option>
         </select>
         <button
           class="btn qs-btn-outline qs-inline-btn qs-info-btn"
@@ -167,11 +123,8 @@ Symbols (top-level; keep in sync; no ghosts):
 <script setup lang="ts">
 defineProps<{
   mode: 'txt2vid' | 'img2vid'
-  lightx2v: boolean
-  highModel: string
-  highChoices: string[]
-  lowModel: string
-  lowChoices: string[]
+  model: string
+  modelChoices: string[]
   textEncoder: string
   textEncoderChoices: string[]
   vae: string
@@ -180,35 +133,32 @@ defineProps<{
 
 defineEmits<{
   (e: 'update:mode', value: 'txt2vid' | 'img2vid'): void
-  (e: 'update:lightx2v', value: boolean): void
-  (e: 'update:highModel', value: string): void
-  (e: 'update:lowModel', value: string): void
+  (e: 'update:model', value: string): void
   (e: 'update:textEncoder', value: string): void
   (e: 'update:vae', value: string): void
   (e: 'browseModels'): void
   (e: 'browseTe'): void
   (e: 'browseVae'): void
   (e: 'refresh'): void
-  (e: 'showMetadata', payload: { kind: 'wan_high_model' | 'wan_low_model' | 'wan_text_encoder' | 'wan_vae'; value: string }): void
+  (e: 'showMetadata', payload: { kind: 'wan_model' | 'wan_text_encoder' | 'wan_vae'; value: string }): void
 }>()
 
 const builtInLabel = 'Select…'
 
 function dirLabel(path: string): string {
-  const norm = path.replace(/\\/g, '/')
-  if (!norm) return ''
-  const idx = norm.lastIndexOf('/')
-  return idx >= 0 ? norm.slice(idx + 1) || norm : norm
+  const normalized = path.replace(/\\/g, '/')
+  if (!normalized) return ''
+  const index = normalized.lastIndexOf('/')
+  return index >= 0 ? normalized.slice(index + 1) || normalized : normalized
 }
 
 function encoderLabel(value: string): string {
-  const norm = String(value || '').replace(/\\/g, '/')
-  if (!norm) return ''
-  if (!norm.includes('/')) return norm
-  const [family, ...rest] = norm.split('/').filter(Boolean)
-  if (!family || rest.length === 0) return norm
+  const normalized = String(value || '').replace(/\\/g, '/')
+  if (!normalized) return ''
+  if (!normalized.includes('/')) return normalized
+  const [family, ...rest] = normalized.split('/').filter(Boolean)
+  if (!family || rest.length === 0) return normalized
   const tail = rest[rest.length - 1] || rest[0]
-  // For file labels like wan22//abs/path/to/file.safetensors, show wan22/file.safetensors.
   return `${family}/${tail}`
 }
 </script>

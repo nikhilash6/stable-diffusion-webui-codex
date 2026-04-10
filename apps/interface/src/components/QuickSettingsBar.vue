@@ -8,7 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: Shared QuickSettings top bar for Model Tabs (SD/Flux/Chroma/ZImage/LTX/WAN).
 Loads `/api/options`, `/api/models`, `/api/models/inventory`, and `/api/paths`, then filters/presents per-family selectors (models/TE/VAE)
-through the shared non-WAN `QuickSettingsAssetBlock.vue` owner plus the specialized WAN branch, and commits overrides (device + runtime flags + tab-scoped Z-Image variant) used by generation payload builders. Asset-contract-derived selector
+through the shared non-WAN `QuickSettingsAssetBlock.vue` owner plus the specialized exact WAN branches, and commits overrides (device + runtime flags + tab-scoped Z-Image variant) used by generation payload builders. Asset-contract-derived selector
 hints now disappear when checkpoint inventory metadata lacks a valid `core_only` flag, preventing stale UI contract display. FLUX.2 stays
 first-class as the current Klein 4B / base-4B slice (single Qwen3-4B selector, backend-capability-driven img2img/inpaint gating, no FLUX.1 aliasing).
 For LTX, QuickSettings remains the owner of mode + checkpoint/VAE/text-encoder selection only; execution-profile defaults are checkpoint-aware
@@ -42,7 +42,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `isQuicksettingsReady` (ref): Becomes true only after component-local inventory/paths initialization completes; gates mount-time VAE canonicalization.
 - `normalizeTextEncoderLabels` (function): Normalizes raw TE values into a stable label list (used for Flux/WAN multi-TE cases).
 - `WanAssetsParams` (type): Minimal WAN assets triple used for payload building (metadata dir + TE + VAE).
-- `currentWanAssets` (function): Builds `WanAssetsParams` from current UI selections (used by WAN payload generation).
+- `currentWanAssetsFor` (function): Builds `WanAssetsParams` from the active exact WAN tab selections (used by WAN payload generation).
 - `flux2TextEncoderFieldLabel` (computed): Resolves the truthful FLUX.2 Klein Qwen3-4B selector label from backend asset contracts.
 - `toastModelAssetOwnerRequired` (function): Explains that model-asset selectors are read-only outside `/models/:tabId`.
 - `onPrimaryTextEncoderChange` (function): Applies primary text-encoder selection changes (and triggers dependent updates).
@@ -53,13 +53,12 @@ Symbols (top-level; keep in sync; no ghosts):
 - `onCoreStreamingChange` (function): Updates core streaming toggle (runtime streaming behavior).
 - `isObliteratingVram` (ref): Tracks in-flight `/api/obliterate-vram` requests to prevent repeated fire.
 - `onObliterateVram` (function): Triggers safe VRAM cleanup and surfaces fail-loud status in quicksettings toasts/logs.
-- `resolveWanFlowShiftForMode` (function): Resolves automatic WAN stage `flowShift` policy for the selected WAN mode + LightX2V toggle.
+- `resolveWan14bFlowShift` (function): Resolves automatic WAN 14B stage `flowShift` policy for the selected input mode + LightX2V toggle.
 - `patchWanStageFlowShift` (function): Applies/removes managed WAN stage `flowShift` values without clobbering unrelated manual overrides.
 - `finiteStageFlowShift` (function): Normalizes a stage `flowShift` into a finite number or `undefined` for stable policy comparisons.
-- `ensureWanFlowShiftPolicy` (function): Enforces managed WAN `flowShift` policy on the active tab (including initial load) without update loops.
-- `onWanModeChange` (function): Updates WAN mode selection and derived controls.
+- `ensureWan14bFlowShiftPolicy` (function): Enforces managed WAN 14B `flowShift` policy on the active tab (including initial load) without update loops.
+- `onWanInputModeChange` (function): Updates the exact WAN input mode selection (`TXT2VID|IMG2VID`) and derived controls.
 - `onWanBrowseModels` (function): Opens the shared add-path modal for WAN model roots (`wan22_ckpt`) from the WAN quicksettings `+` action.
-- `onWanGuidedGen` (function): Opens WAN guided generation flow (UI navigation/CTA).
 - `activeLtxMode` (computed): Resolves the authoritative LTX `txt2vid|img2vid` mode from the active tab params.
 - `activeLtxRouteTabId` (computed): Resolves the route-scoped LTX tab id even before full tab hydration completes.
 - `isActiveLtxTabRunning` (computed): Tracks whether the route-scoped LTX tab currently has an in-flight generation task.
@@ -149,7 +148,7 @@ Symbols (top-level; keep in sync; no ghosts):
         </div>
       </template>
       <!-- WAN-specific quicksettings -->
-      <template v-else-if="activeFamily === 'wan'">
+      <template v-else-if="activeFamily === 'wan22_14b'">
         <div v-if="modelAssetSelectorsReadOnly" class="quicksettings-group qs-group-owner-note">
           <label class="label-muted">Model Tab Owner</label>
           <div class="qs-row qs-row-wrap">
@@ -159,7 +158,7 @@ Symbols (top-level; keep in sync; no ghosts):
         </div>
         <fieldset class="qs-readonly-fieldset" :disabled="modelAssetSelectorsReadOnly">
           <QuickSettingsWan
-            :mode="wanModelMode"
+            :mode="wanInputMode"
             :lightx2v="wanLightx2v"
             :high-model="wanHighModel"
             :high-choices="wanHighDirChoices"
@@ -169,10 +168,39 @@ Symbols (top-level; keep in sync; no ghosts):
             :text-encoder-choices="wanTextEncoderChoices"
             :vae="wanVae"
             :vae-choices="wanVaeChoices"
-            @update:mode="onWanModeChange"
+            @update:mode="onWanInputModeChange"
             @update:lightx2v="onWanLightx2vChange"
             @update:highModel="onWanHighModelChange"
             @update:lowModel="onWanLowModelChange"
+            @update:textEncoder="onWanTextEncoderChange"
+            @update:vae="onWanVaeChange"
+            @browseModels="onWanBrowseModels"
+            @browseTe="onWanBrowseTe"
+            @browseVae="onWanBrowseVae"
+            @refresh="refreshAll"
+            @showMetadata="onShowMetadata"
+          />
+        </fieldset>
+      </template>
+      <template v-else-if="activeFamily === 'wan22_5b'">
+        <div v-if="modelAssetSelectorsReadOnly" class="quicksettings-group qs-group-owner-note">
+          <label class="label-muted">Model Tab Owner</label>
+          <div class="qs-row qs-row-wrap">
+            <span class="caption">Checkpoint, VAE, and Text Encoder are read-only here.</span>
+            <RouterLink class="btn qs-btn-outline qs-inline-btn" :to="modelAssetOwnerRoute">Open model tab</RouterLink>
+          </div>
+        </div>
+        <fieldset class="qs-readonly-fieldset" :disabled="modelAssetSelectorsReadOnly">
+          <QuickSettingsWan22_5b
+            :mode="wanInputMode"
+            :model="wan5bModel"
+            :model-choices="wan5bModelChoices"
+            :text-encoder="wanTextEncoder"
+            :text-encoder-choices="wanTextEncoderChoices"
+            :vae="wanVae"
+            :vae-choices="wanVaeChoices"
+            @update:mode="onWanInputModeChange"
+            @update:model="onWan5bModelChange"
             @update:textEncoder="onWanTextEncoderChange"
             @update:vae="onWanVaeChange"
             @browseModels="onWanBrowseModels"
@@ -649,7 +677,7 @@ import { useRoute } from 'vue-router'
 import { useQuicksettingsStore } from '../stores/quicksettings'
 import { useUiPresetsStore } from '../stores/ui_presets'
 import { useUiBlocksStore } from '../stores/ui_blocks'
-import { MODEL_TABS_STORAGE_KEY, useModelTabsStore, type ImageBaseParams, type LtxGenerationMode, type TabByType, type WanAssetsParams, type WanStageParams } from '../stores/model_tabs'
+import { MODEL_TABS_STORAGE_KEY, useModelTabsStore, type ImageBaseParams, type LtxGenerationMode, type TabByType, type Wan5bStageParams, type WanAssetsParams, type WanStageParams, type WanTabType } from '../stores/model_tabs'
 import { useEngineCapabilitiesStore } from '../stores/engine_capabilities'
 import {
   fetchCheckpointMetadata,
@@ -663,6 +691,7 @@ import { isLtxGenerationRunningForTab } from '../composables/useLtxVideoGenerati
 import { useResultsCard } from '../composables/useResultsCard'
 import { useSupirDiagnostics, resolveSupirSelectionState } from '../composables/useSupirDiagnostics'
 import {
+  isWanTabFamily,
   normalizeTabFamily,
   semanticEngineFromTabFamily,
   tabFamilyFromSemanticEngine,
@@ -673,6 +702,7 @@ import { filterModelTitlesForFamily, enginePrefixForFamily } from '../utils/mode
 import QuickSettingsAssetBlock from './quicksettings/QuickSettingsAssetBlock.vue'
 import QuickSettingsPerf from './quicksettings/QuickSettingsPerf.vue'
 import QuickSettingsWan from './quicksettings/QuickSettingsWan.vue'
+import QuickSettingsWan22_5b from './quicksettings/QuickSettingsWan22_5b.vue'
 import QuickSettingsOverridesModal from './modals/QuickSettingsOverridesModal.vue'
 import QuickSettingsAddPathModal from './modals/QuickSettingsAddPathModal.vue'
 import AssetMetadataModal from './modals/AssetMetadataModal.vue'
@@ -686,11 +716,13 @@ const tabsStore = useModelTabsStore()
 const engineCaps = useEngineCapabilitiesStore()
 const pathsConfig = ref<Record<string, string[]>>({})
 type InventoryVae = { name: string; path: string; sha256?: string; format: string; latent_channels?: number | null; scaling_factor?: number | null }
-type InventoryWanGguf = { name: string; path: string; sha256?: string; stage: string }
+type WanInventoryVariant = 'wan22_5b' | 'wan22_14b' | 'wan22_14b_animate'
+type InventoryWanGguf = { name: string; path: string; sha256?: string; stage: string; variant?: WanInventoryVariant; repoHint?: string }
 type InventoryTextEncoder = { name: string; path: string; sha256?: string }
 type ImageTab = TabByType<'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'zimage' | 'chroma' | 'anima'>
 type LtxTab = TabByType<'ltx2'>
-type WanTab = TabByType<'wan'>
+type Wan14bTab = TabByType<'wan22_14b'>
+type Wan5bTab = TabByType<'wan22_5b'>
 type AddPathTargetKind = 'checkpoint' | 'vae' | 'text_encoder'
 const inventoryVaes = ref<InventoryVae[]>([])
 const inventoryWan = ref<InventoryWanGguf[]>([])
@@ -764,10 +796,14 @@ function currentTab(): UiPresetTab | null {
   const modelTab = activeModelTab.value
   if (route.path.startsWith('/models/')) {
     if (!modelTab) return null
-    if (modelTab.type === 'wan') {
-      const wanTab = asWanTab(modelTab)
+    if (modelTab.type === 'wan22_14b') {
+      const wanTab = asWan14bTab(modelTab)
       if (!wanTab) return null
       return wanTab.params.video.useInitImage ? 'img2vid' : 'txt2vid'
+    }
+    if (modelTab.type === 'wan22_5b') {
+      const params = modelTab.params as { video?: { useInitImage?: unknown } }
+      return params.video?.useInitImage === true ? 'img2vid' : 'txt2vid'
     }
     if (modelTab.type === 'ltx2') {
       const ltxTab = asLtxTab(modelTab)
@@ -839,14 +875,20 @@ function asImageTab(value: unknown): ImageTab | null {
   if (!value || typeof value !== 'object') return null
   const candidate = value as { type?: unknown }
   const type = normalizeTabFamily(candidate.type)
-  if (!type || type === 'wan' || type === 'ltx2') return null
+  if (!type || isWanTabFamily(type) || type === 'ltx2') return null
   return value as ImageTab
 }
 
-function asWanTab(value: unknown): WanTab | null {
+function asWan14bTab(value: unknown): Wan14bTab | null {
   if (!value || typeof value !== 'object') return null
   const candidate = value as { type?: unknown }
-  return normalizeTabFamily(candidate.type) === 'wan' ? (value as WanTab) : null
+  return normalizeTabFamily(candidate.type) === 'wan22_14b' ? (value as Wan14bTab) : null
+}
+
+function asWan5bTab(value: unknown): Wan5bTab | null {
+  if (!value || typeof value !== 'object') return null
+  const candidate = value as { type?: unknown }
+  return normalizeTabFamily(candidate.type) === 'wan22_5b' ? (value as Wan5bTab) : null
 }
 
 function asLtxTab(value: unknown): LtxTab | null {
@@ -943,6 +985,8 @@ function applyInventorySnapshot(inv: InventoryResponse): void {
     path: String(g.path),
     sha256: typeof g?.sha256 === 'string' ? String(g.sha256) : undefined,
     stage: String(g.stage || 'unknown'),
+    variant: g?.variant,
+    repoHint: typeof g?.repo_hint === 'string' ? String(g.repo_hint) : undefined,
   }))
   // Text encoder files are available via inventory for future use (e.g., Flux overrides).
   inventoryTextEncoders.value = inv.text_encoders ?? []
@@ -963,6 +1007,7 @@ type MetadataKind =
   | 'text_encoder'
   | 'text_encoder_primary'
   | 'text_encoder_secondary'
+  | 'wan_model'
   | 'wan_high_model'
   | 'wan_low_model'
   | 'wan_text_encoder'
@@ -980,6 +1025,7 @@ function parseMetadataKind(value: unknown): MetadataKind | null {
     || kind === 'text_encoder'
     || kind === 'text_encoder_primary'
     || kind === 'text_encoder_secondary'
+    || kind === 'wan_model'
     || kind === 'wan_high_model'
     || kind === 'wan_low_model'
     || kind === 'wan_text_encoder'
@@ -1065,14 +1111,18 @@ function findTextEncoderRecord(label: string): InventoryTextEncoder | undefined 
   return undefined
 }
 
-function findWanGgufRecord(label: string, stage: 'high' | 'low'): InventoryWanGguf | undefined {
+function findWanGgufRecord(
+  label: string,
+  options: { stage?: 'high' | 'low'; variant?: WanInventoryVariant } = {},
+): InventoryWanGguf | undefined {
   const raw = String(label || '').trim()
   if (!raw) return undefined
   const norm = normalizePath(raw)
   const tail = norm.split('/').pop() || raw
   return inventoryWan.value.find((w) => {
     if (!w) return false
-    if (String(w.stage || '') !== stage) return false
+    if (options.stage && String(w.stage || '') !== options.stage) return false
+    if (options.variant && w.variant !== options.variant) return false
     if (w.name === raw) return true
     const wPath = normalizePath(String(w.path || ''))
     return wPath === norm || (tail ? wPath.endsWith('/' + tail) : false)
@@ -1128,18 +1178,24 @@ function onShowMetadata(payload: unknown): void {
       sha256: sha || (isSha256(value) ? value.toLowerCase() : undefined),
       inventory: rec ? { name: rec.name, path: rec.path, sha256: rec.sha256 } : null,
     }
-  } else if (kind === 'wan_high_model' || kind === 'wan_low_model') {
-    const stage = kind === 'wan_high_model' ? 'high' : 'low'
-    const rec = findWanGgufRecord(value, stage)
+  } else if (kind === 'wan_model' || kind === 'wan_high_model' || kind === 'wan_low_model') {
+    const stage = kind === 'wan_high_model' ? 'high' : kind === 'wan_low_model' ? 'low' : null
+    const rec = findWanGgufRecord(value, stage ? { stage } : { variant: 'wan22_5b' })
     const sha = store.resolveWanGgufSha(value) || (rec?.sha256 ? String(rec.sha256) : undefined)
-    title = stage === 'high' ? 'WAN high model metadata' : 'WAN low model metadata'
+    title = stage === 'high'
+      ? 'WAN high model metadata'
+      : stage === 'low'
+        ? 'WAN low model metadata'
+        : 'WAN model metadata'
     subtitle = rec?.name ? String(rec.name) : value
     filePathForMetadata = rec?.path ? String(rec.path) : null
     out = {
       selection: value,
       stage,
+      variant: rec?.variant,
+      repo_hint: rec?.repoHint,
       sha256: sha || (isSha256(value) ? value.toLowerCase() : undefined),
-      inventory: rec ? { name: rec.name, path: rec.path, sha256: rec.sha256, stage: rec.stage } : null,
+      inventory: rec ? { name: rec.name, path: rec.path, sha256: rec.sha256, stage: rec.stage, variant: rec.variant, repoHint: rec.repoHint } : null,
     }
   } else {
     title = 'Metadata'
@@ -1326,7 +1382,7 @@ watch(
   ([family, currentVae, choices, quicksettingsReady]) => {
     if (!route.path.startsWith('/models/')) return
     if (!activeModelTab.value) return
-    if (family === 'wan' || family === 'ltx2') return
+    if (isWanTabFamily(family) || family === 'ltx2') return
     if (!quicksettingsReady) return
     const persistedFamilyVae = store.getPersistedVaeForFamily(family)
     const sourceVae = String(persistedFamilyVae || '')
@@ -1380,7 +1436,7 @@ const filteredTextEncoderChoices = computed(() => {
       .filter((item) => typeof item.path === 'string' && fileInPaths(item.path, 'zimage_tenc'))
       .map((item) => `zimage/${item.path}`)
   }
-  const prefix = fam === 'wan' ? 'wan22/' : `${fam}/`
+  const prefix = isWanTabFamily(fam) ? 'wan22/' : `${fam}/`
   return store.textEncoderChoices.filter((name: string) => typeof name === 'string' && typeof prefix === 'string' && name.startsWith(prefix))
 })
 
@@ -1529,7 +1585,8 @@ watch(
   { immediate: true },
 )
 
-const activeWanTab = computed(() => asWanTab(activeModelTab.value))
+const activeWan14bTab = computed(() => asWan14bTab(activeModelTab.value))
+const activeWan5bTab = computed(() => asWan5bTab(activeModelTab.value))
 
 function normalizeTextEncoderLabels(raw: unknown): string[] {
   if (!Array.isArray(raw)) return []
@@ -1761,6 +1818,7 @@ const wanHighDirChoices = computed(() => {
   const seen = new Set<string>()
   const out: string[] = []
   for (const g of inventoryWan.value) {
+    if (g.variant && g.variant !== 'wan22_14b') continue
     const stage = String(g.stage || 'unknown').trim().toLowerCase()
     if (stage !== 'high' && stage !== 'unknown') continue
     const path = String(g.path || '').trim()
@@ -1774,6 +1832,7 @@ const wanLowDirChoices = computed(() => {
   const seen = new Set<string>()
   const out: string[] = []
   for (const g of inventoryWan.value) {
+    if (g.variant && g.variant !== 'wan22_14b') continue
     const stage = String(g.stage || 'unknown').trim().toLowerCase()
     if (stage !== 'low' && stage !== 'unknown') continue
     const path = String(g.path || '').trim()
@@ -1783,12 +1842,24 @@ const wanLowDirChoices = computed(() => {
   return out
 })
 
-type WanModelMode = 'i2v_14b' | 't2v_14b' | 'i2v_5b' | 't2v_5b'
+const wan5bModelChoices = computed(() => {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const g of inventoryWan.value) {
+    if (g.variant !== 'wan22_5b') continue
+    const path = String(g.path || '').trim()
+    if (!path || seen.has(path)) continue
+    seen.add(path)
+    out.push(path)
+  }
+  return out
+})
+
 const WAN_LIGHTX2V_I2V_14B_FLOW_SHIFT = 5.0
 
-function resolveWanFlowShiftForMode(mode: WanModelMode, lightx2v: boolean): number | null {
+function resolveWan14bFlowShift(useInitImage: boolean, lightx2v: boolean): number | null {
   if (!lightx2v) return null
-  if (mode === 'i2v_14b') return WAN_LIGHTX2V_I2V_14B_FLOW_SHIFT
+  if (useInitImage) return WAN_LIGHTX2V_I2V_14B_FLOW_SHIFT
   return null
 }
 
@@ -1816,11 +1887,11 @@ function finiteStageFlowShift(stage: WanStageParams): number | undefined {
 
 let syncingWanFlowShiftPolicy = false
 
-async function ensureWanFlowShiftPolicy(): Promise<void> {
+async function ensureWan14bFlowShiftPolicy(): Promise<void> {
   if (syncingWanFlowShiftPolicy) return
-  const tab = activeWanTab.value
+  const tab = activeWan14bTab.value
   if (!tab) return
-  const flowShift = resolveWanFlowShiftForMode(wanModelMode.value, Boolean(tab.params.lightx2v))
+  const flowShift = resolveWan14bFlowShift(Boolean(tab.params.video?.useInitImage), Boolean(tab.params.lightx2v))
   const nextHigh = patchWanStageFlowShift(tab.params.high, flowShift)
   const nextLow = patchWanStageFlowShift(tab.params.low, flowShift)
   if (
@@ -1837,54 +1908,53 @@ async function ensureWanFlowShiftPolicy(): Promise<void> {
   }
 }
 
-function _wanRepoForMode(mode: WanModelMode): string {
-  if (mode === 't2v_14b') return 'Wan-AI/Wan2.2-T2V-A14B-Diffusers'
-  if (mode === 'i2v_5b' || mode === 't2v_5b') return 'Wan-AI/Wan2.2-TI2V-5B-Diffusers'
-  return 'Wan-AI/Wan2.2-I2V-A14B-Diffusers'
-}
-
-const wanModelMode = computed<WanModelMode>(() => {
-  const tab = activeWanTab.value
-  if (!tab) return 't2v_14b'
-  const video = tab.params.video
-  const rawAssets = tab.params.assets || { metadata: '', textEncoder: '', vae: '' }
-  const meta = String(rawAssets.metadata || '').trim().toLowerCase()
-  const is5b = meta.includes('ti2v-5b') || meta.includes('5b')
-  const kind = video?.useInitImage ? 'i2v' : 't2v'
-
-  if (is5b) return kind === 'i2v' ? 'i2v_5b' : 't2v_5b'
-  if (kind === 'i2v') return 'i2v_14b'
-  return 't2v_14b'
-})
-
 const wanLightx2v = computed(() => {
-  const tab = activeWanTab.value
+  const tab = activeWan14bTab.value
   if (!tab) return false
   return Boolean(tab.params.lightx2v)
 })
 
 const wanHighModel = computed(() => {
-  const tab = activeWanTab.value
+  const tab = activeWan14bTab.value
   if (!tab) return ''
   return tab.params.high?.modelDir || ''
 })
 
 const wanLowModel = computed(() => {
-  const tab = activeWanTab.value
+  const tab = activeWan14bTab.value
   if (!tab) return ''
   return tab.params.low?.modelDir || ''
 })
 
-function currentWanAssets(): WanAssetsParams {
+const wan5bModel = computed(() => {
+  const tab = activeWan5bTab.value
+  if (!tab) return ''
+  return tab.params.stage?.modelDir || ''
+})
+
+const wanInputMode = computed<'txt2vid' | 'img2vid'>(() => {
+  const tab = activeWan14bTab.value ?? activeWan5bTab.value
+  if (!tab) return 'txt2vid'
+  return tab.params.video?.useInitImage ? 'img2vid' : 'txt2vid'
+})
+
+function currentWanAssetsFor(tab: { params?: { assets?: unknown } } | null): WanAssetsParams {
   const base: WanAssetsParams = { metadata: '', textEncoder: '', vae: '' }
-  const tab = activeWanTab.value
   if (!tab) return base
-  const raw = tab.params.assets
+  const raw = tab.params?.assets as Record<string, unknown> | undefined
   return raw ? { ...base, ...raw } : base
 }
 
-const wanTextEncoder = computed(() => currentWanAssets().textEncoder || '')
-const wanVae = computed(() => currentWanAssets().vae || '')
+function resolveWanInventoryRepoHint(
+  modelDir: string,
+  options: { stage?: 'high' | 'low'; variant?: WanInventoryVariant } = {},
+): string | null {
+  return findWanGgufRecord(modelDir, options)?.repoHint ?? null
+}
+
+const activeWanAssets = computed(() => currentWanAssetsFor(activeWan14bTab.value ?? activeWan5bTab.value))
+const wanTextEncoder = computed(() => activeWanAssets.value.textEncoder || '')
+const wanVae = computed(() => activeWanAssets.value.vae || '')
 
 const wanTextEncoderChoices = computed(() => {
   // WAN22 GGUF requires an explicit TE weights file (.safetensors or .gguf). Prefer concrete
@@ -2205,56 +2275,12 @@ async function onObliterateVram(): Promise<void> {
   }
 }
 
-async function onWanModeChange(value: string): Promise<void> {
-  try {
-    const tab = activeWanTab.value
-    if (!tab) return
-
-    const raw = String(value || '').trim().toLowerCase()
-    const nextMode: WanModelMode =
-      raw === 'i2v_14b' ? 'i2v_14b'
-        : raw === 't2v_14b' ? 't2v_14b'
-          : raw === 'i2v_5b' ? 'i2v_5b'
-            : raw === 't2v_5b' ? 't2v_5b'
-                : 't2v_14b'
-
-    const currentVideo = tab.params.video
-    const videoPatch: Record<string, unknown> = {}
-    if (nextMode === 't2v_14b' || nextMode === 't2v_5b') {
-      videoPatch.useInitImage = false
-      videoPatch.initImageData = ''
-      videoPatch.initImageName = ''
-    } else {
-      // i2v
-      videoPatch.useInitImage = true
-    }
-
-    const currentAssets = currentWanAssets()
-    const nextAssets = { ...currentAssets, metadata: _wanRepoForMode(nextMode) }
-    const flowShift = resolveWanFlowShiftForMode(nextMode, Boolean(tab.params.lightx2v))
-    const nextHigh = patchWanStageFlowShift(tab.params.high, flowShift)
-    const nextLow = patchWanStageFlowShift(tab.params.low, flowShift)
-
-    await tabsStore.updateParams(
-      tab.id,
-      {
-        video: { ...currentVideo, ...videoPatch },
-        assets: nextAssets,
-        high: nextHigh,
-        low: nextLow,
-      },
-    )
-  } catch (error) {
-    toastQuicksettingsError(error)
-  }
-}
-
 async function onWanLightx2vChange(value: boolean): Promise<void> {
   try {
-    const tab = activeWanTab.value
+    const tab = activeWan14bTab.value
     if (!tab) return
     const nextLightx2v = Boolean(value)
-    const flowShift = resolveWanFlowShiftForMode(wanModelMode.value, nextLightx2v)
+    const flowShift = resolveWan14bFlowShift(Boolean(tab.params.video?.useInitImage), nextLightx2v)
     const nextHigh = patchWanStageFlowShift(tab.params.high, flowShift)
     const nextLow = patchWanStageFlowShift(tab.params.low, flowShift)
     await tabsStore.updateParams(tab.id, { lightx2v: nextLightx2v, high: nextHigh, low: nextLow })
@@ -2263,20 +2289,56 @@ async function onWanLightx2vChange(value: boolean): Promise<void> {
   }
 }
 
+async function onWanInputModeChange(value: 'txt2vid' | 'img2vid'): Promise<void> {
+  try {
+    const tab = activeWan14bTab.value ?? activeWan5bTab.value
+    if (!tab) return
+    const nextUseInitImage = value === 'img2vid'
+    const currentVideo = tab.params.video
+    const videoPatch: Record<string, unknown> = { useInitImage: nextUseInitImage }
+    if (!nextUseInitImage) {
+      videoPatch.initImageData = ''
+      videoPatch.initImageName = ''
+    }
+
+    if (tab.type === 'wan22_14b') {
+      const flowShift = resolveWan14bFlowShift(nextUseInitImage, Boolean(tab.params.lightx2v))
+      const nextHigh = patchWanStageFlowShift(tab.params.high, flowShift)
+      const nextLow = patchWanStageFlowShift(tab.params.low, flowShift)
+      await tabsStore.updateParams(tab.id, {
+        video: { ...currentVideo, ...videoPatch },
+        high: nextHigh,
+        low: nextLow,
+      })
+      return
+    }
+
+    await tabsStore.updateParams(tab.id, {
+      video: {
+        ...currentVideo,
+        ...videoPatch,
+        ...(nextUseInitImage ? { img2vidMode: 'solo' } : {}),
+      },
+    })
+  } catch (error) {
+    toastQuicksettingsError(error)
+  }
+}
+
 watch(
   () => {
-    const tab = activeWanTab.value
+    const tab = activeWan14bTab.value
     if (!tab) return null
     return {
       tabId: tab.id,
-      mode: wanModelMode.value,
+      useInitImage: Boolean(tab.params.video?.useInitImage),
       lightx2v: Boolean(tab.params.lightx2v),
       highFlowShift: finiteStageFlowShift(tab.params.high),
       lowFlowShift: finiteStageFlowShift(tab.params.low),
     }
   },
   () => {
-    void ensureWanFlowShiftPolicy()
+    void ensureWan14bFlowShiftPolicy()
   },
   { immediate: true },
 )
@@ -2314,10 +2376,15 @@ async function onZImageTurboChange(value: boolean): Promise<void> {
 
 async function onWanHighModelChange(value: string): Promise<void> {
   try {
-    const tab = activeWanTab.value
+    const tab = activeWan14bTab.value
     if (!tab) return
     const current = tab.params.high || {}
-    await tabsStore.updateParams(tab.id, { high: { ...current, modelDir: value } })
+    const repoHint = resolveWanInventoryRepoHint(value, { stage: 'high', variant: 'wan22_14b' })
+    const assets = currentWanAssetsFor(tab)
+    await tabsStore.updateParams(tab.id, {
+      high: { ...current, modelDir: value },
+      assets: repoHint ? { ...assets, metadata: repoHint } : assets,
+    })
   } catch (error) {
     toastQuicksettingsError(error)
   }
@@ -2325,10 +2392,31 @@ async function onWanHighModelChange(value: string): Promise<void> {
 
 async function onWanLowModelChange(value: string): Promise<void> {
   try {
-    const tab = activeWanTab.value
+    const tab = activeWan14bTab.value
     if (!tab) return
     const current = tab.params.low || {}
-    await tabsStore.updateParams(tab.id, { low: { ...current, modelDir: value } })
+    const repoHint = resolveWanInventoryRepoHint(value, { stage: 'low', variant: 'wan22_14b' })
+    const assets = currentWanAssetsFor(tab)
+    await tabsStore.updateParams(tab.id, {
+      low: { ...current, modelDir: value },
+      assets: repoHint ? { ...assets, metadata: repoHint } : assets,
+    })
+  } catch (error) {
+    toastQuicksettingsError(error)
+  }
+}
+
+async function onWan5bModelChange(value: string): Promise<void> {
+  try {
+    const tab = activeWan5bTab.value
+    if (!tab) return
+    const current = tab.params.stage || ({} as Wan5bStageParams)
+    const repoHint = resolveWanInventoryRepoHint(value, { variant: 'wan22_5b' })
+    const assets = currentWanAssetsFor(tab)
+    await tabsStore.updateParams(tab.id, {
+      stage: { ...current, modelDir: value },
+      assets: repoHint ? { ...assets, metadata: repoHint } : assets,
+    })
   } catch (error) {
     toastQuicksettingsError(error)
   }
@@ -2336,9 +2424,9 @@ async function onWanLowModelChange(value: string): Promise<void> {
 
 async function onWanTextEncoderChange(value: string): Promise<void> {
   try {
-    const tab = activeWanTab.value
+    const tab = activeWan14bTab.value ?? activeWan5bTab.value
     if (!tab) return
-    const current = currentWanAssets()
+    const current = currentWanAssetsFor(tab)
     await tabsStore.updateParams(tab.id, { assets: { ...current, textEncoder: value } })
   } catch (error) {
     toastQuicksettingsError(error)
@@ -2347,19 +2435,13 @@ async function onWanTextEncoderChange(value: string): Promise<void> {
 
 async function onWanVaeChange(value: string): Promise<void> {
   try {
-    const tab = activeWanTab.value
+    const tab = activeWan14bTab.value ?? activeWan5bTab.value
     if (!tab) return
-    const current = currentWanAssets()
+    const current = currentWanAssetsFor(tab)
     await tabsStore.updateParams(tab.id, { assets: { ...current, vae: value } })
   } catch (error) {
     toastQuicksettingsError(error)
   }
-}
-
-function onWanGuidedGen(): void {
-  const tab = activeWanTab.value
-  if (!tab) return
-  window.dispatchEvent(new CustomEvent('codex-wan-guided-gen', { detail: { tabId: tab.id } }))
 }
 
 function openAddPathModal(options: {
