@@ -23,8 +23,9 @@ from apps.backend.runtime.logging import emit_backend_message, get_backend_logge
 
 import logging
 import os
+from collections.abc import Mapping
 from pathlib import Path
-from typing import List, Optional, Dict
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -190,7 +191,11 @@ class ZImageTextEncoder(nn.Module):
             raise ValueError(f"Failed to load GGUF text encoder from {gguf_path}: {e}")
     
     @classmethod
-    def from_state_dict(cls, state_dict: Dict[str, torch.Tensor], torch_dtype: torch.dtype = torch.bfloat16) -> "ZImageTextEncoder":
+    def from_state_dict(
+        cls,
+        state_dict: Mapping[str, torch.Tensor],
+        torch_dtype: torch.dtype = torch.bfloat16,
+    ) -> "ZImageTextEncoder":
         """Load text encoder from state_dict.
         
         Args:
@@ -200,6 +205,17 @@ class ZImageTextEncoder(nn.Module):
         Returns:
             ZImageTextEncoder instance.
         """
+        if not isinstance(state_dict, Mapping):
+            raise RuntimeError(
+                "Z Image Qwen3-4B state_dict must be a mapping; "
+                f"got {type(state_dict).__name__}."
+            )
+        for raw_key in state_dict.keys():
+            if not isinstance(raw_key, str):
+                raise RuntimeError(
+                    "Z Image Qwen3-4B state_dict keys must be strings. "
+                    f"Got {type(raw_key).__name__}."
+                )
         emit_backend_message(
             "Loading Qwen3 text encoder from state_dict",
             logger=logger.name,
@@ -207,7 +223,6 @@ class ZImageTextEncoder(nn.Module):
         )
 
         try:
-            state_dict = {str(k): v for k, v in state_dict.items()}
             resolved = resolve_qwen_text_encoder_keyspace(
                 state_dict,
                 allow_lm_head_aux=True,

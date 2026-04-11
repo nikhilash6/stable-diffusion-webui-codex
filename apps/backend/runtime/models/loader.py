@@ -1666,7 +1666,7 @@ def _load_huggingface_component(
                     raise RuntimeError(
                         f"Qwen3 text encoder state_dict must be a mapping; got {type(state_dict).__name__}."
                     )
-                wrapped = Flux2TextEncoder.from_state_dict(dict(state_dict.items()), torch_dtype=te_dtype)
+                wrapped = Flux2TextEncoder.from_state_dict(state_dict, torch_dtype=te_dtype)
             if tokenizer_hint is not None:
                 wrapped.set_tokenizer_path_hint(tokenizer_hint)
             return wrapped
@@ -1683,7 +1683,7 @@ def _load_huggingface_component(
                 raise RuntimeError(
                     f"Qwen3 text encoder state_dict must be a mapping; got {type(state_dict).__name__}."
                 )
-            model = ZImageTextEncoder.from_state_dict(dict(state_dict.items()), torch_dtype=te_dtype)
+            model = ZImageTextEncoder.from_state_dict(state_dict, torch_dtype=te_dtype)
 
         if tokenizer_hint is not None:
             model.set_tokenizer_path_hint(tokenizer_hint)

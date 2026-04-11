@@ -683,7 +683,6 @@ const {
 } = useWorkflowSnapshotActions({
   getTab: () => tab.value ?? null,
   getWorkflowParamsSnapshot: () => (tab.value?.params as unknown as Record<string, unknown> | null) ?? null,
-  resolveEngineSemantics: (currentTab) => currentTab.type,
 })
 type ImageTab = TabByType<ImageTabType>
 

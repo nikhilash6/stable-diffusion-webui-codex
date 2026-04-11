@@ -872,7 +872,7 @@ class Ltx2AudioAutoencoder(nn.Module):
     def load_strict_state_dict(self, state_dict: Mapping[str, Any]) -> None:
         if not isinstance(state_dict, Mapping):
             raise RuntimeError(f"LTX2 audio VAE strict load expects a mapping, got {type(state_dict).__name__}.")
-        missing, unexpected = self.load_state_dict(dict(state_dict), strict=False)
+        missing, unexpected = self.load_state_dict(state_dict, strict=False)
         if missing or unexpected:
             raise RuntimeError(
                 "LTX2 audio VAE strict load failed: "

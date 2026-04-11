@@ -22,8 +22,7 @@ import type { WorkflowItem } from '../api/types'
 type SaveSnapshotPayload = {
   name: string
   source_tab_id: string
-  type: string
-  engine_semantics?: string
+  type: WorkflowItem['type']
   params_snapshot: Record<string, unknown>
 }
 

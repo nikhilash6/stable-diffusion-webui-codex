@@ -2409,7 +2409,6 @@ async function sendToWorkflows(): Promise<void> {
       name: `${tab.value.title} — ${new Date().toLocaleString()}`,
       source_tab_id: tab.value.id,
       type: tab.value.type,
-      engine_semantics: 'wan22_14b',
       params_snapshot: tab.value.params as Record<string, unknown>,
     })
     toast(result.action === 'updated' ? 'Snapshot updated in Workflows.' : 'Snapshot saved to Workflows.')

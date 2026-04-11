@@ -25,6 +25,7 @@ from apps.backend.runtime.logging import get_backend_logger
 import json
 import logging
 import os
+from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -146,12 +147,24 @@ def read_safetensors_metadata(path: str) -> dict[str, str]:
     return metadata
 
 
-def read_gguf_metadata(path: str) -> dict[str, Any]:
+def read_gguf_metadata(path: str) -> Mapping[str, Any]:
     """Read GGUF metadata (key/value table) from the file header."""
 
     from apps.backend.quantization.gguf_loader import get_gguf_metadata as _get
 
-    return dict(_get(path))
+    metadata = _get(path)
+    if not isinstance(metadata, Mapping):
+        raise RuntimeError(
+            "GGUF metadata reader must return a mapping. "
+            f"Got {type(metadata).__name__} from {path!r}."
+        )
+    for raw_key in metadata.keys():
+        if not isinstance(raw_key, str):
+            raise RuntimeError(
+                "GGUF metadata keys must be strings. "
+                f"Got {type(raw_key).__name__} in {path!r}."
+            )
+    return metadata
 
 
 def _load_gguf_state_dict(path: str, *, device: torch.device | str | None = None):

@@ -246,6 +246,7 @@ def build_router(
         "initImageName",
         "videoReturnFrames",
     }
+    _LTX_GENERATION_MODES = {"img2vid", "txt2vid"}
     _NESTED_OBJECT_PARAM_KEYS = {
         "guidanceAdvanced",
         "hires",
@@ -280,11 +281,19 @@ def build_router(
             f"{owner} uses legacy generic WAN type but its persisted params do not distinguish 5B vs 14B"
         )
 
-    def _normalize_stored_tab_type(value: object, *, raw_params: object = None, owner: str = "stored payload") -> str:
+    def _normalize_loaded_tab_type(value: object, *, raw_params: object = None, owner: str = "stored payload") -> str:
         raw = str(value or "").strip().lower()
         if raw in ("wan", "wan22"):
             return _infer_legacy_wan_stored_type(raw_params=raw_params, owner=owner)
-        if raw in ("wan22_14b", "wan22_14b_animate"):
+        if raw == "wan22_14b_animate":
+            return "wan22_14b"
+        return _normalize_stored_tab_type(raw)
+
+    def _normalize_stored_tab_type(value: object) -> str:
+        raw = str(value or "").strip().lower()
+        if raw in ("wan", "wan22", "wan22_14b_animate"):
+            raise ValueError(f"invalid tab type: {raw or '<empty>'} (persist exact 'wan22_14b' or 'wan22_5b')")
+        if raw == "wan22_14b":
             return "wan22_14b"
         if raw == "wan22_5b":
             return "wan22_5b"
@@ -297,10 +306,7 @@ def build_router(
         raise ValueError(f"invalid tab type: {raw or '<empty>'}")
 
     def _normalize_live_tab_type(value: object) -> str:
-        raw = str(value or "").strip().lower()
-        if raw in ("wan", "wan22", "wan22_14b_animate"):
-            raise ValueError(f"invalid tab type: {raw} (use 'wan22_14b' or 'wan22_5b')")
-        return _normalize_stored_tab_type(raw)
+        return _normalize_stored_tab_type(value)
 
     def _parse_bool_payload(value: object, *, field: str) -> bool:
         if isinstance(value, bool):
@@ -347,6 +353,7 @@ def build_router(
         reject_unknown: bool = True,
         reject_removed_image_keys: bool = False,
         scrub_invalid_inpaint_mode: bool = False,
+        require_ltx_mode: bool = False,
     ) -> Dict[str, Any]:
         params_patch = _assert_plain_object(raw_params, field=field)
         if tab_type in _IMAGE_TAB_TYPES:
@@ -395,6 +402,21 @@ def build_router(
                         detail=f"{field}.inpaintMode must be one of: {allowed_modes}",
                     )
                 sanitized.pop("inpaintMode", None)
+        if tab_type == "ltx2":
+            allowed_modes = ", ".join(sorted(_LTX_GENERATION_MODES))
+            if "mode" in sanitized:
+                normalized_mode = str(sanitized.get("mode") or "").strip().lower()
+                if normalized_mode not in _LTX_GENERATION_MODES:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{field}.mode must be one of: {allowed_modes}",
+                    )
+                sanitized["mode"] = normalized_mode
+            elif require_ltx_mode:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{field}.mode must be one of: {allowed_modes}",
+                )
         return sanitized
 
     def _reject_unknown_live_param_keys(tab_type: str) -> bool:
@@ -404,16 +426,17 @@ def build_router(
         return tab_type in {"wan22_14b", "wan22_5b", "ltx2"}
 
     def _sanitize_stored_tab_params(*, tab_type: str, raw_params: object, tab_id: str) -> Dict[str, Any]:
-        if raw_params is None:
+        if raw_params is None and tab_type != "ltx2":
             return {}
         try:
             return _sanitize_tab_params_patch(
                 tab_type=tab_type,
-                raw_params=raw_params,
+                raw_params={} if raw_params is None else raw_params,
                 field="params",
                 reject_unknown=_reject_unknown_stored_param_keys(tab_type),
                 reject_removed_image_keys=False,
                 scrub_invalid_inpaint_mode=True,
+                require_ltx_mode=tab_type == "ltx2",
             )
         except HTTPException as exc:
             raise HTTPException(
@@ -501,7 +524,7 @@ def build_router(
             old_type = t.get("type")
             params = t.get("params")
             try:
-                new_type = _normalize_stored_tab_type(old_type, raw_params=params, owner=f"tab '{tab_id}'")
+                new_type = _normalize_loaded_tab_type(old_type, raw_params=params, owner=f"tab '{tab_id}'")
             except ValueError as exc:
                 raise HTTPException(status_code=500, detail=f"tabs.json contains {exc}") from exc
             if new_type != old_type:
@@ -554,15 +577,16 @@ def build_router(
         return normalized
 
     def _sanitize_stored_workflow_params_snapshot(*, workflow_type: str, raw_params: object, workflow_id: str) -> Dict[str, Any]:
-        if raw_params is None:
+        if raw_params is None and workflow_type != "ltx2":
             return {}
         try:
             return _sanitize_tab_params_patch(
                 tab_type=workflow_type,
-                raw_params=raw_params,
+                raw_params={} if raw_params is None else raw_params,
                 field="params_snapshot",
                 reject_unknown=_reject_unknown_stored_param_keys(workflow_type),
                 scrub_invalid_inpaint_mode=True,
+                require_ltx_mode=workflow_type == "ltx2",
             )
         except HTTPException as exc:
             raise HTTPException(
@@ -590,6 +614,42 @@ def build_router(
                     detail=f"workflow source_tab_id '{normalized}' is already bound to workflow '{workflow_id}'",
                 )
 
+    def _find_tab_by_id(tabs: list[Dict[str, Any]], tab_id: str) -> Optional[Dict[str, Any]]:
+        normalized = str(tab_id or "").strip()
+        if not normalized:
+            return None
+        for tab in tabs:
+            if str(tab.get("id") or "").strip() == normalized:
+                return tab
+        return None
+
+    def _assert_workflow_source_tab_matches_type(
+        tabs: list[Dict[str, Any]],
+        source_tab_id: str,
+        workflow_type: str,
+        *,
+        owner: str,
+        status_code: int,
+        require_existing_tab: bool,
+    ) -> None:
+        existing_tab = _find_tab_by_id(tabs, source_tab_id)
+        if existing_tab is None:
+            if require_existing_tab:
+                raise HTTPException(
+                    status_code=status_code,
+                    detail=f"{owner} source_tab_id '{source_tab_id}' does not reference an existing tab",
+                )
+            return
+        actual_type = _normalize_stored_tab_type(existing_tab.get("type"))
+        if actual_type != workflow_type:
+            raise HTTPException(
+                status_code=status_code,
+                detail=(
+                    f"{owner} source_tab_id '{source_tab_id}' targets tab type "
+                    f"'{actual_type}', expected '{workflow_type}'"
+                ),
+            )
+
     def _load_workflows() -> Dict[str, Any]:
         nonlocal _workflows_cache, _workflows_mtime
         _ensure_dirs()
@@ -611,6 +671,8 @@ def build_router(
         workflows = data.get("workflows")
         if not isinstance(workflows, list):
             raise HTTPException(status_code=500, detail="workflows.json invalid: missing 'workflows' array")
+        tabs_data = _load_tabs()
+        tabs = list(tabs_data.get("tabs") or [])
         normalized_workflows: list[Dict[str, Any]] = []
         changed = False
         seen_source_tab_ids: dict[str, str] = {}
@@ -627,7 +689,7 @@ def build_router(
                     detail=f"workflows.json invalid: entry #{index + 1} is missing a non-empty 'id'",
                 )
             try:
-                workflow_type = _normalize_stored_tab_type(
+                workflow_type = _normalize_loaded_tab_type(
                     workflow.get("type"),
                     raw_params=workflow.get("params_snapshot"),
                     owner=f"workflow '{workflow_id}'",
@@ -656,6 +718,14 @@ def build_router(
                     ),
                 )
             seen_source_tab_ids[source_tab_id] = workflow_id
+            _assert_workflow_source_tab_matches_type(
+                tabs,
+                source_tab_id,
+                workflow_type,
+                owner=f"workflow '{workflow_id}'",
+                status_code=500,
+                require_existing_tab=False,
+            )
             params_snapshot = _sanitize_stored_workflow_params_snapshot(
                 workflow_type=workflow_type,
                 raw_params=workflow.get("params_snapshot"),
@@ -668,7 +738,6 @@ def build_router(
                 "source_tab_id": source_tab_id,
                 "type": workflow_type,
                 "created_at": created_at,
-                "engine_semantics": workflow_type,
                 "params_snapshot": params_snapshot,
             }
             if workflow != normalized_workflow:
@@ -721,16 +790,14 @@ def build_router(
                 else ttype.upper()
             )
         )
-        if "params" in payload:
-            params = _sanitize_tab_params_patch(
-                tab_type=ttype,
-                raw_params=payload.get("params"),
-                field="params",
-                reject_unknown=_reject_unknown_live_param_keys(ttype),
-                reject_removed_image_keys=True,
-            )
-        else:
-            params = {}
+        params = _sanitize_tab_params_patch(
+            tab_type=ttype,
+            raw_params=payload.get("params") if "params" in payload else {},
+            field="params",
+            reject_unknown=_reject_unknown_live_param_keys(ttype),
+            reject_removed_image_keys=True,
+            require_ltx_mode=ttype == "ltx2",
+        )
         new_id = str(payload.get("id") or "").strip() or f"tab-{int(time.time()*1000)}"
         if any(str(t.get("id")) == new_id for t in tabs):
             raise HTTPException(status_code=409, detail="tab id already exists")
@@ -772,6 +839,7 @@ def build_router(
                         field="params",
                         reject_unknown=_reject_unknown_live_param_keys(tab_type),
                         reject_removed_image_keys=True,
+                        require_ltx_mode=False,
                     )
                     sanitized_current_params = _sanitize_stored_tab_params(
                         tab_type=tab_type,
@@ -822,6 +890,8 @@ def build_router(
     def api_create_workflow(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         data = _load_workflows()
         wfs = list(data.get("workflows") or [])
+        tabs_data = _load_tabs()
+        tabs = list(tabs_data.get("tabs") or [])
         wf_id = f"wf-{int(time.time()*1000)}"
         name = str(payload.get("name") or wf_id)
         source_tab_id = _sanitize_workflow_source_tab_id(
@@ -840,14 +910,10 @@ def build_router(
             wtype = _normalize_live_tab_type(raw_type)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        raw_engine_semantics = str(payload.get("engine_semantics") or "").strip().lower()
-        if raw_engine_semantics and raw_engine_semantics != wtype:
+        if "engine_semantics" in payload:
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    f"workflow engine_semantics must match exact workflow type '{wtype}', "
-                    f"got '{raw_engine_semantics}'"
-                ),
+                detail="workflow engine_semantics has been removed; use exact workflow type only",
             )
         raw_params_snapshot = payload.get("params_snapshot")
         if raw_params_snapshot is None:
@@ -860,8 +926,17 @@ def build_router(
             field="params_snapshot",
             reject_unknown=_reject_unknown_live_param_keys(wtype),
             reject_removed_image_keys=True,
+            require_ltx_mode=wtype == "ltx2",
         )
         _assert_unique_workflow_source_tab_id(wfs, source_tab_id)
+        _assert_workflow_source_tab_matches_type(
+            tabs,
+            source_tab_id,
+            wtype,
+            owner="workflow payload",
+            status_code=400,
+            require_existing_tab=True,
+        )
         now = datetime.utcnow().isoformat()
         wf = {
             "id": wf_id,
@@ -869,7 +944,6 @@ def build_router(
             "source_tab_id": source_tab_id,
             "type": wtype,
             "created_at": now,
-            "engine_semantics": wtype,
             "params_snapshot": params_snapshot,
         }
         wfs.insert(0, wf)
@@ -880,13 +954,19 @@ def build_router(
     @router.patch("/api/ui/workflows/{wf_id}")
     def api_update_workflow(wf_id: str, payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         data = _load_workflows()
+        tabs_data = _load_tabs()
+        tabs = list(tabs_data.get("tabs") or [])
         updated = False
         for w in data["workflows"]:
             if str(w.get("id")) == wf_id:
+                workflow_type = _normalize_stored_tab_type(w.get("type"))
                 if "type" in payload:
                     raise HTTPException(status_code=400, detail="workflow type is immutable")
                 if "engine_semantics" in payload:
-                    raise HTTPException(status_code=400, detail="workflow engine_semantics is immutable")
+                    raise HTTPException(
+                        status_code=400,
+                        detail="workflow engine_semantics has been removed; use workflow type only",
+                    )
                 if "name" in payload:
                     w["name"] = str(payload["name"])
                 if "source_tab_id" in payload:
@@ -896,15 +976,23 @@ def build_router(
                         required=True,
                     )
                     _assert_unique_workflow_source_tab_id(data["workflows"], source_tab_id, exclude_workflow_id=wf_id)
+                    _assert_workflow_source_tab_matches_type(
+                        tabs,
+                        source_tab_id,
+                        workflow_type,
+                        owner=f"workflow '{wf_id}'",
+                        status_code=400,
+                        require_existing_tab=True,
+                    )
                     w["source_tab_id"] = source_tab_id
                 if "params_snapshot" in payload and isinstance(payload["params_snapshot"], dict):
-                    workflow_type = _normalize_stored_tab_type(w.get("type"))
                     w["params_snapshot"] = _sanitize_tab_params_patch(
                         tab_type=workflow_type,
                         raw_params=payload["params_snapshot"],
                         field="params_snapshot",
                         reject_unknown=_reject_unknown_live_param_keys(workflow_type),
                         reject_removed_image_keys=True,
+                        require_ltx_mode=workflow_type == "ltx2",
                     )
                 elif "params_snapshot" in payload:
                     raise HTTPException(status_code=400, detail="params_snapshot must be an object")

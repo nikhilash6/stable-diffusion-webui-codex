@@ -104,7 +104,7 @@ def build_router(
         return {"upscalers": items}
 
     @router.get("/api/upscalers/remote")
-    async def get_remote_upscalers(
+    def get_remote_upscalers(
         repo_id: str | None = None,
         revision: str | None = None,
     ) -> Dict[str, Any]:

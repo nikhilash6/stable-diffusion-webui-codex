@@ -68,6 +68,7 @@ export interface VideoRunHistoryItem {
   summary: string
   promptPreview: string
   paramsSnapshot: Record<string, unknown>
+  initImageData?: string
   thumbnail: GeneratedImage | null
   errorMessage?: string
 }
@@ -87,6 +88,7 @@ export type PreparedWan22_5bRun =
       summary: string
       promptPreview: string
       paramsSnapshot: Record<string, unknown>
+      initImageData: string
       payload: Wan22_5bImg2VidPayload
     }
 
@@ -697,7 +699,7 @@ export function useWan22_5bVideoGeneration(tabId: string) {
         img2vidMode,
         ...guideInput,
       })
-      return { mode: 'img2vid', createdAtMs, summary, promptPreview, paramsSnapshot, payload }
+      return { mode: 'img2vid', createdAtMs, summary, promptPreview, paramsSnapshot, initImageData: currentVideo.initImageData, payload }
     }
 
     const payload = buildWan22_5bTxt2VidPayload(common)
@@ -948,6 +950,7 @@ export function useWan22_5bVideoGeneration(tabId: string) {
         summary: run.summary,
         promptPreview: run.promptPreview,
         paramsSnapshot: run.paramsSnapshot,
+        initImageData: run.mode === 'img2vid' ? run.initImageData : '',
         thumbnail: null,
       }
       taskLifecycle.saveResume({

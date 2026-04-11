@@ -998,7 +998,6 @@ const {
   getTab: () => tab.value ?? null,
   getWorkflowParamsSnapshot: () => (tab.value?.params as Record<string, unknown> | null) ?? null,
   getCopyCurrentParamsSnapshot: () => buildCurrentSnapshot(),
-  resolveEngineSemantics: () => 'wan22_14b',
   copyCurrentParamsMessage: 'Copied current params JSON.',
 })
 const historyDetailsOpen = ref(false)
@@ -1467,12 +1466,13 @@ function applyHistory(item: VideoRunHistoryItem): void {
     return
   }
   const nextMode: 'txt2vid' | 'img2vid' = rawMode === 'img2vid' ? 'img2vid' : 'txt2vid'
-  setInputMode(nextMode)
 
   const output = isRecord(snap.output) ? snap.output : {}
   const interpolation = isRecord(snap.interpolation) ? snap.interpolation : {}
   const upscaling = isRecord(snap.upscaling) ? snap.upscaling : {}
   const i2v = isRecord(snap.img2vid) ? snap.img2vid : {}
+  const snapshotInitImageName = typeof snap.initImageName === 'string' ? snap.initImageName : ''
+  const historyInitImageData = typeof item.initImageData === 'string' ? item.initImageData : ''
   const i2vModeRaw = typeof i2v.mode === 'string' ? i2v.mode : ''
   const hasSnapshotWindowFrames = typeof i2v.windowFrames === 'number' && Number.isFinite(i2v.windowFrames) && Number(i2v.windowFrames) > 0
   if (String(i2vModeRaw || '').trim().toLowerCase() === 'chunk') {
@@ -1488,6 +1488,11 @@ function applyHistory(item: VideoRunHistoryItem): void {
     : (hasSnapshotWindowFrames
       ? 'sliding'
       : normalizeImg2VidMode(video.value.img2vidMode))
+  if (nextMode === 'img2vid' && !historyInitImageData) {
+    toast('This history item does not carry the init image bytes anymore. Re-select the init image before applying.')
+    return
+  }
+  setInputMode(nextMode)
   const historyInterpolationFps = (() => {
     if (typeof interpolation.targetFps === 'number' && Number.isFinite(interpolation.targetFps)) {
       return Number(interpolation.targetFps)
@@ -1496,6 +1501,9 @@ function applyHistory(item: VideoRunHistoryItem): void {
   })()
 
   setVideo({
+    useInitImage: nextMode === 'img2vid',
+    initImageData: nextMode === 'img2vid' ? historyInitImageData : '',
+    initImageName: nextMode === 'img2vid' ? snapshotInitImageName : '',
     width: Number(snap.width) || video.value.width,
     height: Number(snap.height) || video.value.height,
     frames: Number(snap.frames) || video.value.frames,
@@ -1580,7 +1588,7 @@ function applyHistory(item: VideoRunHistoryItem): void {
     sampler: String(hi.sampler || ''),
     scheduler: typeof hi.scheduler === 'string' && hi.scheduler.trim() ? hi.scheduler.trim() : high.value.scheduler,
     steps: Number(hi.steps) || high.value.steps,
-    cfgScale: Number(hi.cfgScale) || high.value.cfgScale,
+    cfgScale: typeof hi.cfgScale === 'number' && Number.isFinite(hi.cfgScale) ? Number(hi.cfgScale) : high.value.cfgScale,
     seed: typeof hi.seed === 'number' && Number.isFinite(hi.seed) ? Number(hi.seed) : high.value.seed,
     loras: nextHighLoras,
     flowShift: typeof hi.flowShift === 'number' && Number.isFinite(hi.flowShift) ? Number(hi.flowShift) : high.value.flowShift,
@@ -1593,7 +1601,7 @@ function applyHistory(item: VideoRunHistoryItem): void {
     sampler: String(lo.sampler || ''),
     scheduler: typeof lo.scheduler === 'string' && lo.scheduler.trim() ? lo.scheduler.trim() : low.value.scheduler,
     steps: Number(lo.steps) || low.value.steps,
-    cfgScale: Number(lo.cfgScale) || low.value.cfgScale,
+    cfgScale: typeof lo.cfgScale === 'number' && Number.isFinite(lo.cfgScale) ? Number(lo.cfgScale) : low.value.cfgScale,
     seed: typeof lo.seed === 'number' && Number.isFinite(lo.seed) ? Number(lo.seed) : low.value.seed,
     loras: nextLowLoras,
     flowShift: typeof lo.flowShift === 'number' && Number.isFinite(lo.flowShift) ? Number(lo.flowShift) : low.value.flowShift,

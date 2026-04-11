@@ -613,7 +613,6 @@ async function saveSnapshot(): Promise<void> {
       name: `${selectedFile.value.name} — ${new Date().toLocaleString()}`,
       source_tab_id: targetTab.value.id,
       type: targetTab.value.type,
-      engine_semantics: targetTab.value.type,
       params_snapshot: patch,
     })
     const vae = await maybeApplyVae()

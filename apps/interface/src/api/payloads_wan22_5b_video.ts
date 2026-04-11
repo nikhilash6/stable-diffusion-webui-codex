@@ -94,7 +94,7 @@ const CommonVideoExportShape = {
 
 export const Wan22_5bTxt2VidPayloadSchema = z.object({
   device: DeviceEnum,
-  settings_revision: z.number().int().min(0).default(0),
+  settings_revision: z.number().int().min(0),
   txt2vid_prompt: PromptSchema,
   txt2vid_neg_prompt: z.string().optional().default(''),
   txt2vid_width: z.number().int().min(WAN_DIM_STEP),
@@ -117,7 +117,7 @@ export const Wan22_5bTxt2VidPayloadSchema = z.object({
 
 export const Wan22_5bImg2VidPayloadSchema = z.object({
   device: DeviceEnum,
-  settings_revision: z.number().int().min(0).default(0),
+  settings_revision: z.number().int().min(0),
   img2vid_prompt: PromptSchema,
   img2vid_neg_prompt: z.string().optional().default(''),
   img2vid_width: z.number().int().min(WAN_DIM_STEP),
@@ -229,13 +229,15 @@ function normalizeDevice(device: string): Wan22_5bTxt2VidPayload['device'] {
   throw new Error(`Unsupported device '${device}'`)
 }
 
-function normalizeSettingsRevision(value: unknown): number {
-  if (typeof value === 'number' && Number.isFinite(value)) return Math.max(0, Math.trunc(value))
+function requireSettingsRevision(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && value >= 0) {
+    return value
+  }
   if (typeof value === 'string') {
     const trimmed = value.trim()
-    if (/^-?\d+$/.test(trimmed)) return Math.max(0, Math.trunc(Number(trimmed)))
+    if (/^\d+$/.test(trimmed)) return Number(trimmed)
   }
-  return 0
+  throw new Error(`settings_revision must be a non-negative integer, got ${String(value)}.`)
 }
 
 function snapWanDim(value: number): number {
@@ -378,7 +380,7 @@ export function buildWan22_5bTxt2VidPayload(input: Wan22_5bVideoCommonInput): Wa
   const { prompt, negativePrompt } = resolveTopLevelPrompts(input)
   const payload: Record<string, unknown> = {
     device: normalizeDevice(input.device),
-    settings_revision: normalizeSettingsRevision(input.settingsRevision),
+    settings_revision: requireSettingsRevision(input.settingsRevision),
     txt2vid_prompt: prompt,
     txt2vid_neg_prompt: negativePrompt,
     txt2vid_width: snapWanDim(input.width),
@@ -410,7 +412,7 @@ export function buildWan22_5bImg2VidPayload(input: Wan22_5bImg2VidInput): Wan22_
   }
   const payload: Record<string, unknown> = {
     device: normalizeDevice(input.device),
-    settings_revision: normalizeSettingsRevision(input.settingsRevision),
+    settings_revision: requireSettingsRevision(input.settingsRevision),
     img2vid_prompt: prompt,
     img2vid_neg_prompt: negativePrompt,
     img2vid_width: snapWanDim(input.width),

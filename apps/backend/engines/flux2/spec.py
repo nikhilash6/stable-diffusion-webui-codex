@@ -194,7 +194,7 @@ def _load_external_text_encoder(
             "FLUX.2 text encoder override must resolve to a state_dict mapping; "
             f"got {type(state_dict).__name__}."
         )
-    return Flux2TextEncoder.from_state_dict(dict(state_dict.items()), torch_dtype=torch_dtype)
+    return Flux2TextEncoder.from_state_dict(state_dict, torch_dtype=torch_dtype)
 
 
 @dataclass(frozen=True, slots=True)

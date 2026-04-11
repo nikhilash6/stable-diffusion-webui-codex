@@ -41,7 +41,7 @@ Symbols (top-level; keep in sync; no ghosts):
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useWorkflowsStore } from '../stores/workflows'
-import { defaultImageParamsForType, useModelTabsStore, type BaseTabType, type ImageTabType } from '../stores/model_tabs'
+import { defaultImageParamsForType, useModelTabsStore, type ImageTabType } from '../stores/model_tabs'
 import { isWanTabFamily } from '../utils/engine_taxonomy'
 
 const router = useRouter()
@@ -67,9 +67,13 @@ async function restore(itemId: string): Promise<void> {
   let createdTabId = ''
   let restoreCommitted = false
   try {
-    if (!sourceTab || sourceTab.type !== wf.type) {
-      createdTabId = await tabs.create(wf.type as BaseTabType, wf.name)
+    if (!sourceTab) {
+      createdTabId = await tabs.create(wf.type, wf.name)
       targetTabId = createdTabId
+    } else if (sourceTab.type !== wf.type) {
+      throw new Error(
+        `Workflow '${wf.name}' is bound to tab '${sourceTab.id}' of type '${sourceTab.type}', expected '${wf.type}'. Repair the stored workflow binding before restoring.`,
+      )
     }
     const paramsSnapshot = { ...wf.params_snapshot }
     if (

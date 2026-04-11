@@ -418,7 +418,6 @@ const {
   getTab: () => tab.value ?? null,
   getWorkflowParamsSnapshot: () => (tab.value?.params as Record<string, unknown> | null) ?? null,
   getCopyCurrentParamsSnapshot: () => buildCurrentSnapshot(),
-  resolveEngineSemantics: () => 'wan22_5b',
   copyCurrentParamsMessage: 'Copied current params JSON.',
 })
 
@@ -850,6 +849,8 @@ async function applyHistory(item: VideoRunHistoryItem): Promise<void> {
   const interpolation = isRecord(snapshot.interpolation) ? snapshot.interpolation : {}
   const upscaling = isRecord(snapshot.upscaling) ? snapshot.upscaling : {}
   const img2vid = isRecord(snapshot.img2vid) ? snapshot.img2vid : {}
+  const snapshotInitImageName = typeof snapshot.initImageName === 'string' ? snapshot.initImageName : ''
+  const historyInitImageData = typeof item.initImageData === 'string' ? item.initImageData : ''
   const snapshotAssets = isRecord(snapshot.assets) ? snapshot.assets : {}
   const snapshotStage = isRecord(snapshot.stage) ? snapshot.stage : {}
   let nextImg2VidMode = video.value.img2vidMode
@@ -859,12 +860,16 @@ async function applyHistory(item: VideoRunHistoryItem): Promise<void> {
     toast(error instanceof Error ? error.message : String(error))
     return
   }
+  if (nextMode === 'img2vid' && !historyInitImageData) {
+    toast('This history item does not carry the init image bytes anymore. Re-select the init image before applying.')
+    return
+  }
 
   const nextVideo: WanVideoParams = {
     ...video.value,
     useInitImage: nextMode === 'img2vid',
-    initImageData: nextMode === 'img2vid' ? video.value.initImageData : '',
-    initImageName: nextMode === 'img2vid' ? video.value.initImageName : '',
+    initImageData: nextMode === 'img2vid' ? historyInitImageData : '',
+    initImageName: nextMode === 'img2vid' ? snapshotInitImageName : '',
     width: Number(snapshot.width) || video.value.width,
     height: Number(snapshot.height) || video.value.height,
     frames: Number(snapshot.frames) || video.value.frames,

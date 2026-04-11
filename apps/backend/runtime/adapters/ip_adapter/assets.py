@@ -37,7 +37,8 @@ from apps.backend.runtime.adapters.ip_adapter.modules import (
 from apps.backend.runtime.adapters.ip_adapter.types import IpAdapterConfig, IpAdapterLayout, PreparedIpAdapterAssets
 from apps.backend.runtime.checkpoint.io import load_torch_file
 from apps.backend.runtime.model_registry.capabilities import ip_adapter_support_error
-from apps.backend.runtime.models.state_dict import filter_state_dict_with_prefix, safe_load_state_dict
+from apps.backend.runtime.models.state_dict import safe_load_state_dict
+from apps.backend.runtime.state_dict.views import FilterPrefixView
 from apps.backend.runtime.vision.clip.encoder import ClipVisionEncoder
 
 logger = get_backend_logger("backend.runtime.adapters.ip_adapter.assets")
@@ -203,8 +204,8 @@ def _split_ip_adapter_state(raw_state: Mapping[str, object]) -> tuple[Mapping[st
             "Unsupported IP-Adapter checkpoint layout; expected nested 'image_proj'/'ip_adapter' mappings "
             "or explicit flat 'image_proj.'/'ip_adapter.' tensor buckets."
         )
-    image_proj_state = filter_state_dict_with_prefix(raw_state, "image_proj.")
-    ip_adapter_state = filter_state_dict_with_prefix(raw_state, "ip_adapter.")
+    image_proj_state = FilterPrefixView(raw_state, "image_proj.")
+    ip_adapter_state = FilterPrefixView(raw_state, "ip_adapter.")
     return _validated_tensor_mapping_view(image_proj_state, label="image_proj"), _validated_tensor_mapping_view(
         ip_adapter_state,
         label="ip_adapter",

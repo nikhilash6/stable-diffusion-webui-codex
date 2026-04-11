@@ -716,7 +716,7 @@ export interface UiPresetApplyResponse { applied: boolean; model: string; checkp
 export interface ApiTabMeta { createdAt: string; updatedAt: string }
 export interface ApiTab { id: string; type: 'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'zimage' | 'chroma' | 'wan22_14b' | 'wan22_5b' | 'anima' | 'ltx2'; title: string; order: number; enabled: boolean; params: Record<string, unknown>; meta: ApiTabMeta }
 export interface TabsResponse { version: number; tabs: ApiTab[] }
-export interface WorkflowItem { id: string; name: string; source_tab_id: string; type: string; created_at: string; engine_semantics: string; params_snapshot: Record<string, unknown> }
+export interface WorkflowItem { id: string; name: string; source_tab_id: string; type: ApiTab['type']; created_at: string; params_snapshot: Record<string, unknown> }
 export interface WorkflowsResponse { version: number; workflows: WorkflowItem[] }
 export interface WorkflowCreateResponse { id: string }
 export interface WorkflowUpdateResponse { updated: string }

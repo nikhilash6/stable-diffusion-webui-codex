@@ -23,8 +23,9 @@ from apps.backend.runtime.logging import emit_backend_message, get_backend_logge
 
 import logging
 import os
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Iterable, List, Sequence
 
 import torch
 import torch.nn as nn
@@ -118,11 +119,23 @@ class Flux2TextEncoder(nn.Module):
     @classmethod
     def from_state_dict(
         cls,
-        state_dict: Dict[str, torch.Tensor],
+        state_dict: Mapping[str, torch.Tensor],
         *,
         torch_dtype: torch.dtype = torch.bfloat16,
     ) -> "Flux2TextEncoder":
         from apps.backend.runtime.families.zimage.qwen3 import Qwen3_4B, Qwen3Config
+
+        if not isinstance(state_dict, Mapping):
+            raise RuntimeError(
+                "FLUX.2 Qwen3-4B state_dict must be a mapping; "
+                f"got {type(state_dict).__name__}."
+            )
+        for raw_key in state_dict.keys():
+            if not isinstance(raw_key, str):
+                raise RuntimeError(
+                    "FLUX.2 Qwen3-4B state_dict keys must be strings. "
+                    f"Got {type(raw_key).__name__}."
+                )
 
         emit_backend_message(
             "Loading FLUX.2 Qwen3-4B text encoder from state_dict",
@@ -130,7 +143,7 @@ class Flux2TextEncoder(nn.Module):
             keys=len(state_dict),
         )
         resolved = resolve_qwen_text_encoder_keyspace(
-            {str(k): v for k, v in state_dict.items()},
+            state_dict,
             allow_lm_head_aux=True,
             allow_visual_aux=True,
             require_backbone_keys=True,

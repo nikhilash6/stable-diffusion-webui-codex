@@ -743,14 +743,14 @@ export function startImageAutomation(payload: ImageAutomationRequest): Promise<T
 export function startTxt2Vid(payload: Record<string, unknown>): Promise<Txt2ImgStartResponse> {
   return requestJson<Txt2ImgStartResponse>('/txt2vid', {
     method: 'POST',
-    body: JSON.stringify(withSettingsRevision(payload)),
+    body: JSON.stringify(payload),
   })
 }
 
 export function startImg2Vid(payload: Record<string, unknown>): Promise<Txt2ImgStartResponse> {
   return requestJson<Txt2ImgStartResponse>('/img2vid', {
     method: 'POST',
-    body: JSON.stringify(withSettingsRevision(payload)),
+    body: JSON.stringify(payload),
   })
 }
 
@@ -998,7 +998,7 @@ export function fetchWorkflows(): Promise<WorkflowsResponse> {
   return requestJson<WorkflowsResponse>('/ui/workflows')
 }
 
-export function createWorkflow(payload: { name: string; source_tab_id: string; type: string; engine_semantics?: string; params_snapshot: Record<string, unknown> }): Promise<WorkflowCreateResponse> {
+export function createWorkflow(payload: { name: string; source_tab_id: string; type: ApiTab['type']; params_snapshot: Record<string, unknown> }): Promise<WorkflowCreateResponse> {
   return requestJson<WorkflowCreateResponse>('/ui/workflows', { method: 'POST', body: JSON.stringify(payload) })
 }
 

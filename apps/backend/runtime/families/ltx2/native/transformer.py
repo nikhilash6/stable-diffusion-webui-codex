@@ -1207,7 +1207,7 @@ class Ltx2VideoTransformer3DModel(nn.Module):
             raise RuntimeError(
                 f"LTX2 transformer strict load expects a mapping state_dict, got {type(state_dict).__name__}."
             )
-        missing, unexpected = self.load_state_dict(dict(state_dict), strict=False)
+        missing, unexpected = self.load_state_dict(state_dict, strict=False)
         if missing or unexpected:
             raise RuntimeError(
                 "LTX2 transformer strict load failed: "

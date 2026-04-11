@@ -20,19 +20,19 @@ Symbols (top-level; keep in sync; no ghosts):
 import { ref } from 'vue'
 
 import { useResultsCard } from './useResultsCard'
+import type { ApiTab } from '../api/types'
 import { useWorkflowsStore } from '../stores/workflows'
 
 export type WorkflowSnapshotTabLike = {
   id: string
   title: string
-  type: string
+  type: ApiTab['type']
 }
 
 export type UseWorkflowSnapshotActionsOptions<TTab extends WorkflowSnapshotTabLike> = {
   getTab: () => TTab | null
   getWorkflowParamsSnapshot: () => Record<string, unknown> | null
   getCopyCurrentParamsSnapshot?: () => Record<string, unknown> | null
-  resolveEngineSemantics?: (tab: TTab) => string
   copyCurrentParamsMessage?: string
   noticeDurationMs?: number
   onBeforeCopyCurrentParams?: () => void
@@ -57,7 +57,6 @@ export function useWorkflowSnapshotActions<TTab extends WorkflowSnapshotTabLike>
         name: `${tab.title} — ${new Date().toLocaleString()}`,
         source_tab_id: tab.id,
         type: tab.type,
-        engine_semantics: options.resolveEngineSemantics?.(tab) ?? tab.type,
         params_snapshot: paramsSnapshot,
       })
       toast(result.action === 'updated' ? 'Snapshot updated in Workflows.' : 'Snapshot saved to Workflows.')

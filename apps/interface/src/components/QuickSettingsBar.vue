@@ -808,9 +808,7 @@ function currentTab(): UiPresetTab | null {
     if (modelTab.type === 'ltx2') {
       const ltxTab = asLtxTab(modelTab)
       if (!ltxTab) return null
-      const explicit = String(ltxTab.params.mode || '').trim().toLowerCase()
-      if (explicit === 'img2vid' || explicit === 'txt2vid') return explicit
-      return 'txt2vid'
+      return ltxTab.params.mode
     }
     const imageTab = asImageTab(modelTab)
     if (imageTab) {
@@ -1461,9 +1459,8 @@ const ltxRouteHydrating = computed(() => (
 ))
 const activeLtxMode = computed<LtxGenerationMode>(() => {
   const tab = activeLtxTab.value
-  const explicit = String(tab?.params.mode || '').trim().toLowerCase()
-  if (explicit === 'img2vid' || explicit === 'txt2vid') return explicit
-  return 'txt2vid'
+  if (!tab) return 'txt2vid'
+  return tab.params.mode
 })
 const activeImageSurface = computed(() => {
   const tab = activeImageTab.value

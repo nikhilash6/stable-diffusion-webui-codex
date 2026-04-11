@@ -445,13 +445,15 @@ function normalizeDevice(device: string): WanTxt2VidPayload['device'] {
   throw new Error(`Unsupported device '${device}'`)
 }
 
-function normalizeSettingsRevision(value: unknown): number {
-  if (typeof value === 'number' && Number.isFinite(value)) return Math.max(0, Math.trunc(value))
+function requireSettingsRevision(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && value >= 0) {
+    return value
+  }
   if (typeof value === 'string') {
     const trimmed = value.trim()
-    if (/^-?\d+$/.test(trimmed)) return Math.max(0, Math.trunc(Number(trimmed)))
+    if (/^\d+$/.test(trimmed)) return Number(trimmed)
   }
-  return 0
+  throw new Error(`settings_revision must be a non-negative integer, got ${String(value)}.`)
 }
 
 function snapWanDim(value: number): number {
@@ -733,7 +735,7 @@ export function buildWanTxt2VidPayload(input: WanVideoCommonInput): WanTxt2VidPa
   const { prompt, negativePrompt } = resolveTopLevelPrompts(input)
   const payload: Record<string, unknown> = {
     device: normalizeDevice(input.device),
-    settings_revision: normalizeSettingsRevision(input.settingsRevision),
+    settings_revision: requireSettingsRevision(input.settingsRevision),
     txt2vid_prompt: prompt,
     txt2vid_neg_prompt: negativePrompt,
     txt2vid_width: width,
@@ -771,7 +773,7 @@ export function buildWanImg2VidPayload(input: WanImg2VidInput): WanImg2VidPayloa
   const { prompt, negativePrompt } = resolveTopLevelPrompts(input)
   const payload: Record<string, unknown> = {
     device: normalizeDevice(input.device),
-    settings_revision: normalizeSettingsRevision(input.settingsRevision),
+    settings_revision: requireSettingsRevision(input.settingsRevision),
     img2vid_prompt: prompt,
     img2vid_neg_prompt: negativePrompt,
     img2vid_width: width,

@@ -31,7 +31,7 @@ from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 import re
-from typing import Dict, Iterable, List, Mapping, Tuple
+from typing import Dict, Iterable, List, Mapping, Tuple, TypeVar
 
 import torch
 
@@ -45,8 +45,10 @@ from apps.backend.runtime.adapters.lora.types import (
     SetWeights,
     make_spec,
 )
+from apps.backend.runtime.state_dict.views import KeyspaceLookupView
 
 LOGGER = get_backend_logger(__name__)
+_TensorValueT = TypeVar("_TensorValueT")
 _RX_BLOCK_MODULATION_LOGICAL_KEY = re.compile(r"^blocks_(?P<idx>\d+)_modulation$")
 STANDARD_LORA_TENSOR_CANDIDATES = (
     (".lora_up.weight", ".lora_down.weight", ".lora_mid.weight"),
@@ -76,14 +78,23 @@ def _tensor_item(value: torch.Tensor | None) -> float | None:
     return float(value.item())
 
 
-def _maybe_convert_bfl_control(tensors: Mapping[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+def _maybe_convert_bfl_control(tensors: Mapping[str, _TensorValueT]) -> Mapping[str, _TensorValueT]:
     if "img_in.lora_A.weight" not in tensors or "single_blocks.0.norm.key_norm.scale" not in tensors:
-        return dict(tensors)
-    converted: Dict[str, torch.Tensor] = {}
-    for key, value in tensors.items():
+        return tensors
+    converted_lookup: dict[str, str] = {}
+    for key in tensors.keys():
+        if not isinstance(key, str):
+            raise RuntimeError(f"LoRA tensor map keys must be strings, got {type(key).__name__}.")
         new_key = key.replace(".lora_B.bias", ".diff_b").replace("_norm.scale", "_norm.scale.set_weight")
-        converted[f"diffusion_model.{new_key}"] = value
-    return converted
+        mapped_key = f"diffusion_model.{new_key}"
+        previous = converted_lookup.get(mapped_key)
+        if previous is not None and previous != key:
+            raise RuntimeError(
+                "BFL/Control LoRA key conversion collided after explicit mapping: "
+                f"dst={mapped_key!r} srcs={previous!r},{key!r}"
+            )
+        converted_lookup[mapped_key] = key
+    return KeyspaceLookupView(tensors, converted_lookup)
 
 
 def _select_first_present(tensors: Mapping[str, torch.Tensor], names: Iterable[str]) -> Tuple[str | None, torch.Tensor | None]:

@@ -77,6 +77,7 @@ export interface VideoRunHistoryItem {
   summary: string
   promptPreview: string
   paramsSnapshot: Record<string, unknown>
+  initImageData?: string
   thumbnail?: GeneratedImage | null
   errorMessage?: string
 }
@@ -96,6 +97,7 @@ export type PreparedWanRun =
       summary: string
       promptPreview: string
       paramsSnapshot: Record<string, unknown>
+      initImageData: string
       payload: WanImg2VidPayload
     }
 
@@ -815,7 +817,7 @@ export function useVideoGeneration(tabId: string) {
         ...img2vidGuideInput,
         ...img2vidTemporalInput,
       })
-      return { mode: 'img2vid', createdAtMs, summary, promptPreview, paramsSnapshot, payload }
+      return { mode: 'img2vid', createdAtMs, summary, promptPreview, paramsSnapshot, initImageData: v.initImageData, payload }
     }
 
     const payload = buildWanTxt2VidPayload(common)
@@ -859,6 +861,7 @@ export function useVideoGeneration(tabId: string) {
         summary: run.summary,
         promptPreview: run.promptPreview,
         paramsSnapshot: run.paramsSnapshot,
+        initImageData: run.mode === 'img2vid' ? run.initImageData : '',
         thumbnail: null,
       }
       taskLifecycle.saveResume({

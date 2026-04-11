@@ -189,7 +189,7 @@ def prepare_ltx2_bundle_inputs(
                 "LTX2 core-only GGUF bundle planning requires wrapped vocoder metadata in the audio bundle. "
                 f"Missing `config.vocoder` in SafeTensors metadata for {audio_bundle_path!r}."
             )
-        connectors_state = dict(connectors_sidecar_state)
+        connectors_state = connectors_sidecar_state
 
         validate_ltx2_video_vae_contract(video_vae_state)
         validate_ltx2_audio_bundle_contract(audio_vae_state=audio_vae_state, vocoder_state=vocoder_state)

@@ -43,6 +43,7 @@ from apps.backend.runtime.ops.operations_gguf import is_packed_gguf_artifact
 from apps.backend.runtime.sampling_adapters.prediction import FlowMatchEulerPrediction
 from apps.backend.runtime.memory import memory_management
 from apps.backend.runtime.memory.config import DeviceRole
+from apps.backend.runtime.checkpoint.io import load_torch_file
 
 logger = get_backend_logger("backend.engines.zimage.spec")
 
@@ -256,9 +257,15 @@ def _load_external_text_encoder(tenc_path: str | None, *, torch_dtype) -> object
         encoder = ZImageTextEncoder.from_gguf(tenc_path, torch_dtype=torch_dtype)
     else:
         # Load safetensors text encoder
-        from safetensors.torch import load_file
         from apps.backend.runtime.families.zimage.text_encoder import ZImageTextEncoder
-        state_dict = load_file(tenc_path)
+        state_dict = load_torch_file(tenc_path, device=memory_management.manager.cpu_device)
+        if isinstance(state_dict, Mapping) and len(state_dict) == 1 and "state_dict" in state_dict:
+            state_dict = state_dict["state_dict"]
+        if not isinstance(state_dict, Mapping):
+            raise RuntimeError(
+                "Z Image external text encoder must resolve to a state_dict mapping; "
+                f"got {type(state_dict).__name__}."
+            )
         encoder = ZImageTextEncoder.from_state_dict(state_dict, torch_dtype=torch_dtype)
     
     return encoder

@@ -17,6 +17,7 @@ Symbols (top-level; keep in sync; no ghosts):
 
 from __future__ import annotations
 
+from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -26,6 +27,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from apps.backend.runtime.ops.operations_gguf import dequantize_tensor
+from apps.backend.runtime.models.state_dict import safe_load_state_dict
+from apps.backend.runtime.state_dict.views import KeyspaceLookupView
 
 _CONNECTORS_WRAPPER_PREFIX = "connectors."
 _REAL_23_CONNECTOR_PREFIXES = (
@@ -33,6 +36,47 @@ _REAL_23_CONNECTOR_PREFIXES = (
     "text_embedding_projection.",
     "video_embeddings_connector.",
 )
+
+
+class _DequantizedConnectorStateDictView(MappingABC[str, Any]):
+    def __init__(self, base: Mapping[str, Any]) -> None:
+        self._base = base
+
+    def __getitem__(self, key: str) -> Any:
+        if not isinstance(key, str):
+            raise RuntimeError(
+                "LTX2 connectors dequantized state_dict expects string keys. "
+                f"Got {type(key).__name__}."
+            )
+        return dequantize_tensor(self._base[key])
+
+    def __iter__(self):
+        return iter(self._base.keys())
+
+    def __len__(self) -> int:
+        return len(self._base)
+
+    def keys(self):
+        return self._base.keys()
+
+    def shape_of(self, key: str):
+        shape_getter = getattr(self._base, "shape_of", None)
+        if not callable(shape_getter):
+            return None
+        try:
+            return shape_getter(key)
+        except Exception:
+            return None
+
+    def materialize(self):
+        materializer = getattr(self._base, "materialize", None)
+        if callable(materializer):
+            materialized = materializer()
+            if isinstance(materialized, tuple):
+                materialized = materialized[0]
+            if isinstance(materialized, Mapping):
+                return {key: dequantize_tensor(value) for key, value in materialized.items()}
+        return {key: dequantize_tensor(self._base[key]) for key in self._base.keys()}
 
 
 def _require_int(config: Mapping[str, Any], key: str) -> int:
@@ -988,43 +1032,44 @@ class _Ltx23TextConnectors(nn.Module):
         return video_text_embedding, audio_text_embedding, new_attn_mask
 
 
-def _normalize_connector_state_dict(state_dict: Mapping[str, Any]) -> dict[str, Any]:
-    normalized: dict[str, Any] = {}
-    wrapped_keys = [key for key in state_dict if key.startswith(_CONNECTORS_WRAPPER_PREFIX)]
-    direct_keys = [key for key in state_dict if not key.startswith(_CONNECTORS_WRAPPER_PREFIX)]
+def _resolve_connector_state_dict_view(state_dict: Mapping[str, Any]) -> Mapping[str, Any]:
+    if not isinstance(state_dict, Mapping):
+        raise RuntimeError(
+            "LTX2 connectors state_dict must be a mapping. "
+            f"Got {type(state_dict).__name__}."
+        )
+    wrapped_keys = 0
+    direct_keys = 0
+    wrapped_lookup: dict[str, str] = {}
+    for raw_key in state_dict.keys():
+        if not isinstance(raw_key, str):
+            raise RuntimeError(
+                "LTX2 connectors state_dict keys must be strings. "
+                f"Got {type(raw_key).__name__}."
+            )
+        if raw_key.startswith(_CONNECTORS_WRAPPER_PREFIX):
+            suffix = raw_key[len(_CONNECTORS_WRAPPER_PREFIX) :]
+            if not suffix:
+                raise RuntimeError("LTX2 connectors state contains an empty `connectors.` wrapper key.")
+            previous = wrapped_lookup.get(suffix)
+            if previous is not None and previous != raw_key:
+                raise RuntimeError(
+                    "LTX2 connectors wrapped layout collides after explicit keyspace mapping: "
+                    f"dst={suffix!r} srcs={previous!r},{raw_key!r}."
+                )
+            wrapped_lookup[suffix] = raw_key
+            wrapped_keys += 1
+            continue
+        direct_keys += 1
 
     if wrapped_keys and direct_keys:
         raise RuntimeError(
             "LTX2 connectors state mixes wrapped `connectors.*` keys with direct keys; "
             "supported layouts are all-direct or all-wrapped only."
         )
-
     if wrapped_keys:
-        for key, value in state_dict.items():
-            if not key.startswith(_CONNECTORS_WRAPPER_PREFIX):
-                raise RuntimeError(
-                    "LTX2 connectors state mixes wrapped `connectors.*` keys with direct keys; "
-                    "supported layouts are all-direct or all-wrapped only."
-                )
-            stripped = key[len(_CONNECTORS_WRAPPER_PREFIX) :]
-            if not stripped:
-                raise RuntimeError("LTX2 connectors state contains an empty `connectors.` wrapper key.")
-            if stripped in normalized:
-                raise RuntimeError(
-                    f"LTX2 connectors wrapped layout collides after removing `connectors.`: {stripped!r}."
-                )
-            normalized[stripped] = value
-        return normalized
-
-    normalized.update(state_dict)
-    return normalized
-
-
-def _materialize_connector_state_dict(state_dict: Mapping[str, Any]) -> dict[str, Any]:
-    materialized: dict[str, Any] = {}
-    for raw_key, value in state_dict.items():
-        materialized[str(raw_key)] = dequantize_tensor(value)
-    return materialized
+        return KeyspaceLookupView(state_dict, wrapped_lookup)
+    return state_dict
 
 
 def load_ltx2_connectors(
@@ -1034,17 +1079,21 @@ def load_ltx2_connectors(
     device: torch.device,
     torch_dtype: torch.dtype,
 ) -> Ltx2TextConnectors:
-    normalized_state_dict = _normalize_connector_state_dict(state_dict)
-    materialized_state_dict = _materialize_connector_state_dict(normalized_state_dict)
-    if any(str(key).startswith(_REAL_23_CONNECTOR_PREFIXES) for key in normalized_state_dict):
+    resolved_state_dict = _resolve_connector_state_dict_view(state_dict)
+    dequantized_state_dict = _DequantizedConnectorStateDictView(resolved_state_dict)
+    if any(key.startswith(_REAL_23_CONNECTOR_PREFIXES) for key in resolved_state_dict.keys()):
         module = _Ltx23TextConnectors.from_state_dict_and_config(
             config=config,
-            state_dict=normalized_state_dict,
+            state_dict=dequantized_state_dict,
         )
     else:
         module = Ltx2TextConnectors.from_config(config)
     try:
-        missing, unexpected = module.load_state_dict(materialized_state_dict, strict=False)
+        missing, unexpected = safe_load_state_dict(
+            module,
+            dequantized_state_dict,
+            log_name="LTX2TextConnectors",
+        )
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"LTX2 connectors state load failed: {exc}") from exc
     if missing or unexpected:

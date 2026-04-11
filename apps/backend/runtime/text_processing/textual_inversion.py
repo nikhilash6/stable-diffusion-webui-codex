@@ -88,8 +88,8 @@ def crop_black(img, tol=0):
 
 
 def extract_image_data_embed(image):
-    d = 3
-    outarr = crop_black(np.array(image.convert('RGB').getdata()).reshape(image.size[1], image.size[0], d).astype(np.uint8)) & 0x0F
+    rgb_pixels = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    outarr = crop_black(rgb_pixels) & 0x0F
     black_cols = np.where(np.sum(outarr, axis=(0, 2)) == 0)
     if black_cols[0].shape[0] < 2:
         _log.warning('%s: no embedded information found.', os.path.basename(getattr(image, "filename", "unknown image file")))
