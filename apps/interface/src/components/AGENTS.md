@@ -1,13 +1,15 @@
 <!-- tags: frontend, components, prompt, hires, refiner -->
 # apps/interface/src/components Overview
 Date: 2025-12-06
-Last Review: 2026-04-08
+Last Review: 2026-04-12
 Status: Active
 
 ## Purpose
 - Reusable Vue components (panels, form widgets, prompts, galleries) shared across views.
 
 ## Notes
+- 2026-04-12: `QuickSettingsBar.vue` no longer owns a private VAE/path snapshot for compatibility/canonicalization. The bar must consume the store-owned snapshots from `quicksettings.ts`, and workflow/history restore flows must seed those snapshots before route-driven inventory reloads so the globally mounted header cannot fall back to stale cached catalog truth.
+- 2026-04-12: `SettingsForm.vue` is now the local stale-settings recovery owner for the Settings route: a `409` from `/api/options` must stay inline/recoverable, preserve `dirty` edits, refresh the local revision, and never bubble into bootstrap-fatal error handling.
 - 2026-03-21: `Img2ImgBasicParametersCard.vue` now accepts engine-scoped `resizeModeOptions`; when the active engine only supports truthful pixel-space resize modes (ZImage), the card hides the unsupported upscaler selector instead of rendering a dead selector, and ZImage inpaint hides the resize block entirely because the masked runtime path does not own a separate resize-mode contract.
 - 2026-04-01: Native SDXL SUPIR UI is split across three owners: `QuickSettingsBar.vue` owns the main SUPIR toggle beside `IMG2IMG` / `INPAINT`, `Img2ImgBasicParametersCard.vue` owns only the SUPIR sampler + locked-scheduler row inside Basic Parameters, and `SupirModeCard.vue` owns the remaining SUPIR-specific controls (`variant`, control/restoration scales, color-fix, plus the bounded advanced `Restore End (Sigma)` knob). Shared readiness/blocking truth comes from `src/composables/useSupirDiagnostics.ts`.
 - 2026-04-02: `Img2ImgBasicParametersCard.vue` and `SupirModeCard.vue` must consume the canonical SUPIR default-state factory from `src/stores/model_tabs.ts`; do not reintroduce component-local SUPIR default owners, because `<script setup>` prop defaults are hoisted and local fallback state will drift or fail compilation.

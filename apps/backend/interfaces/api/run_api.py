@@ -13,6 +13,8 @@ Bootstrap env overrides are published only when non-default to avoid pinning glo
 Bootstrap env publication includes LoRA loader policies (`CODEX_LORA_APPLY_MODE`, `CODEX_LORA_MERGE_MODE`, `CODEX_LORA_REFRESH_SIGNATURE`) from resolved runtime namespace values.
 Startup settings normalization preserves `codex_options_revision` while pruning unknown keys and failing loud on invalid reliability-critical values
 (including `codex_attention_backend`, checkbox settings, and non-finite numeric options).
+Options router wiring includes the locked compare-and-set helper from `options_store` so conditional `POST /api/options` writes can reject stale
+expected revisions atomically instead of relying on router-side prechecks.
 Launcher/backend trace toggles (`--trace-contract`, `--trace-profiler`) are published via bootstrap env for runtime diagnostics modules.
 Startup bootstrap logs allocator diagnostics (`PYTORCH_CUDA_ALLOC_CONF`, resolved allocator backend, and `--cuda-malloc` flag state) for fail-loud VRAM debugging.
 Allocator bootstrap contract is `PYTORCH_CUDA_ALLOC_CONF` only.
@@ -581,7 +583,7 @@ def build_app(*, app_mode_profile: str | None = None) -> FastAPI:
     # to any route or startup function defined below.
     from apps.backend.services.options_store import (
         get_value as _opts_get,
-        set_values as _opts_set_many,
+        set_values_if_revision as _opts_set_many_if_revision,
         save_values as _opts_save_native,
         get_snapshot as _opts_snapshot,
         load_values as _opts_load_native,
@@ -725,7 +727,6 @@ def build_app(*, app_mode_profile: str | None = None) -> FastAPI:
     ))
     app.include_router(ui.build_router(
         codex_root=CODEX_ROOT,
-        opts_set_many=_opts_set_many,
         model_api=model_api,
     ))
     app.include_router(models.build_router(
@@ -735,7 +736,7 @@ def build_app(*, app_mode_profile: str | None = None) -> FastAPI:
     app.include_router(options.build_router(
         opts_load_native=_opts_load_native,
         opts_snapshot=_opts_snapshot,
-        opts_set_many=_opts_set_many,
+        opts_set_many_if_revision=_opts_set_many_if_revision,
         settings_registry_ok=_settings_registry_ok,
         field_index=_field_index,
         setting_type=_SettingType,

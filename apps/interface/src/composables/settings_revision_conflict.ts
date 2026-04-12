@@ -21,7 +21,10 @@ export function resolveSettingsRevisionConflict(error: unknown): number | null {
   return getCurrentRevisionFromError(error)
 }
 
-export function formatSettingsRevisionConflictMessage(currentRevision: number): string {
+export function formatSettingsRevisionConflictMessage(
+  currentRevision: number,
+  retryInstruction = 'retry generation manually',
+): string {
   const revision = Math.max(0, Math.trunc(Number(currentRevision)))
-  return `Settings changed on the backend (revision ${revision}). The UI synced the latest revision; retry generation manually.`
+  return `Settings changed on the backend (revision ${revision}). The UI synced the latest revision; ${retryInstruction}.`
 }

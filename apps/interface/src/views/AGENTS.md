@@ -1,7 +1,7 @@
 # apps/interface/src/views Overview
 <!-- tags: frontend, views, model-tabs -->
 Date: 2025-10-28
-Last Review: 2026-04-08
+Last Review: 2026-04-12
 Status: Active
 
 ## Purpose
@@ -20,6 +20,8 @@ Status: Active
 - `PngInfo.vue` and `ImageModelTab.vue` are writers of real image-tab init images. When either seam materializes `initImageData`, it must also set `initSource.mode='img'` in the same patch so shared INPAINT gating stays truthful.
 - 2026-04-07: `WorkflowsList.vue` restore now treats sparse image snapshots as ownerful for `inpaintMode`: if a workflow snapshot omits that key (for example after backend scrub of a stale invalid value), restore must seed the type default before patching an existing compatible tab so the target tab cannot silently keep an old exact inpaint lane like `brushnet`/`fooocus_inpaint`.
 - 2026-04-11: `WorkflowsList.vue` may create a replacement tab only when the bound `source_tab_id` is missing. If the stored workflow points at an existing tab of a different exact type, restore must fail loud and let `/api/ui/workflows` own the repair boundary instead of silently rebinding to a fresh tab.
+- 2026-04-12: `ImageModelTab.vue` history apply and `WorkflowsList.vue` workflow restore now share the same image-VAE truth path: fetch fresh inventory/path data, hydrate the store-owned quicksettings VAE/path snapshots, canonicalize through `src/utils/vae_choices.ts`, and apply VAE through quicksettings. History apply invalidates model-catalog cache immediately after the fresh hydrate; workflow restore invalidates before the fresh restore hydrate and again before `/workflows -> /models/:tabId` navigation, so the globally mounted header cannot overwrite the restored VAE with a warm or pre-existing in-flight inventory response.
+- 2026-04-12: `Settings.vue` now passes the live `/api/options` revision into `SettingsForm.vue`; stale Settings-page conflicts must stay local to that form instead of escalating into the global bootstrap fatal screen.
 - All generation workspaces live under model tabs (`/models/:tabId`):
   - `ModelTabView.vue` mounts `VideoTabRouteView.vue` when `tab.type === 'wan22_14b' | 'wan22_5b' | 'ltx2'`.
   - `ModelTabView.vue` mounts `ImageModelTab.vue` when `tab.type` is `sd15|sdxl|flux1|flux2|chroma|zimage|anima`.

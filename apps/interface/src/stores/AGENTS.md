@@ -1,13 +1,14 @@
 # apps/interface/src/stores Overview
 <!-- tags: frontend, stores, state -->
 Date: 2025-10-28
-Last Review: 2026-04-07
+Last Review: 2026-04-12
 Status: Active
 
 ## Purpose
 - Pinia stores encapsulating shared UI/application state (tabs, task options, session data).
 
 ## Notes
+- 2026-04-12: `quicksettings.ts` now owns shared VAE/path snapshot truth for restore/history flows: `inventoryVaesSnapshot`, `pathsConfigSnapshot`, `hydrateVaeInventorySnapshot(...)`, and `hydratePathsSnapshot(...)`. The same owner now also uses `assetSnapshotEpoch` so older bootstrap loaders (`loadVaes()` / `loadTextEncoders()`) cannot overwrite a newer restore/apply hydrate. Components must read those snapshots for VAE compatibility/canonicalization instead of keeping a second local inventory/path cache.
 - 2026-03-26: `model_tabs.ts` now performs a non-blocking image-tab top-level canon backfill during `load()`: if raw persisted image params are missing canonical top-level keys, the store queues a normal `updateParams(...)` patch containing only those missing materialized top-level owners so backfill shares the same serialized persist owner as later user edits. Stale top-level keys are filtered by the backend `ui.py` load/write gate, and this tranche does not widen into nested normalization/default drift ownership.
 - 2026-04-02: `model_tabs.ts::createDefaultSupirModeFormState()` is the canonical default owner for the nested image-tab `supir` state. Components must import that factory instead of duplicating local SUPIR fallback objects.
 - 2026-03-20: `xyz.ts` now reuses `utils/image_request_contract.ts` for the explicit image selector lane, so checkpoint metadata validation, FLUX.2 guidance mode, asset-contract lookup, required `tenc_sha`/`vae_sha`, and ZImage variant extras stay in parity with `useGeneration.ts`.

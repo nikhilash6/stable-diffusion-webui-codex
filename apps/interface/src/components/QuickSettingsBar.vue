@@ -14,7 +14,8 @@ first-class as the current Klein 4B / base-4B slice (single Qwen3-4B selector, b
 For LTX, QuickSettings remains the owner of mode + checkpoint/VAE/text-encoder selection only; execution-profile defaults are checkpoint-aware
 workspace state, not a second raw sampler/scheduler control surface in the shared header. Native SDXL SUPIR mode now also exposes a shared-header toggle here,
 with readiness/blocking resolved from the same diagnostics owner used by the body surface. Outside `/models/:tabId`, model-asset selectors stay summary-only/read-only
-and redirect the user back to a real model-tab owner instead of mutating misleading global checkpoint/VAE/text-encoder state.
+and redirect the user back to a real model-tab owner instead of mutating misleading global checkpoint/VAE/text-encoder state. The non-WAN VAE selector
+also keeps Anima choices scoped to the truthful WanVAE-compatible root instead of laundering unrelated family VAEs into the Anima lane.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `QuickSettingsBar` (component): Main QuickSettings SFC; includes “advanced” UI, per-family subcomponents, and selector filtering logic.
@@ -36,9 +37,6 @@ Symbols (top-level; keep in sync; no ghosts):
 - `extractSizeBytes` (function): Reads validated file size bytes from `/models/file-metadata` summary payload.
 - `onShowMetadata` (function): Resolves selection metadata and opens a modal.
 - `fileInPaths` (function): Checks whether a file path belongs to the configured roots for a key from `/api/paths` (drives selector filtering).
-- `isVaeForFamily` (function): Filters VAE entries to those relevant for the current family.
-- `withBuiltInVaeChoice` (function): Prepends canonical `built-in` to filtered VAE choices and removes legacy aliases/duplicates.
-- `canonicalizeVaeChoiceForActiveFamily` (function): Normalizes `currentVae` to an active-family option (direct match, sentinel alias, or SHA-equivalent fallback).
 - `isQuicksettingsReady` (ref): Becomes true only after component-local inventory/paths initialization completes; gates mount-time VAE canonicalization.
 - `normalizeTextEncoderLabels` (function): Normalizes raw TE values into a stable label list (used for Flux/WAN multi-TE cases).
 - `WanAssetsParams` (type): Minimal WAN assets triple used for payload building (metadata dir + TE + VAE).
@@ -682,7 +680,7 @@ import { useEngineCapabilitiesStore } from '../stores/engine_capabilities'
 import {
   fetchCheckpointMetadata,
   fetchFileMetadata,
-  fetchPaths,
+  fetchFreshPaths,
   fetchObliterateVram,
 } from '../api/client'
 import type { InventoryResponse, ModelInfo } from '../api/types'
@@ -699,6 +697,7 @@ import {
 } from '../utils/engine_taxonomy'
 import { buildUseInitImagePatch } from '../utils/image_params'
 import { filterModelTitlesForFamily, enginePrefixForFamily } from '../utils/model_family_filters'
+import { buildFamilyVaeChoices, canonicalizeVaeChoice, type InventoryVaeChoice } from '../utils/vae_choices'
 import QuickSettingsAssetBlock from './quicksettings/QuickSettingsAssetBlock.vue'
 import QuickSettingsPerf from './quicksettings/QuickSettingsPerf.vue'
 import QuickSettingsWan from './quicksettings/QuickSettingsWan.vue'
@@ -714,8 +713,6 @@ const route = useRoute()
 const uiBlocks = useUiBlocksStore()
 const tabsStore = useModelTabsStore()
 const engineCaps = useEngineCapabilitiesStore()
-const pathsConfig = ref<Record<string, string[]>>({})
-type InventoryVae = { name: string; path: string; sha256?: string; format: string; latent_channels?: number | null; scaling_factor?: number | null }
 type WanInventoryVariant = 'wan22_5b' | 'wan22_14b' | 'wan22_14b_animate'
 type InventoryWanGguf = { name: string; path: string; sha256?: string; stage: string; variant?: WanInventoryVariant; repoHint?: string }
 type InventoryTextEncoder = { name: string; path: string; sha256?: string }
@@ -724,7 +721,6 @@ type LtxTab = TabByType<'ltx2'>
 type Wan14bTab = TabByType<'wan22_14b'>
 type Wan5bTab = TabByType<'wan22_5b'>
 type AddPathTargetKind = 'checkpoint' | 'vae' | 'text_encoder'
-const inventoryVaes = ref<InventoryVae[]>([])
 const inventoryWan = ref<InventoryWanGguf[]>([])
 const inventoryTextEncoders = ref<InventoryTextEncoder[]>([])
 const showOverridesModal = ref(false)
@@ -977,7 +973,7 @@ async function loadInventory(options?: { forceRefresh?: boolean }): Promise<void
 }
 
 function applyInventorySnapshot(inv: InventoryResponse): void {
-  inventoryVaes.value = inv.vaes
+  store.hydrateVaeInventorySnapshot(inv)
   inventoryWan.value = (inv.wan22?.gguf ?? []).map((g) => ({
     name: String(g.name),
     path: String(g.path),
@@ -991,8 +987,10 @@ function applyInventorySnapshot(inv: InventoryResponse): void {
 }
 
 async function loadPaths(): Promise<void> {
-  const res = await fetchPaths()
-  pathsConfig.value = (res.paths || {}) as Record<string, string[]>
+  const requestEpoch = store.getAssetSnapshotEpoch()
+  const res = await fetchFreshPaths()
+  if (requestEpoch !== store.getAssetSnapshotEpoch()) return
+  store.hydratePathsSnapshot((res.paths || {}) as Record<string, string[]>)
 }
 
 function normalizePath(path: string): string {
@@ -1077,12 +1075,12 @@ function findModelByTitle(title: string): ModelInfo | undefined {
   return undefined
 }
 
-function findVaeRecord(label: string): InventoryVae | undefined {
+function findVaeRecord(label: string): InventoryVaeChoice | undefined {
   const raw = String(label || '').trim()
   if (!raw) return undefined
   const norm = normalizePath(raw)
   const tail = norm.split('/').pop() || raw
-  return inventoryVaes.value.find((v) => {
+  return store.inventoryVaesSnapshot.find((v) => {
     if (!v) return false
     if (v.name === raw) return true
     const vPath = normalizePath(String(v.path || ''))
@@ -1269,7 +1267,7 @@ function onShowMetadata(payload: unknown): void {
 
 function fileInPaths(file: string, key: string): boolean {
   if (!file) return false
-  const roots = pathsConfig.value[key] || []
+  const roots = store.pathsConfigSnapshot[key] || []
   if (!roots.length) return false
   const fNorm = normalizePath(file)
   for (const root of roots) {
@@ -1284,95 +1282,15 @@ function fileInPaths(file: string, key: string): boolean {
   return false
 }
 
-const filteredModelTitles = computed(() => filterModelTitlesForFamily(store.models, activeFamily.value, pathsConfig.value))
-
-function isVaeForFamily(name: string, fam: string): boolean {
-  const rec = inventoryVaes.value.find(v => v.name === name || v.path.endsWith('/' + name))
-  const scale = rec?.scaling_factor ?? null
-  const path = rec?.path ?? ''
-  if (fam === 'sdxl') return (scale !== null) ? Math.abs(Number(scale) - 0.13025) < 1e-3 : /sdxl|xl/i.test(name)
-  if (fam === 'sd15') return (scale !== null) ? Math.abs(Number(scale) - 0.18215) < 5e-3 : /sd1|1\.5|sd15|v1-5/i.test(name)
-  if (fam === 'flux1') return fileInPaths(path, 'flux1_vae')
-  if (fam === 'flux2') return fileInPaths(path, 'flux2_vae')
-  if (fam === 'chroma') return fileInPaths(path, 'flux1_vae')
-  if (fam === 'ltx2') return fileInPaths(path, 'ltx2_vae')
-  if (fam === 'zimage') return fileInPaths(path, 'zimage_vae') || fileInPaths(path, 'flux1_vae')  // Z Image uses same VAE as Flux.1
-  return true
-}
-
-function withBuiltInVaeChoice(values: string[]): string[] {
-  const out: string[] = ['built-in']
-  const seen = new Set<string>(['built-in'])
-  for (const raw of values) {
-    const value = String(raw || '').trim()
-    if (!value) continue
-    const lower = value.toLowerCase()
-    if (lower === 'automatic' || lower === 'built in' || lower === 'built-in') continue
-    if (seen.has(value)) continue
-    seen.add(value)
-    out.push(value)
-  }
-  return out
-}
-
-type VaeCanonicalizationReason = 'exact' | 'sentinel' | 'sha' | 'fallback'
-type VaeCanonicalizationResult = { value: string; reason: VaeCanonicalizationReason }
-
-function canonicalizeVaeChoiceForActiveFamily(current: string, choices: readonly string[]): VaeCanonicalizationResult | null {
-  if (!Array.isArray(choices) || choices.length === 0) return null
-
-  const rawCurrent = String(current || '').trim()
-  const defaultChoice = choices.includes('built-in') ? 'built-in' : String(choices[0] || '')
-  if (!rawCurrent) {
-    return { value: defaultChoice, reason: 'fallback' }
-  }
-  if (choices.includes(rawCurrent)) return { value: rawCurrent, reason: 'exact' }
-
-  const currentLower = rawCurrent.toLowerCase()
-  if (currentLower === 'automatic' || currentLower === 'built in' || currentLower === 'built-in') {
-    return { value: defaultChoice, reason: 'sentinel' }
-  }
-  if (currentLower === 'none' && choices.includes('none')) {
-    return { value: 'none', reason: 'sentinel' }
-  }
-
-  const currentSha = store.resolveVaeSha(rawCurrent)
-  if (currentSha) {
-    const normalizedCurrentSha = String(currentSha).trim().toLowerCase()
-    for (const choice of choices) {
-      const candidateSha = store.resolveVaeSha(choice)
-      if (!candidateSha) continue
-      if (String(candidateSha).trim().toLowerCase() === normalizedCurrentSha) {
-        return { value: choice, reason: 'sha' }
-      }
-    }
-  }
-
-  return { value: defaultChoice, reason: 'fallback' }
-}
+const filteredModelTitles = computed(() => filterModelTitlesForFamily(store.models, activeFamily.value, store.pathsConfigSnapshot))
 
 const filteredVaeChoices = computed(() => {
-  const fam = activeFamily.value
-  if (fam === 'flux1' || fam === 'flux2' || fam === 'chroma') {
-    const vaePathKey = fam === 'flux2' ? 'flux2_vae' : 'flux1_vae'
-    return withBuiltInVaeChoice(inventoryVaes.value
-      .filter((v) => typeof v.path === 'string' && fileInPaths(v.path, vaePathKey))
-      .map((v) => String(v.path || ''))
-    )
-  }
-  if (fam === 'zimage') {
-    return withBuiltInVaeChoice(inventoryVaes.value
-      .filter((v) => typeof v.path === 'string' && (fileInPaths(v.path, 'zimage_vae') || fileInPaths(v.path, 'flux1_vae')))
-      .map((v) => String(v.path || ''))
-    )
-  }
-  const familyChoices = (store.vaeChoices.length ? store.vaeChoices : ['built-in']).filter((value: string) => {
-    const normalized = String(value || '').trim().toLowerCase()
-    if (normalized === 'automatic' || normalized === 'built in' || normalized === 'built-in') return true
-    if (normalized === 'none') return true
-    return isVaeForFamily(value, fam)
-  })
-  return withBuiltInVaeChoice(familyChoices)
+  return buildFamilyVaeChoices(
+    activeFamily.value,
+    store.inventoryVaesSnapshot,
+    store.vaeChoices.length ? store.vaeChoices : ['built-in'],
+    store.pathsConfigSnapshot,
+  )
 })
 
 watch(
@@ -1384,10 +1302,16 @@ watch(
     if (!quicksettingsReady) return
     const persistedFamilyVae = store.getPersistedVaeForFamily(family)
     const sourceVae = String(persistedFamilyVae || '')
-    const canonical = canonicalizeVaeChoiceForActiveFamily(sourceVae, choices)
+    const canonical = canonicalizeVaeChoice(sourceVae, choices, store.resolveVaeSha)
     if (!canonical) return
     const nextVae = canonical.value
     if (canonical.reason === 'fallback') {
+      if (sourceVae) {
+        store.setVaeForFamily(family, nextVae, { persist: false }).catch((error: unknown) => {
+          toastQuicksettingsError(error)
+        })
+        return
+      }
       if (String(currentVae || '') === nextVae) return
       store.setVae(nextVae).catch((error: unknown) => {
         toastQuicksettingsError(error)
@@ -1970,7 +1894,7 @@ const wanTextEncoderChoices = computed(() => {
 const wanVaeChoices = computed(() => {
   const seen = new Set<string>()
   const out: string[] = []
-  for (const item of inventoryVaes.value) {
+  for (const item of store.inventoryVaesSnapshot) {
     const path = String(item.path || '')
     if (!path) continue
     if (!fileInPaths(path, 'wan22_vae')) continue

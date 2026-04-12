@@ -21,7 +21,8 @@ shared with the canonical hires payload builder while remaining blocked for mask
 `params.supir` and is emitted only through `img2img_extras.supir` for truthful SDXL img2img/inpaint runs, with diagnostics-backed sampler metadata
 owning the effective runtime sampler/scheduler pair and fail-loud rejection of stale APG/advanced-guidance overlap.
 Masked img2img runtime selection now flows through strict `inpaintMode` / `img2img_inpaint_mode`, with exact-engine mode discoverability coming from
-`/api/engines/capabilities.exact_engine_inpaint_modes` and invalid stale values failing loud before submit.
+`/api/engines/capabilities.exact_engine_inpaint_modes` and invalid stale values failing loud before submit. Image run-history snapshots now also carry the
+active family-scoped VAE selection so history replay can restore the same asset owner instead of leaking whichever global VAE happens to be selected later.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `ImageRunHistoryItem` (interface): Persisted per-tab run history entry (task id, status, summary, params snapshot, error message).
@@ -842,11 +843,13 @@ export function useGeneration(tabId: string) {
 
   function buildParamsSnapshot(
     p: ImageBaseParams,
-    engineId: string,
+    tabType: string,
     effectiveSampling?: { sampler: string; scheduler: string } | null,
   ): Record<string, unknown> {
+    const familyOwnedVae = String(quicksettings.getVaeForFamily(tabType) || '').trim()
     const snapshot: Record<string, unknown> = {
       checkpoint: p.checkpoint,
+      vae: familyOwnedVae,
       textEncoders: p.textEncoders,
 
       prompt: p.prompt,
@@ -1052,6 +1055,7 @@ export function useGeneration(tabId: string) {
     const textEncoders = Array.isArray((p as any).textEncoders)
       ? (p as any).textEncoders.map((it: unknown) => String(it || '').trim()).filter((it: string) => it.length > 0)
       : []
+    const familyOwnedVae = String(quicksettings.getVaeForFamily(tabType) || '').trim()
     const requestContractResolvers = {
       requireModelInfo: quicksettings.requireModelInfo,
       resolveFlux2CheckpointVariant: quicksettings.resolveFlux2CheckpointVariant,
@@ -1074,6 +1078,7 @@ export function useGeneration(tabId: string) {
         modelLabel: resolvedModelLabel,
         engineKey,
         textEncoderLabels: textEncoders,
+        selectedVaeLabel: familyOwnedVae,
         zimageTurbo: engineKey === 'zimage'
           ? Boolean((p as any)?.zimageTurbo ?? true)
           : false,
@@ -1141,6 +1146,7 @@ export function useGeneration(tabId: string) {
         modelLabel: modelRef,
         engineKey: engineOverrideForRequest,
         textEncoderLabels: textEncoders,
+        selectedVaeLabel: familyOwnedVae,
         zimageTurbo: engineOverrideForRequest === 'zimage'
           ? Boolean((p as any)?.zimageTurbo ?? true)
           : false,
@@ -1215,7 +1221,7 @@ export function useGeneration(tabId: string) {
       return
     }
     const summary = buildRunSummary(p, guidanceMode, effectiveSampling)
-    const paramsSnapshot = buildParamsSnapshot(p, engineOverrideForRequest, effectiveSampling)
+    const paramsSnapshot = buildParamsSnapshot(p, tabType, effectiveSampling)
 
     if (loraNames.length > 0) {
       const loraShas: string[] = []

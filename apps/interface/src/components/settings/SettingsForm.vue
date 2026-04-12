@@ -8,7 +8,8 @@ Required Notice: see NOTICE
 
 Purpose: Settings form renderer from the backend schema.
 Renders settings fields from the `/api/settings/schema` model and applies changes via `/api/options`, tracking pending/dirty changes locally and
-showing apply metadata feedback (`applied_now[]` vs `restart_required[]`) after each save.
+showing apply metadata feedback (`applied_now[]` vs `restart_required[]`) after each save. Settings writes are revision-aware and fail loud on stale
+pages instead of silently overwriting newer option state.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `SettingsForm` (component): Dynamic settings form used in the Settings view.
@@ -74,7 +75,10 @@ Symbols (top-level; keep in sync; no ghosts):
         <button class="btn btn-sm btn-primary" :disabled="pending || changedCount===0" @click="applyChanges">Apply</button>
         <span class="caption" v-if="changedCount>0">{{ changedCount }} change(s) pending</span>
       </div>
-      <div v-if="lastRestartRequired.length > 0" class="settings-apply-alert settings-apply-alert--warn" role="alert">
+      <div v-if="lastErrorMessage" class="settings-apply-alert settings-apply-alert--warn" role="alert">
+        <div class="caption">{{ lastErrorMessage }}</div>
+      </div>
+      <div v-else-if="lastRestartRequired.length > 0" class="settings-apply-alert settings-apply-alert--warn" role="alert">
         <div class="caption">Restart required for:</div>
         <ul class="settings-apply-alert-list">
           <li v-for="message in lastRestartRequired" :key="message">{{ message }}</li>
@@ -95,21 +99,28 @@ Symbols (top-level; keep in sync; no ghosts):
 import { computed, ref, watch } from 'vue'
 import type { SettingsField } from '../../api/types'
 import { updateOptions } from '../../api/client'
+import { formatSettingsRevisionConflictMessage, resolveSettingsRevisionConflict } from '../../composables/settings_revision_conflict'
 import SliderField from '../ui/SliderField.vue'
 
-const props = defineProps<{ fields: SettingsField[]; values: Record<string, unknown> }>()
+const props = defineProps<{ fields: SettingsField[]; values: Record<string, unknown>; revision: number }>()
 
 const model = ref<Record<string, unknown>>({})
 const dirty = ref<Record<string, unknown>>({})
 const pending = ref(false)
 const lastAppliedNow = ref<string[]>([])
 const lastRestartRequired = ref<string[]>([])
+const lastErrorMessage = ref('')
+const currentRevision = ref(0)
 
 watch(
-  () => props.values,
-  (v) => {
+  () => ({ values: props.values, revision: props.revision }),
+  ({ values, revision }) => {
+    const normalizedRevision = Number.isFinite(revision) ? Math.max(0, Math.trunc(revision)) : 0
+    currentRevision.value = normalizedRevision
+    const v = values
     model.value = { ...(v || {}) }
     dirty.value = {}
+    lastErrorMessage.value = ''
   },
   { immediate: true, deep: true },
 )
@@ -117,6 +128,7 @@ watch(
 function onChange(key: string, value: unknown) {
   model.value[key] = value
   dirty.value[key] = value
+  lastErrorMessage.value = ''
 }
 
 const changedCount = computed(() => Object.keys(dirty.value).length)
@@ -124,13 +136,32 @@ const changedCount = computed(() => Object.keys(dirty.value).length)
 async function applyChanges() {
   if (pending.value || changedCount.value === 0) return
   pending.value = true
+  lastErrorMessage.value = ''
   try {
-    const response = await updateOptions(dirty.value)
+    const response = await updateOptions(dirty.value, { expectedRevision: currentRevision.value })
     const appliedNowRaw = (response as any).applied_now
     const restartRequiredRaw = (response as any).restart_required
     lastAppliedNow.value = Array.isArray(appliedNowRaw) ? appliedNowRaw.map((item) => String(item)) : []
     lastRestartRequired.value = Array.isArray(restartRequiredRaw) ? restartRequiredRaw.map((item) => String(item)) : []
+    currentRevision.value = Number.isFinite((response as any).revision)
+      ? Math.max(0, Math.trunc((response as any).revision))
+      : currentRevision.value
     dirty.value = {}
+  } catch (error) {
+    const conflictRevision = resolveSettingsRevisionConflict(error)
+    if (conflictRevision !== null) {
+      currentRevision.value = conflictRevision
+      lastAppliedNow.value = []
+      lastRestartRequired.value = []
+      lastErrorMessage.value = formatSettingsRevisionConflictMessage(
+        conflictRevision,
+        'retry applying your pending changes manually',
+      )
+      return
+    }
+    lastAppliedNow.value = []
+    lastRestartRequired.value = []
+    lastErrorMessage.value = error instanceof Error ? error.message : String(error)
   } finally {
     pending.value = false
   }

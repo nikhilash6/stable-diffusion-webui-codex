@@ -1,13 +1,15 @@
 # apps/interface/src/api Overview
 <!-- tags: frontend, api, payloads -->
 Date: 2025-10-28
-Last Review: 2026-04-05
+Last Review: 2026-04-12
 Status: Active
 
 ## Purpose
 - Typed API client and DTO definitions used by the frontend to interact with the Codex backend.
 
 ## Notes
+- 2026-04-12: `client.ts` now exposes bounded uncached catalog reads `fetchFreshModelInventory()` and `fetchFreshPaths()` for restore/history seams that need immediate truth instead of warm cached `/api/models/inventory` or `/api/paths`. The same file now version-tags `/models` and `/models/inventory` cache entries, so stale in-flight model-catalog responses cannot repopulate cache after invalidation. Workflow restore pairs those fresh reads with `invalidateModelCatalogCaches()` before restore hydrate and again before `/models/:tabId` navigation so the globally mounted header reload cannot overwrite freshly restored VAE state with stale cached or pre-invalidation in-flight catalog data.
+- 2026-04-12: `client.ts::updateOptions(...)` is now a mandatory CAS caller: every live `/api/options` write must provide `expectedRevision` so `X-Codex-Expected-Revision` is always sent, and `types.ts` now treats `UiPreset`/`UiPresetApplyResponse` as checkpoint-only contracts with no `preset.options` or `updated[]` settings-mutation carrier.
 - 2026-03-20: image payload DTOs now treat `model_format` as a first-class selector alongside `model_sha`, `checkpoint_core_only`, and `vae_source`; frontend/backend image contracts must keep these selectors explicit and inventory-validated.
 - 2026-03-25: SDXL core-only image contracts now use explicit numbered text-encoder selectors (`tenc1_sha`, `tenc2_sha`) instead of generic `tenc_sha`; frontend contract builders must resolve them from inventory slot metadata (`InventoryResponse.text_encoders[].slot`) and keep `extras.refiner` scoped to the native SDXL refiner while generic model swapping stays under `swap_model`.
 - 2026-03-25: `payloads.ts` now splits generic swap ownership truthfully: top-level `extras.swap_model` is the first-pass stage config (`enable + switch_at_step + cfg + seed + selector truth`), while `extras.hires.swap_model` stays selector-only for the whole second-pass replacement.

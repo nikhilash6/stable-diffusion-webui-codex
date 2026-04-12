@@ -23,6 +23,8 @@ Symbols (top-level; keep in sync; no ghosts):
 - `get_revision` (function): Returns the normalized persisted options revision (non-negative int).
 - `get_value` (function): Reads a single option value with a fallback default.
 - `set_values` (function): Persists option updates, bumps `OPTIONS_REVISION_KEY`, and returns updated keys.
+- `OptionsRevisionMismatchError` (class): Raised when a conditional options write sees a different current revision under the store lock.
+- `set_values_if_revision` (function): Locked compare-and-set options write that fails loud when `expected_revision` is stale.
 - `OptionsSnapshot` (class): Typed snapshot of option values used by runtime/engines/launchers.
 - `get_snapshot` (function): Builds an `OptionsSnapshot` from persisted values.
 """
@@ -163,6 +165,41 @@ def set_values(payload: Mapping[str, Any]) -> list[str]:
                 updated.append(OPTIONS_REVISION_KEY)
         _atomic_write_values(data)
         return updated
+
+
+class OptionsRevisionMismatchError(RuntimeError):
+    def __init__(self, *, expected_revision: int, current_revision: int):
+        super().__init__(
+            f"stale options write rejected: expected revision {expected_revision}, current revision is {current_revision}."
+        )
+        self.expected_revision = max(0, int(expected_revision))
+        self.current_revision = max(0, int(current_revision))
+
+
+def set_values_if_revision(payload: Mapping[str, Any], expected_revision: int | None = None) -> tuple[list[str], int]:
+    if not isinstance(payload, Mapping):
+        raise TypeError("payload must be a mapping")
+    with _exclusive_settings_lock():
+        data = load_values()
+        current_revision = get_revision(data)
+        if expected_revision is not None and current_revision != max(0, int(expected_revision)):
+            raise OptionsRevisionMismatchError(
+                expected_revision=max(0, int(expected_revision)),
+                current_revision=current_revision,
+            )
+        updated: list[str] = []
+        for k, v in payload.items():
+            key = str(k)
+            data[key] = v
+            updated.append(key)
+        if updated:
+            next_revision = current_revision + 1
+            data[OPTIONS_REVISION_KEY] = next_revision
+            if OPTIONS_REVISION_KEY not in updated:
+                updated.append(OPTIONS_REVISION_KEY)
+            _atomic_write_values(data)
+            return updated, next_revision
+        return updated, current_revision
 
 
 @dataclass

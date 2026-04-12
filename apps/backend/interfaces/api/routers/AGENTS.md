@@ -24,6 +24,7 @@ Status: Active
 
 ## Notes
 - 2026-03-28: `tests.py` owns bounded live diagnostics such as `/api/tests/attention/sram/splitkv`; it must keep payload validation/router mapping narrow, return operator-useful execution receipts for expected runtime outcomes, and delegate real validation logic to runtime-owned modules instead of growing a generic test-execution surface.
+- 2026-04-12: `options.py` is now CAS-only for live writes (`X-Codex-Expected-Revision` required, stale writes fail with `409`), and `ui.py` preset apply is checkpoint-only; do not reintroduce `preset.options` or any second settings-mutation lane outside `/api/options`.
 - 2026-03-30: `tests.py` also owns `/api/tests/ip-adapter/probe`; the router resolves inventory-backed adapter/image-encoder selectors and repo-scoped reference-image paths only, while `apps/backend/runtime/adapters/ip_adapter/probe.py` owns the actual conditioning receipt. Do not turn `tests.py` into a second txt2img surface.
 - 2026-03-30: `/api/tests/ip-adapter/probe` must execute the live CUDA probe in a subprocess and return the child receipt/failure payload; the router must not run the heavy CLIP/IP-Adapter probe inline in the API host process.
 - 2026-03-26: `generation.py` generic-video workers now forward settings key `codex_core_streaming` into canonical engine option `core_streaming_enabled` before calling the orchestrator, so live LTX `txt2vid` / `img2vid` requests can actually exercise the bounded core-streaming runtime seam instead of silently running the non-streamed path.

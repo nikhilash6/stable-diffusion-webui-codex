@@ -10,22 +10,24 @@ Purpose: QuickSettings global store (models/options + asset SHA/variant selectio
 Loads lists from `/api/*`, persists option changes via `/api/options`, and maintains cached inventory-driven choice lists plus SHA/variant maps for VAEs/text encoders/WAN GGUF
 so UI selections resolve to backend SHA-based assets (no raw-path inputs). It also caches IP-Adapter model/image-encoder option lists from the canonical inventory snapshot,
 owns the global runtime-device override plus component storage/compute dtype overrides applied via options, and caches the current `/api/options` revision for generation payload contracts
-(`settings_revision`).
+(`settings_revision`) plus bounded conditional option writes that must fail loud instead of overwriting newer owner state.
 Text-encoder choices are sourced from inventory files constrained by `*_tenc` roots (not folder roots), and stale root-label overrides are
 sanitized so `tenc_sha` resolution remains deterministic across families (including Anima and LTX2). Inventory slot metadata is cached alongside
 SHA mappings so SDXL core-only requests can emit explicit `tenc1_sha` / `tenc2_sha` selectors without guessing label order. VAE state defaults to canonical `built-in`
 when no persisted value exists, request preflight can enforce fail-loud non-empty selection via `requireVaeSelection`, and LoRA SHA mappings
-are refreshed through the store-owned inventory flow (`fetchInventoryWithLoraHydration` + `hydrateLoraShaMap`). FLUX.2 override persistence
+are refreshed through the store-owned inventory flow (`fetchInventoryWithLoraHydration` + `hydrateLoraShaMap`). Workflow/history restore can also
+sync the VAE choice/SHA cache from a fresh inventory snapshot through `hydrateVaeInventorySnapshot(...)` so immediate generate uses the same VAE truth
+that restore/apply just validated. FLUX.2 override persistence
 stays truthful to the current Klein 4B / base-4B slice by keeping at most one `flux2/*` Qwen selector.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `normalizeTextEncoderSelectionLabels` (function): Normalizes persisted/current TE override labels, deduping values and capping FLUX.2 to one selector.
 - `useQuicksettingsStore` (store): Pinia store that owns QuickSettings state + actions; includes nested loaders (`loadModels/loadVaes/...`),
-  setters that call API updates, inventory hydrators (`fetchInventoryWithLoraHydration` + `hydrateLoraShaMap`), and resolvers that map UI labels → inventory SHA/slot/variant
+  setters that call API updates, inventory hydrators (`fetchInventoryWithLoraHydration`, `hydrateLoraShaMap`, `hydrateVaeInventorySnapshot`, `hydratePathsSnapshot`), and resolvers that map UI labels → inventory SHA/slot/variant
   (`resolve*Sha` helpers plus `resolveTextEncoderSlot`, `resolveWanGgufVariant`, including LoRA).
   It also exports checkpoint helpers (`resolveModelInfo`, `requireModelInfo`, `resolveFlux2CheckpointVariant`, `resolveLtxCheckpointExecutionMetadata`) so image/video requests can fail loud on stale checkpoint picks
-  and FLUX.2 guidance semantics can be derived from the selected model without extra request fields. Inventory-owned cached choice refs include VAEs, text encoders,
-  and IP-Adapter model/image-encoder lists.
+  and FLUX.2 guidance semantics can be derived from the selected model without extra request fields. Inventory-owned cached refs now include VAE inventory rows and
+  model path roots alongside VAE/text-encoder/IP-Adapter choice lists so restore/apply and QuickSettingsBar share one freshness owner for VAE canonicalization.
 */
 
 import { defineStore } from 'pinia'
@@ -36,9 +38,11 @@ import {
   fetchOptions,
   updateOptions,
   fetchModelInventory,
+  fetchFreshModelInventory,
+  fetchFreshPaths,
   refreshModelInventoryAsync,
-  fetchPaths,
   fetchMemory,
+  getModelCatalogInvalidationVersion,
   getCachedOptionsRevision,
   invalidateModelCatalogCaches,
 } from '../api/client'
@@ -324,6 +328,9 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
   const modelsFreshness = ref<ModelsFreshnessMarker | null>(null)
   const currentModel = ref<string>('')
   const vaeChoices = ref<string[]>([])
+  const inventoryVaesSnapshot = ref<InventoryResponse['vaes']>([])
+  const pathsConfigSnapshot = ref<Record<string, string[]>>({})
+  let assetSnapshotEpoch = 0
   const currentVae = ref<string>(DEFAULT_VAE_SELECTION)
   const vaeByFamily = ref<Partial<Record<VaeFamily, string>>>({})
   const textEncoderChoices = ref<string[]>([])
@@ -362,6 +369,7 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
   const lastAppliedNowMessages = ref<string[]>([])
   const lastRestartRequiredMessages = ref<string[]>([])
   let modelsRequestSerial = 0
+  let optionsRequestSerial = 0
 
   function loadTextEncoderOverridesFromStorage(): void {
     try {
@@ -614,7 +622,7 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
   }
 
   async function applyOptionUpdate(payload: Record<string, unknown>): Promise<void> {
-    const response = await updateOptions(payload)
+    const response = await updateOptions(payload, { expectedRevision: getSettingsRevision() })
     applySettingsRevision((response as any).revision)
     const appliedNowRaw = (response as any).applied_now
     const restartRequiredRaw = (response as any).restart_required
@@ -686,7 +694,13 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
     loadTextEncoderOverridesFromStorage()
     sanitizeTextEncoderOverrides()
 
+    const requestEpoch = assetSnapshotEpoch
+    const requestSerial = ++optionsRequestSerial
+    const isCurrentOptionsRequest = (): boolean =>
+      requestSerial === optionsRequestSerial && requestEpoch === assetSnapshotEpoch
+
     const res = await fetchOptions()
+    if (!isCurrentOptionsRequest()) return
     const opts = res.values
     applySettingsRevision((res as any).revision ?? (opts as any)?.codex_options_revision)
     syncSettingsRevisionFromCache()
@@ -696,9 +710,16 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
       vaeByFamily.value = nextFromBackend
       saveVaeByFamilyToStorage(nextFromBackend)
     } else if (Object.keys(vaeByFamily.value).length > 0) {
-      await applyOptionUpdate({
-        [VAE_BY_FAMILY_OPTION_KEY]: serializeVaeByFamilyOption(vaeByFamily.value),
-      })
+      if (!isCurrentOptionsRequest()) return
+      try {
+        await applyOptionUpdate({
+          [VAE_BY_FAMILY_OPTION_KEY]: serializeVaeByFamilyOption(vaeByFamily.value),
+        })
+      } catch (error) {
+        if (!isCurrentOptionsRequest()) return
+        throw error
+      }
+      if (!isCurrentOptionsRequest()) return
     }
     if (typeof (opts as any).codex_main_device === 'string') {
       mainDevice.value = normalizeMainDeviceSetting((opts as any).codex_main_device)
@@ -732,6 +753,14 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
   function hydrateInventoryChoiceCaches(
     inventory: Pick<InventoryResponse, 'vaes' | 'ip_adapter_models' | 'ip_adapter_image_encoders'> | null | undefined,
   ): void {
+    vaeChoices.value = buildVaeChoiceList(inventory)
+    ipAdapterModelChoices.value = buildInventoryChoiceList(inventory?.ip_adapter_models)
+    ipAdapterImageEncoderChoices.value = buildInventoryChoiceList(inventory?.ip_adapter_image_encoders)
+  }
+
+  function buildVaeChoiceList(
+    inventory: Pick<InventoryResponse, 'vaes'> | null | undefined,
+  ): string[] {
     const seen = new Set<string>()
     const vaeOut: string[] = [DEFAULT_VAE_SELECTION, NONE_VAE_SELECTION]
     for (const item of inventory?.vaes || []) {
@@ -740,19 +769,76 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
       seen.add(name)
       if (!vaeOut.includes(name)) vaeOut.push(name)
     }
-    vaeChoices.value = vaeOut
-    ipAdapterModelChoices.value = buildInventoryChoiceList(inventory?.ip_adapter_models)
-    ipAdapterImageEncoderChoices.value = buildInventoryChoiceList(inventory?.ip_adapter_image_encoders)
+    return vaeOut
+  }
+
+  function buildVaeShaMap(
+    inventory: Pick<InventoryResponse, 'vaes'> | null | undefined,
+  ): Map<string, string> {
+    const vaeMap = new Map<string, string>()
+    for (const vae of inventory?.vaes || []) {
+      const sha = typeof vae.sha256 === 'string' ? vae.sha256 : ''
+      if (!sha) continue
+      const name = typeof vae.name === 'string' ? vae.name : ''
+      const rawPath = typeof vae.path === 'string' ? vae.path : ''
+      const normPath = rawPath ? rawPath.replace(/\\+/g, '/') : ''
+      const keys = new Set<string>()
+      if (name) keys.add(name)
+      if (rawPath) keys.add(rawPath)
+      if (normPath) keys.add(normPath)
+      const basename = normPath ? normPath.split('/').pop() : name
+      if (basename) keys.add(basename)
+      if (normPath) {
+        for (const prefix of TEXT_ENCODER_PREFIXES) {
+          keys.add(`${prefix}/${normPath}`)
+        }
+      }
+      for (const key of keys) {
+        vaeMap.set(key, sha)
+      }
+    }
+    return vaeMap
+  }
+
+  function hydrateVaeInventorySnapshot(
+    inventory: Pick<InventoryResponse, 'vaes'> | null | undefined,
+  ): void {
+    inventoryVaesSnapshot.value = Array.isArray(inventory?.vaes) ? [...inventory.vaes] : []
+    vaeChoices.value = buildVaeChoiceList(inventory)
+    vaeShaMap.value = buildVaeShaMap(inventory)
+  }
+
+  function hydratePathsSnapshot(paths: Record<string, string[]> | null | undefined): void {
+    const snapshot: Record<string, string[]> = {}
+    for (const [key, values] of Object.entries(paths || {})) {
+      snapshot[key] = Array.isArray(values) ? values.map((value) => String(value || '')) : []
+    }
+    pathsConfigSnapshot.value = snapshot
+  }
+
+  function bumpAssetSnapshotEpoch(): number {
+    const next = assetSnapshotEpoch + 1
+    assetSnapshotEpoch = Number.isSafeInteger(next) ? next : 1
+    return assetSnapshotEpoch
+  }
+
+  function getAssetSnapshotEpoch(): number {
+    return assetSnapshotEpoch
   }
 
   async function loadVaes(): Promise<void> {
+    const requestEpoch = assetSnapshotEpoch
     const inv = await fetchModelInventory()
+    if (requestEpoch !== assetSnapshotEpoch) return
     hydrateInventoryChoiceCaches(inv)
   }
 
   async function loadTextEncoders(): Promise<void> {
-    const [pathsRes, inv] = await Promise.all([fetchPaths(), fetchModelInventory()])
+    const requestEpoch = assetSnapshotEpoch
+    const [pathsRes, inv] = await Promise.all([fetchFreshPaths(), fetchModelInventory()])
+    if (requestEpoch !== assetSnapshotEpoch) return
     const paths = ((pathsRes as any)?.paths || {}) as Record<string, string[]>
+    hydratePathsSnapshot(paths)
 
     const rootsByFamily = new Map<string, string[]>()
     const rootLabels = new Set<string>()
@@ -811,30 +897,7 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
     textEncoderShaMap.value = shaMap
     textEncoderSlotMap.value = slotMap
 
-    // Also populate VAE SHA map
-    const vaeMap = new Map<string, string>()
-    for (const v of inv.vaes || []) {
-      const sha = typeof v.sha256 === 'string' ? v.sha256 : ''
-      if (!sha) continue
-      const name = typeof v.name === 'string' ? v.name : ''
-      const rawPath = typeof v.path === 'string' ? v.path : ''
-      const normPath = rawPath ? rawPath.replace(/\\+/g, '/') : ''
-      const keys = new Set<string>()
-      if (name) keys.add(name)
-      if (rawPath) keys.add(rawPath)
-      if (normPath) keys.add(normPath)
-      const basename = normPath ? normPath.split('/').pop() : name
-      if (basename) keys.add(basename)
-      if (normPath) {
-        for (const prefix of TEXT_ENCODER_PREFIXES) {
-          keys.add(`${prefix}/${normPath}`)
-        }
-      }
-      for (const key of keys) {
-        vaeMap.set(key, sha)
-      }
-    }
-    vaeShaMap.value = vaeMap
+    vaeShaMap.value = buildVaeShaMap(inv)
 
     const wanMap = new Map<string, string>()
     const wanVariantMap = new Map<string, WanGgufVariant>()
@@ -876,9 +939,22 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
   async function fetchInventoryWithLoraHydration(
     options: { refresh?: boolean; signal?: AbortSignal } = {},
   ): Promise<InventoryResponse> {
-    const inventory = options.refresh === true
-      ? await refreshModelInventoryAsync({ signal: options.signal })
-      : await fetchModelInventory()
+    let inventory: InventoryResponse
+    if (options.refresh === true) {
+      inventory = await refreshModelInventoryAsync({ signal: options.signal })
+    } else {
+      let usedFreshRetry = false
+      while (true) {
+        const requestVersion = getModelCatalogInvalidationVersion()
+        inventory = usedFreshRetry
+          ? await fetchFreshModelInventory()
+          : await fetchModelInventory()
+        if (requestVersion === getModelCatalogInvalidationVersion()) {
+          break
+        }
+        usedFreshRetry = true
+      }
+    }
     hydrateInventoryChoiceCaches(inventory)
     hydrateLoraShaMap(inventory)
     return inventory
@@ -1124,9 +1200,22 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
     saveVaeToStorage(normalized)
   }
 
-  async function setVaeForFamily(family: string, label: string): Promise<void> {
+  async function setVaeForFamily(
+    family: string,
+    label: string,
+    options?: { expectedAssetSnapshotEpoch?: number; persist?: boolean },
+  ): Promise<void> {
     const normalized = normalizeVaeSelection(label) || DEFAULT_VAE_SELECTION
     const normalizedFamily = String(family || '').trim().toLowerCase()
+    const expectedAssetSnapshotEpoch = options?.expectedAssetSnapshotEpoch
+    const persist = options?.persist !== false
+    if (
+      typeof expectedAssetSnapshotEpoch === 'number'
+      && Number.isSafeInteger(expectedAssetSnapshotEpoch)
+      && expectedAssetSnapshotEpoch !== assetSnapshotEpoch
+    ) {
+      return
+    }
     if (!isVaeFamily(normalizedFamily)) {
       currentVae.value = normalized
       saveVaeToStorage(normalized)
@@ -1144,16 +1233,98 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
     saveVaeToStorage(normalized)
     vaeByFamily.value = nextVaeByFamily
     saveVaeByFamilyToStorage(nextVaeByFamily)
+    if (!persist) {
+      return
+    }
 
     try {
       await applyOptionUpdate({
         [VAE_BY_FAMILY_OPTION_KEY]: serializeVaeByFamilyOption(nextVaeByFamily),
       })
     } catch (error) {
-      currentVae.value = previousCurrentVae
-      saveVaeToStorage(previousCurrentVae)
-      vaeByFamily.value = previousVaeByFamily
-      saveVaeByFamilyToStorage(previousVaeByFamily)
+      if (
+        typeof expectedAssetSnapshotEpoch === 'number'
+        && Number.isSafeInteger(expectedAssetSnapshotEpoch)
+        && expectedAssetSnapshotEpoch !== assetSnapshotEpoch
+      ) {
+        return
+      }
+      if (
+        typeof expectedAssetSnapshotEpoch !== 'number'
+        || !Number.isSafeInteger(expectedAssetSnapshotEpoch)
+        || expectedAssetSnapshotEpoch === assetSnapshotEpoch
+      ) {
+        currentVae.value = previousCurrentVae
+        saveVaeToStorage(previousCurrentVae)
+        vaeByFamily.value = previousVaeByFamily
+        saveVaeByFamilyToStorage(previousVaeByFamily)
+      }
+      throw error
+    }
+  }
+
+  async function restoreVaeForFamilyOwner(
+    family: string,
+    persistedLabel: string,
+    options?: { expectedAssetSnapshotEpoch?: number; persist?: boolean },
+  ): Promise<void> {
+    const normalizedFamily = String(family || '').trim().toLowerCase()
+    const normalizedPersisted = normalizeVaeSelection(persistedLabel) || ''
+    const expectedAssetSnapshotEpoch = options?.expectedAssetSnapshotEpoch
+    const persist = options?.persist !== false
+    if (
+      typeof expectedAssetSnapshotEpoch === 'number'
+      && Number.isSafeInteger(expectedAssetSnapshotEpoch)
+      && expectedAssetSnapshotEpoch !== assetSnapshotEpoch
+    ) {
+      return
+    }
+    if (!isVaeFamily(normalizedFamily)) {
+      currentVae.value = normalizedPersisted || DEFAULT_VAE_SELECTION
+      saveVaeToStorage(currentVae.value)
+      return
+    }
+
+    const previousCurrentVae = currentVae.value
+    const previousVaeByFamily = { ...vaeByFamily.value }
+    const nextVaeByFamily: Partial<Record<VaeFamily, string>> = { ...vaeByFamily.value }
+    if (normalizedPersisted) {
+      nextVaeByFamily[normalizedFamily] = normalizedPersisted
+    } else {
+      delete nextVaeByFamily[normalizedFamily]
+    }
+    const nextCurrentVae = normalizedPersisted || DEFAULT_VAE_SELECTION
+
+    currentVae.value = nextCurrentVae
+    saveVaeToStorage(nextCurrentVae)
+    vaeByFamily.value = nextVaeByFamily
+    saveVaeByFamilyToStorage(nextVaeByFamily)
+    if (!persist) {
+      return
+    }
+
+    try {
+      await applyOptionUpdate({
+        [VAE_BY_FAMILY_OPTION_KEY]: serializeVaeByFamilyOption(nextVaeByFamily),
+      })
+    } catch (error) {
+      if (
+        typeof expectedAssetSnapshotEpoch === 'number'
+        && Number.isSafeInteger(expectedAssetSnapshotEpoch)
+        && expectedAssetSnapshotEpoch !== assetSnapshotEpoch
+      ) {
+        return
+      }
+      if (
+        typeof expectedAssetSnapshotEpoch !== 'number'
+        || !Number.isSafeInteger(expectedAssetSnapshotEpoch)
+        || expectedAssetSnapshotEpoch === assetSnapshotEpoch
+      ) {
+        currentVae.value = previousCurrentVae
+        saveVaeToStorage(previousCurrentVae)
+        vaeByFamily.value = previousVaeByFamily
+        saveVaeByFamilyToStorage(previousVaeByFamily)
+      }
       throw error
     }
   }
@@ -1253,6 +1424,8 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
     modelsFreshness,
     currentModel,
     vaeChoices,
+    inventoryVaesSnapshot,
+    pathsConfigSnapshot,
     currentVae,
     textEncoderChoices,
     currentTextEncoders,
@@ -1263,8 +1436,11 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
     init,
     invalidateModelsList,
     refreshModelsList,
+    bumpAssetSnapshotEpoch,
+    getAssetSnapshotEpoch,
     setVae,
     setVaeForFamily,
+    restoreVaeForFamilyOwner,
     getVaeForFamily,
     getPersistedVaeForFamily,
     mainDevice,
@@ -1312,6 +1488,8 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
     resolveWanGgufVariant,
     isModelCoreOnly,
     hydrateLoraShaMap,
+    hydratePathsSnapshot,
+    hydrateVaeInventorySnapshot,
     fetchInventoryWithLoraHydration,
     vaeShaMap,
     loraShaMap,

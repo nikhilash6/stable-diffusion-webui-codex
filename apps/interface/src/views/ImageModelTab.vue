@@ -23,7 +23,8 @@ The generic first-pass model-swap stage lives under `params.swapModel`, the gene
 and global + hires refiner cards stay on the SDXL-native `refiner` seams with the shared capability-gated advanced guidance/APG state surface.
 Sampler/scheduler selectors normalize current selections against the executable `/api/samplers` + `/api/schedulers` inventory, keep base sampler/scheduler real, and scrub invalid hires overrides while still using backend recommendation lists for grouped option rendering (`Recommended` vs `Use at your own risk`) with inline technical warnings on out-of-recommendation selections.
 Surfaces a one-shot toast when the generation composable auto-reattaches to an in-flight task after a reload/crash.
-Generate CTA and run preflight are capability-driven (`/api/engines/capabilities`) and fail loud when the current mode is unsupported.
+Generate CTA and run preflight are capability-driven (`/api/engines/capabilities`) plus asset-contract-aware, failing loud in the UI when the
+current checkpoint/text-encoder/VAE contract is not runnable.
 Run status in the RUN card is centralized via `RunProgressStatus` variants (progress/error/info/success/warning), including dual progress bars (total pipeline + sampling steps), so errors are visible even when Prompt is off-screen.
 When XYZ workflow is enabled, RUN header shows an `XYZ` badge beside `Generate` via the run-card center-adjacent slot while keeping the primary CTA label stable as `Generate`.
 
@@ -77,6 +78,8 @@ Symbols (top-level; keep in sync; no ghosts):
 - `maybeApplyKontextDefaults` (function): Applies FLUX.1 Kontext-specific default params when relevant to the current engine/tab.
 - `onGenerate` (function): Run handler for the Run card; dispatches standard generation or XYZ sweep depending on XYZ enable state.
 - `runGenerateDisabled`/`runGenerateTitle` (const): Run CTA state/title derived from capabilities + active mode + XYZ running/enabled state.
+- `assetContractBlockingReason` / `workflowParamsSnapshot` (const): Current image asset-contract gating reason plus workflow snapshot carrying the
+  active family-scoped VAE owner.
 - `usesImageAutomation` / `infiniteXyzConflict` / `automationBatchConflict` (const): Derived automation guards for the split-button and backend-owned automation route.
 - `showIpAdapterCard` / `initFolderMissingPath` / `dirInitMaskConflict` / `ipAdapterBlockingReason` (const): Card-visibility + preflight guards for Initial Image DIR mode and the dedicated IP-Adapter owner card.
 - `missingInpaintMask` (const): Derived guard flag used to disable generation when INPAINT is enabled without an applied mask.
@@ -523,7 +526,7 @@ Symbols (top-level; keep in sync; no ghosts):
       :sections="historyDetailsSections"
       :load-disabled="!historyDetailsItem || isRunning || historyLoadingTaskId === historyDetailsItem.taskId"
       :load-label="historyDetailsItem && historyLoadingTaskId === historyDetailsItem.taskId ? 'Loading…' : 'Load'"
-      :apply-disabled="!historyDetailsItem || isRunning"
+      :apply-disabled="!historyDetailsItem || isRunning || Boolean(historyApplyingTaskId)"
       :copy-disabled="!historyDetailsItem || isRunning"
       @load="onLoadHistoryDetails"
       @apply="onApplyHistoryDetails"
@@ -538,7 +541,7 @@ Symbols (top-level; keep in sync; no ghosts):
 <script setup lang="ts">
 import { storeToRefs } from 'pinia'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { fetchPaths, fetchSamplers, fetchSchedulers } from '../api/client'
+import { fetchFreshModelInventory, fetchFreshPaths, fetchSamplers, fetchSchedulers, invalidateModelCatalogCaches } from '../api/client'
 import type {
   GeneratedImage,
   GuidanceAdvancedCapabilities,
@@ -572,7 +575,9 @@ import { useBootstrapStore } from '../stores/bootstrap'
 import { useUpscalersStore } from '../stores/upscalers'
 import { useXyzStore } from '../stores/xyz'
 import { fallbackSamplingDefaultsForTabFamily, isWanTabFamily, normalizeTabFamily } from '../utils/engine_taxonomy'
+import { buildExplicitImageRequestContract } from '../utils/image_request_contract'
 import { filterModelTitlesForFamily } from '../utils/model_family_filters'
+import { buildFamilyVaeValidationChoices, canonicalizeVaeChoice, resolveInventoryVaeSha } from '../utils/vae_choices'
 import {
   img2imgResizeModeOptionsForEngine,
   normalizeImg2ImgResizeModeForEngine,
@@ -640,12 +645,13 @@ const {
   resumeNotice,
 } = useGeneration(props.tabId)
 
-const modelPaths = ref<Record<string, string[]>>({})
 const samplers = ref<SamplerInfo[]>([])
 const schedulers = ref<SchedulerInfo[]>([])
 const historyDetailsOpen = ref(false)
 const historyDetailsItem = ref<ImageRunHistoryItem | null>(null)
+const historyApplyingTaskId = ref('')
 const { ensureSupirDiagnosticsLoaded } = useSupirDiagnostics()
+const ASSET_RESTORE_SUPERSEDED_ERROR = 'A newer image asset restore/apply operation superseded this one.'
 
 function onSelectImageHistoryItem(item: { taskId: string }): void {
   const match = history.value.find((entry) => entry.taskId === item.taskId)
@@ -658,10 +664,9 @@ onMounted(() => {
     .runRequired('Failed to initialize image tab controls', async () => {
       await upscalersStore.load({ refresh: true })
       await quicksettingsStore.init()
-      const [samp, sched, pathRes] = await Promise.all([fetchSamplers(), fetchSchedulers(), fetchPaths()])
+      const [samp, sched] = await Promise.all([fetchSamplers(), fetchSchedulers()])
       samplers.value = samp.samplers
       schedulers.value = sched.schedulers
-      modelPaths.value = (pathRes.paths || {}) as Record<string, string[]>
     })
     .catch(() => {
       // Fatal state is already set by bootstrap store.
@@ -670,6 +675,16 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopStream()
+})
+
+const workflowParamsSnapshot = computed<Record<string, unknown> | null>(() => {
+  const currentTab = tab.value
+  if (!currentTab) return null
+  const familyOwnedVae = String(quicksettingsStore.getVaeForFamily(props.type) || '').trim()
+  return {
+    ...(currentTab.params as unknown as Record<string, unknown>),
+    vae: familyOwnedVae,
+  }
 })
 
 const {
@@ -682,7 +697,7 @@ const {
   copyCurrentParams,
 } = useWorkflowSnapshotActions({
   getTab: () => tab.value ?? null,
-  getWorkflowParamsSnapshot: () => (tab.value?.params as unknown as Record<string, unknown> | null) ?? null,
+  getWorkflowParamsSnapshot: () => workflowParamsSnapshot.value,
 })
 type ImageTab = TabByType<ImageTabType>
 
@@ -837,6 +852,11 @@ const flux2Variant = computed(() => (
     ? quicksettingsStore.resolveFlux2CheckpointVariant(String(params.value.checkpoint || '').trim())
     : null
 ))
+const fallbackRequestGuidanceMode = computed<'cfg' | 'distilled_cfg'>(() => (
+  Boolean(engineConfig.value.capabilities.usesDistilledCfg) && !Boolean(engineConfig.value.capabilities.usesCfg)
+    ? 'distilled_cfg'
+    : 'cfg'
+))
 const usesDistilledCfgModel = computed(() => {
   if (props.type === 'flux2') return flux2Variant.value === 'distilled'
   return Boolean(engineConfig.value.capabilities.usesDistilledCfg) && !engineConfig.value.capabilities.usesCfg
@@ -867,16 +887,46 @@ const canGenerateForCurrentMode = computed(() =>
   && filteredSchedulers.value.length > 0
   && (params.value.useInitImage ? supportsImg2Img.value : supportsTxt2Img.value),
 )
+const assetContractBlockingReason = computed(() => {
+  const checkpoint = String(params.value.checkpoint || '').trim()
+  if (!checkpoint) return 'Select a checkpoint to generate.'
+  const familyOwnedVae = String(quicksettingsStore.getVaeForFamily(props.type) || '').trim()
+  try {
+    buildExplicitImageRequestContract({
+      modelLabel: checkpoint,
+      engineKey: resolvedEngineForMode.value,
+      textEncoderLabels: params.value.textEncoders,
+      selectedVaeLabel: familyOwnedVae,
+      zimageTurbo: resolvedEngineForMode.value === 'zimage'
+        ? Boolean((params.value as unknown as Record<string, unknown>).zimageTurbo ?? true)
+        : false,
+      fallbackGuidanceMode: fallbackRequestGuidanceMode.value,
+      resolvers: {
+        requireModelInfo: quicksettingsStore.requireModelInfo,
+        resolveFlux2CheckpointVariant: quicksettingsStore.resolveFlux2CheckpointVariant,
+        resolveTextEncoderSha: quicksettingsStore.resolveTextEncoderSha,
+        resolveTextEncoderSlot: quicksettingsStore.resolveTextEncoderSlot,
+        requireVaeSelection: quicksettingsStore.requireVaeSelection,
+        resolveVaeSha: quicksettingsStore.resolveVaeSha,
+        getAssetContract: engineCaps.getAssetContract,
+      },
+    })
+    return ''
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
+})
 const generateDisabledReason = computed(() => {
   if (isRunning.value) return ''
   if (!dependencyStatus.value) return `Dependency checks for '${resolvedEngineForMode.value}' are not available.`
   if (!dependencyReady.value) return dependencyError.value || `Dependencies for '${resolvedEngineForMode.value}' are not ready.`
   if (!engineSurface.value) return `Capabilities for '${resolvedEngineForMode.value}' are not loaded.`
   if (!familyCapabilities.value) return `Family capabilities for '${resolvedEngineForMode.value}' are not loaded.`
-  if (filteredSamplers.value.length === 0) return `${engineConfig.value.label} has no family-compatible samplers available.`
-  if (filteredSchedulers.value.length === 0) return `${engineConfig.value.label} has no family-compatible schedulers available.`
   if (params.value.useInitImage && !supportsImg2Img.value) return `${engineConfig.value.label} does not support img2img.`
   if (!params.value.useInitImage && !supportsTxt2Img.value) return `${engineConfig.value.label} does not support txt2img.`
+  if (assetContractBlockingReason.value) return assetContractBlockingReason.value
+  if (filteredSamplers.value.length === 0) return `${engineConfig.value.label} has no family-compatible samplers available.`
+  if (filteredSchedulers.value.length === 0) return `${engineConfig.value.label} has no family-compatible schedulers available.`
   return ''
 })
 const xyzSamplerChoices = computed(() => filteredSamplers.value.map((entry) => entry.name))
@@ -996,6 +1046,7 @@ const runGenerateDisabled = computed(() => {
   if (infiniteXyzConflict.value) return true
   if (automationBatchConflict.value) return true
   if (supirEnabled.value && supirBlockingReason.value) return true
+  if (assetContractBlockingReason.value) return true
   if (xyzStore.enabled) {
     return !(dependencyReady.value && Boolean(familyCapabilities.value) && supportsTxt2Img.value && filteredSamplers.value.length > 0 && filteredSchedulers.value.length > 0)
   }
@@ -1021,6 +1072,7 @@ const runGenerateTitle = computed(() => {
   if (!dependencyReady.value) return dependencyError.value || `Dependencies for '${resolvedEngineForMode.value}' are not ready.`
   if (!engineSurface.value) return `Capabilities for '${resolvedEngineForMode.value}' are not loaded.`
   if (!familyCapabilities.value) return `Family capabilities for '${resolvedEngineForMode.value}' are not loaded.`
+  if (assetContractBlockingReason.value) return assetContractBlockingReason.value
   if (filteredSamplers.value.length === 0) return `${engineConfig.value.label} has no family-compatible samplers available.`
   if (filteredSchedulers.value.length === 0) return `${engineConfig.value.label} has no family-compatible schedulers available.`
   if (!supportsTxt2Img.value) return `${engineConfig.value.label} does not support txt2img.`
@@ -1040,7 +1092,7 @@ const minClipSkip = computed(() => 0)
 const swapModelChoices = computed(() => {
   const family = normalizeTabFamily(props.type)
   if (!family || isWanTabFamily(family)) return []
-  return filterModelTitlesForFamily(quicksettingsStore.models, family, modelPaths.value)
+  return filterModelTitlesForFamily(quicksettingsStore.models, family, quicksettingsStore.pathsConfigSnapshot)
 })
 
 const supportsHiresForEngine = computed(() => {
@@ -1587,10 +1639,10 @@ async function onLoadHistoryDetails(): Promise<void> {
   await loadHistory(item.taskId)
 }
 
-function onApplyHistoryDetails(): void {
+async function onApplyHistoryDetails(): Promise<void> {
   const item = historyDetailsItem.value
   if (!item) return
-  applyHistory(item)
+  await applyHistory(item)
 }
 
 async function onCopyHistoryDetails(): Promise<void> {
@@ -1599,8 +1651,14 @@ async function onCopyHistoryDetails(): Promise<void> {
   await copyHistoryParams(item)
 }
 
-function applyHistory(item: ImageRunHistoryItem): void {
-  const snap = item.paramsSnapshot as Partial<ImageBaseParams>
+async function applyHistory(item: ImageRunHistoryItem): Promise<void> {
+  if (historyApplyingTaskId.value) return
+  historyApplyingTaskId.value = item.taskId
+  const rawSnapshot = item.paramsSnapshot as Record<string, unknown>
+  const snapshotVae = typeof rawSnapshot.vae === 'string' ? rawSnapshot.vae.trim() : ''
+  let previousPersistedFamilyVae = ''
+  const { vae: _ignoredSnapshotVae, ...snapshotWithoutAssets } = rawSnapshot
+  const snap = snapshotWithoutAssets as Partial<ImageBaseParams>
   const snapshotUseInitImage = Boolean(snap.useInitImage ?? (item.mode === 'img2img' || snap.supir?.enabled))
   const snapshotUseMask = snapshotUseInitImage && Boolean(snap.useMask)
   const snapshotGuidanceAdvanced = (snap.guidanceAdvanced && typeof snap.guidanceAdvanced === 'object')
@@ -1634,10 +1692,74 @@ function applyHistory(item: ImageRunHistoryItem): void {
   })
   if (blockingReason) {
     toast(`Cannot apply history params: ${blockingReason}`)
+    historyApplyingTaskId.value = ''
     return
   }
-  setParams(nextPatch)
-  toast('Applied history params.')
+  let restoredFamilyVae = false
+  const snapshotEpoch = quicksettingsStore.bumpAssetSnapshotEpoch()
+  const assertSnapshotEpochCurrent = (): void => {
+    if (quicksettingsStore.getAssetSnapshotEpoch() !== snapshotEpoch) {
+      throw new Error(ASSET_RESTORE_SUPERSEDED_ERROR)
+    }
+  }
+  try {
+    if (snapshotVae) {
+      await quicksettingsStore.init()
+      assertSnapshotEpochCurrent()
+      previousPersistedFamilyVae = quicksettingsStore.getPersistedVaeForFamily(props.type)
+      invalidateModelCatalogCaches()
+      const inventory = await fetchFreshModelInventory()
+      const pathsConfig = (await fetchFreshPaths()).paths || {}
+      assertSnapshotEpochCurrent()
+      quicksettingsStore.hydrateVaeInventorySnapshot(inventory)
+      quicksettingsStore.hydratePathsSnapshot(pathsConfig)
+      invalidateModelCatalogCaches()
+      const canonicalVae = canonicalizeVaeChoice(
+        snapshotVae,
+        buildFamilyVaeValidationChoices(
+          props.type,
+          inventory.vaes,
+          pathsConfig,
+        ),
+        (label) => resolveInventoryVaeSha(label, inventory.vaes),
+      )
+      if (!canonicalVae || canonicalVae.reason === 'fallback') {
+        throw new Error(`History VAE '${snapshotVae}' is no longer available for '${props.type}'.`)
+      }
+      assertSnapshotEpochCurrent()
+      await quicksettingsStore.setVaeForFamily(props.type, canonicalVae.value, {
+        expectedAssetSnapshotEpoch: snapshotEpoch,
+      })
+      assertSnapshotEpochCurrent()
+      restoredFamilyVae = true
+    }
+    const normalizedPatch = normalizeImageParamPatch(nextPatch)
+    assertSnapshotEpochCurrent()
+    await store.updateParams(props.tabId, normalizedPatch as Partial<Record<string, unknown>>)
+    assertSnapshotEpochCurrent()
+    toast('Applied history params.')
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (message === ASSET_RESTORE_SUPERSEDED_ERROR) {
+      return
+    }
+    if (restoredFamilyVae && quicksettingsStore.getAssetSnapshotEpoch() === snapshotEpoch) {
+      try {
+        await quicksettingsStore.restoreVaeForFamilyOwner(props.type, previousPersistedFamilyVae, {
+          expectedAssetSnapshotEpoch: snapshotEpoch,
+        })
+      } catch (rollbackError) {
+        const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+        toast(`${message} VAE rollback failed for '${props.type}': ${rollbackMessage}`)
+        return
+      }
+    }
+    toast(message)
+  } finally {
+    if (historyApplyingTaskId.value === item.taskId) {
+      historyApplyingTaskId.value = ''
+    }
+  }
 }
 
 function formatHistoryTitle(item: { mode: string; createdAtMs: number; taskId: string }): string {

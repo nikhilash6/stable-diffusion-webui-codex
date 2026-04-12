@@ -86,9 +86,9 @@ Symbols (top-level; keep in sync; no ghosts):
 - `UiBlockLayout` (interface): Layout metadata for a UI block.
 - `UiBlock` (interface): Server-driven UI block definition.
 - `UiBlocksResponse` (interface): `/api/ui/blocks` response shape.
-- `UiPreset` (interface): UI preset definition used by the frontend.
+- `UiPreset` (interface): Checkpoint-only UI preset definition used by the frontend.
 - `UiPresetsResponse` (interface): `/api/ui/presets` response shape.
-- `UiPresetApplyResponse` (interface): `/api/ui/presets/apply` response shape.
+- `UiPresetApplyResponse` (interface): `/api/ui/presets/apply` response shape returning only the resolved checkpoint owner.
 - `ApiTabMeta` (interface): Per-tab metadata timestamps.
 - `ApiTab` (interface): Persisted model tab definition (`sd15|sdxl|flux1|flux2|zimage|chroma|wan22_14b|wan22_5b|ltx2|anima`).
 - `TabsResponse` (interface): `/api/ui/tabs` response shape.
@@ -708,9 +708,9 @@ export interface UiBlock { id: string; when?: UiBlockWhen; layout?: UiBlockLayou
 export interface UiBlocksResponse { version: number; blocks: UiBlock[]; semantic_engine?: string }
 
 // UI Presets (Model UI)
-export interface UiPreset { id: string; title: string; tabs?: string[]; model_select: { type: 'exact' | 'pattern'; value: string }; options?: Record<string, unknown> }
+export interface UiPreset { id: string; title: string; tabs?: string[]; model_select: { type: 'exact' | 'pattern'; value: string } }
 export interface UiPresetsResponse { version: number; presets: UiPreset[] }
-export interface UiPresetApplyResponse { applied: boolean; model: string; checkpoint: string; updated: string[] }
+export interface UiPresetApplyResponse { applied: boolean; model: string; checkpoint: string }
 
 // Tabs/workflows persistence
 export interface ApiTabMeta { createdAt: string; updatedAt: string }

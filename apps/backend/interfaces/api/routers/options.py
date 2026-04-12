@@ -8,7 +8,8 @@ Required Notice: see NOTICE
 
 Purpose: Options API routes for reading, updating, and validating settings.
 Exposes the JSON-backed options store and registry-driven validation helpers. Enforces finite numeric values for number/slider settings
-and emits apply metadata on `POST /api/options`. Memory-manager backend and dtype changes are persisted but require a backend restart
+and emits apply metadata on `POST /api/options`. Conditional writes require `X-Codex-Expected-Revision` so stale clients fail loud instead
+of silently overwriting newer option state. Memory-manager backend and dtype changes are persisted but require a backend restart
 (launcher-owned) to take effect; this endpoint does not hot-apply memory reconfiguration.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -21,14 +22,15 @@ import json
 import math
 from typing import Any, Callable, Dict, List
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, Header, HTTPException
 
 
 def build_router(
     *,
     opts_load_native: Callable[[], Dict[str, Any]],
     opts_snapshot,
-    opts_set_many: Callable[[Dict[str, Any]], list[str]],
+    opts_set_many_if_revision: Callable[[Dict[str, Any]], tuple[list[str], int]]
+    | Callable[[Dict[str, Any], int | None], tuple[list[str], int]],
     settings_registry_ok: bool,
     field_index: Callable[[], Dict[str, Any]],
     setting_type,
@@ -48,10 +50,11 @@ def build_router(
     @router.get("/api/options")
     def get_options() -> Dict[str, Any]:
         try:
-            revision = int(getattr(opts_snapshot(), "codex_options_revision", 0) or 0)
+            values = opts_load_native()
+            revision = int(values.get("codex_options_revision", 0) or 0)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"failed to read options revision: {exc}") from exc
-        return {"values": opts_load_native(), "revision": max(0, revision)}
+        return {"values": values, "revision": max(0, revision)}
 
     @router.get("/api/options/keys")
     def get_options_keys() -> Dict[str, Any]:
@@ -234,16 +237,48 @@ def build_router(
                 raise HTTPException(status_code=400, detail=f"Invalid value for {k}: {exc}") from exc
         return out
 
-    @router.post("/api/options")
-    def set_options(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
-        updates = _validate_options(payload)
-        previous_values = opts_load_native()
-        if not isinstance(previous_values, dict):
-            raise HTTPException(status_code=500, detail="failed to read current options before update")
+    def _parse_expected_revision(raw_value: str | None) -> int | None:
+        if raw_value is None:
+            raise HTTPException(
+                status_code=428,
+                detail="X-Codex-Expected-Revision header is required for POST /api/options.",
+            )
+        trimmed = str(raw_value).strip()
+        if not trimmed:
+            raise HTTPException(
+                status_code=428,
+                detail="X-Codex-Expected-Revision header is required for POST /api/options.",
+            )
+        if not trimmed.isdigit():
+            raise HTTPException(status_code=400, detail="X-Codex-Expected-Revision must be a non-negative integer.")
+        return max(0, int(trimmed))
 
+    @router.post("/api/options")
+    def set_options(
+        payload: Dict[str, Any] = Body(...),
+        expected_revision_header: str | None = Header(default=None, alias="X-Codex-Expected-Revision"),
+    ) -> Dict[str, Any]:
+        updates = _validate_options(payload)
+        expected_revision = _parse_expected_revision(expected_revision_header)
         try:
-            updated = opts_set_many(updates)
+            updated, revision = opts_set_many_if_revision(updates, expected_revision=expected_revision)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
+            expected = getattr(exc, "expected_revision", None)
+            current = getattr(exc, "current_revision", None)
+            if isinstance(expected, int) and isinstance(current, int):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": (
+                            f"stale options write rejected: expected revision {expected}, current revision is "
+                            f"{current}."
+                        ),
+                        "expected_revision": max(0, expected),
+                        "current_revision": max(0, current),
+                    },
+                ) from exc
             raise HTTPException(
                 status_code=500,
                 detail="Failed to persist options.",
@@ -258,10 +293,6 @@ def build_router(
                 applied_now.append(f"{key}: {reason}")
                 continue
             restart_required.append(f"{key}: not hot-applied; restart required.")
-        try:
-            revision = int(getattr(opts_snapshot(), "codex_options_revision", 0) or 0)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"failed to read updated options revision: {exc}") from exc
         return {
             "updated": updated,
             "revision": max(0, revision),

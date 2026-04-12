@@ -7,13 +7,16 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: UI persistence and metadata API routes.
-    Handles tabs/workflows JSON persistence, UI blocks filtering, and presets application, with fail-loud tab-type validation for `/api/ui/tabs`
+    Handles tabs/workflows JSON persistence, UI blocks filtering, and checkpoint-only presets application, with fail-loud tab-type validation for `/api/ui/tabs`
     while filtering stale unsupported top-level tab params during stored-tab load and rejecting unknown top-level LTX keys on create/update.
     Live WAN tab/workflow types are exact (`wan22_14b` / `wan22_5b`); stored legacy generic `wan` / `wan22` entries are inferred once from their
     persisted owner shape, ambiguous legacy WAN payloads now fail loud instead of defaulting to 14B, new generic WAN writes are rejected, and workflow
     snapshot payloads/source-tab bindings stay normalized and unique. Image-tab persistence also owns the allowlist for nested automation-era params
-    such as `runAction`, `initSource`, `supir`, and `ipAdapter`.
+    such as `runAction`, `initSource`, `supir`, and `ipAdapter`. Stored workflow snapshots now use the same fail-loud image param rules as live writes
+    for removed keys and invalid `inpaintMode`, may carry a workflow-only `vae` selector for exact image-family restore, and still reject `vae` on live
+    image tab params instead of laundering that global quicksettings owner into persisted tab state.
     Image-tab top-level persistence now keeps `inpaintMode` as the only masked runtime-mode owner; removed `maskEnforcement` values must not round-trip.
+    Presets no longer mutate `/api/options`; stale `preset.options` carriers fail loud instead of bypassing the revision-aware options lane.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `build_router` (function): Build the APIRouter for UI endpoints.
@@ -35,7 +38,6 @@ from apps.backend.interfaces.api.json_store import _load_json, _save_json
 def build_router(
     *,
     codex_root: Path,
-    opts_set_many: Callable[[Dict[str, Any]], list[str]],
     model_api: Any,
 ) -> APIRouter:
     router = APIRouter()
@@ -201,6 +203,7 @@ def build_router(
     _REMOVED_IMAGE_PARAM_KEYS = {
         "maskEnforcement": "inpaintMode",
     }
+    _WORKFLOW_IMAGE_PARAM_EXTRA_KEYS = {"vae"}
     _WAN14B_PARAM_TOP_LEVEL_KEYS = {
         "schemaVersion",
         "high",
@@ -354,6 +357,7 @@ def build_router(
         reject_removed_image_keys: bool = False,
         scrub_invalid_inpaint_mode: bool = False,
         require_ltx_mode: bool = False,
+        extra_allowed_keys: Optional[set[str]] = None,
     ) -> Dict[str, Any]:
         params_patch = _assert_plain_object(raw_params, field=field)
         if tab_type in _IMAGE_TAB_TYPES:
@@ -367,7 +371,9 @@ def build_router(
                     status_code=400,
                     detail=f"{field}.{removed_key} was removed; use {field}.{replacement}.",
                 )
-        allowed = _allowed_param_keys(tab_type)
+        allowed = set(_allowed_param_keys(tab_type))
+        if extra_allowed_keys:
+            allowed.update(extra_allowed_keys)
         unknown_keys = sorted(key for key in params_patch.keys() if key not in allowed)
         if unknown_keys and reject_unknown:
             raise HTTPException(
@@ -402,6 +408,11 @@ def build_router(
                         detail=f"{field}.inpaintMode must be one of: {allowed_modes}",
                     )
                 sanitized.pop("inpaintMode", None)
+        if tab_type in _IMAGE_TAB_TYPES and "vae" in sanitized:
+            vae_value = sanitized.get("vae")
+            if not isinstance(vae_value, str) or not str(vae_value).strip():
+                raise HTTPException(status_code=400, detail=f"{field}.vae must be a non-empty string")
+            sanitized["vae"] = str(vae_value).strip()
         if tab_type == "ltx2":
             allowed_modes = ", ".join(sorted(_LTX_GENERATION_MODES))
             if "mode" in sanitized:
@@ -584,9 +595,11 @@ def build_router(
                 tab_type=workflow_type,
                 raw_params={} if raw_params is None else raw_params,
                 field="params_snapshot",
-                reject_unknown=_reject_unknown_stored_param_keys(workflow_type),
-                scrub_invalid_inpaint_mode=True,
+                reject_unknown=_reject_unknown_live_param_keys(workflow_type),
+                reject_removed_image_keys=True,
+                scrub_invalid_inpaint_mode=False,
                 require_ltx_mode=workflow_type == "ltx2",
+                extra_allowed_keys=_WORKFLOW_IMAGE_PARAM_EXTRA_KEYS if workflow_type in _IMAGE_TAB_TYPES else None,
             )
         except HTTPException as exc:
             raise HTTPException(
@@ -927,6 +940,7 @@ def build_router(
             reject_unknown=_reject_unknown_live_param_keys(wtype),
             reject_removed_image_keys=True,
             require_ltx_mode=wtype == "ltx2",
+            extra_allowed_keys=_WORKFLOW_IMAGE_PARAM_EXTRA_KEYS if wtype in _IMAGE_TAB_TYPES else None,
         )
         _assert_unique_workflow_source_tab_id(wfs, source_tab_id)
         _assert_workflow_source_tab_matches_type(
@@ -993,6 +1007,7 @@ def build_router(
                         reject_unknown=_reject_unknown_live_param_keys(workflow_type),
                         reject_removed_image_keys=True,
                         require_ltx_mode=workflow_type == "ltx2",
+                        extra_allowed_keys=_WORKFLOW_IMAGE_PARAM_EXTRA_KEYS if workflow_type in _IMAGE_TAB_TYPES else None,
                     )
                 elif "params_snapshot" in payload:
                     raise HTTPException(status_code=400, detail="params_snapshot must be an object")
@@ -1058,10 +1073,10 @@ def build_router(
 
     @router.post("/api/ui/presets/apply")
     def ui_presets_apply(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
-        """Apply a UI preset: resolve checkpoint selector and apply options.
+        """Apply a UI preset: resolve checkpoint selector only.
 
-        Presets no longer mutate a global “current checkpoint” option; callers must
-        apply the returned checkpoint to their per-tab state.
+        Presets no longer mutate a global “current checkpoint” option or `/api/options`;
+        callers must apply the returned checkpoint to their per-tab state.
         """
         try:
             preset_id = str(payload.get("id"))
@@ -1103,14 +1118,15 @@ def build_router(
         if not target:
             raise HTTPException(status_code=409, detail=f"checkpoint not found for selector: {sel_type}:{sel_value}")
 
-        # Apply registry-backed options atomically (checkpoint selection is returned, not persisted).
-        try:
-            extra = preset.get("options") or {}
-            updates = dict(extra) if isinstance(extra, dict) else {}
-            updated = opts_set_many(updates) if updates else []
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"failed to apply preset: {exc}")
+        if "options" in preset:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"preset '{preset_id}' still carries removed 'options' mutations. "
+                    "Remove preset.options and keep UI presets checkpoint-only."
+                ),
+            )
 
-        return {"applied": True, "checkpoint": target, "model": target, "updated": updated}
+        return {"applied": True, "checkpoint": target, "model": target}
 
     return router

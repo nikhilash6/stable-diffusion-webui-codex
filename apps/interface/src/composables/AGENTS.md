@@ -1,13 +1,14 @@
 # apps/interface/src/composables Overview
 <!-- tags: frontend, composables -->
 Date: 2025-12-09
-Last Review: 2026-04-08
+Last Review: 2026-04-12
 Status: Active
 
 ## Purpose
 - Vue composables that encapsulate shared generation logic and reusable reactive helpers for engine tabs.
 
 ## Notes
+- 2026-04-12: `useGeneration(tabId)` now preserves image-lane VAE ownership across history/workflow snapshots by serializing the family-owned VAE instead of the mutable `currentVae` mirror, and expects restore/apply paths to resolve the VAE from fresh inventory/path truth plus the store-owned quicksettings snapshots before patching selectors. Do not reintroduce local stale-catalog fallback or image-VAE dropping in history/workflow helpers.
 - 2026-04-08: Shared `Save snapshot` / `Copy params` / workflow save-vs-update notice ownership now lives in `useWorkflowSnapshotActions.ts`; keep workflow snapshot identity exact-typed (`ApiTab['type']` only), keep `copyInfo`, history copy/apply/load/details, and other mode-specific Results/history actions local to the image/WAN/LTX view owners, and keep save-snapshot vs copy-current snapshot sources explicit when a lane like WAN needs both instead of inventing a fake universal workflow schema or reviving removed `engine_semantics` / other parallel workflow identity fields.
 - 2026-04-08: Shared frontend task-stream/resume/history ownership now lives in `useTaskRunLifecycle.ts`; `useGeneration(tabId)`, `useVideoGeneration(tabId)`, `useWan22_5bVideoGeneration(tabId)`, and `useLtxVideoGeneration(tabId)` keep payload builders, result/history shaping, queueing, automation replay recovery, and synchronous resume pre-hydration local while delegating stream attach/stop, auto-resume reattach, history load/clear gating, and `resumeNotice` wiring to that shared owner.
 - 2026-03-21: `useGeneration(tabId)` now normalizes img2img resize mode against the active engine contract and emits top-level `img2img_resize_mode` only for unmasked ZImage img2img, matching the truthful pixel-space resize modes owned by `runtime/pipeline_stages/image_init.py`.

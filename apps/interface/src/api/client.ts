@@ -8,7 +8,8 @@ Required Notice: see NOTICE
 
 Purpose: Frontend API client (typed fetch helpers + endpoint wrappers).
 Provides JSON/Form fetch helpers and exports functions for models/options/inventory/tasks, image automation, UI tabs/workflows persistence, and UI schema/preset
-endpoints under `VITE_API_BASE` (default `/api`). Also caches `/api/options` revision and preserves structured HTTP error metadata (`status/detail/body`)
+endpoints under `VITE_API_BASE` (default `/api`). Also caches `/api/options` revision monotonically, uses that revision for bounded conditional
+`POST /api/options` writes where callers request CAS semantics, and preserves structured HTTP error metadata (`status/detail/body`)
 for conflict-aware generation UX. SUPIR diagnostics parsing now validates the structured stable sampler rows from `/api/supir/models`
 (`id` / `label` / `stability` / `native_sampler` / `native_scheduler`) before the shared frontend diagnostics owner consumes them, and exposes explicit
 cache invalidation so Refresh can truthfully refetch that diagnostics surface in-session.
@@ -30,6 +31,8 @@ Symbols (top-level; keep in sync; no ghosts):
 - `fetchModels` (function): Fetches the model list (`/models`).
 - `refreshModels` (function): Forces a checkpoint rescan (`/models?refresh=1`).
 - `fetchModelInventory` (function): Fetches the inventory cache (`/models/inventory`).
+- `fetchFreshModelInventory` (function): Reads the current inventory truth uncached (`/models/inventory`) for bounded fail-loud validation paths.
+- `getModelCatalogInvalidationVersion` (function): Returns the current model-catalog invalidation epoch so callers can discard stale in-flight catalog responses.
 - `fetchFileMetadata` (function): Reads GGUF/SafeTensors file metadata (`/models/file-metadata`).
 - `fetchCheckpointMetadata` (function): Fetches the metadata modal payload for a checkpoint selection (`/models/checkpoint-metadata`).
 - `refreshModelInventory` (function): Forces an inventory rescan (`/models/inventory/refresh`).
@@ -41,7 +44,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `fetchSchedulers` (function): Fetches supported schedulers (`/schedulers`) and filters out unsupported entries.
 - `analyzePngInfo` (function): Extracts PNG text metadata for the PNG Info view (`POST /tools/pnginfo/analyze` multipart).
 - `fetchOptions` (function): Fetches runtime options (`/options`).
-- `updateOptions` (function): Updates runtime options (`POST /options`).
+- `updateOptions` (function): Updates runtime options (`POST /options`) with required `X-Codex-Expected-Revision` conditional writes.
 - `startTxt2Img` (function): Starts a txt2img task (`POST /txt2img`).
 - `startImg2Img` (function): Starts an img2img task (`POST /img2img`).
 - `startTxt2Vid` (function): Starts a txt2vid task (`POST /txt2vid`).
@@ -62,6 +65,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `fetchSupirModels` (function): Fetches cached SUPIR diagnostics/readiness (`/supir/models`) for SDXL img2img/inpaint UI discoverability.
 - `fetchPromptTokenCount` (function): Counts prompt tokens via backend tokenizer (`POST /models/prompt-token-count`).
 - `fetchPaths` (function): Fetches configured paths (`/paths`).
+- `fetchFreshPaths` (function): Reads the current configured paths uncached (`/paths`) for bounded fail-loud validation paths.
 - `updatePaths` (function): Updates configured paths (`POST /paths`).
 - `scanModelPath` (function): Scans a model path for add-path candidates without hashing (`POST /models/path-scan`).
 - `addModelPathItem` (function): Adds one file to a model library key and computes SHA at add-time (`POST /models/path-add`).
@@ -129,7 +133,12 @@ import type { Txt2ImgRequest } from './payloads'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '/api'
 
-const _jsonCache = new Map<string, unknown>()
+type JsonCacheEntry = {
+  value: unknown
+  modelCatalogInvalidationVersion?: number
+}
+
+const _jsonCache = new Map<string, JsonCacheEntry>()
 const _jsonInflight = new Map<string, Promise<unknown>>()
 let _cachedOptionsRevision = 0
 let _modelsInvalidationVersion = 0
@@ -203,14 +212,10 @@ function computeModelsContentFingerprint(payload: ModelsResponse): string {
 function cacheOptionsRevisionFromPayload(payload: unknown): void {
   if (!isRecordObject(payload)) return
   const direct = normalizeRevision(payload.revision)
-  if (direct !== null) {
-    _cachedOptionsRevision = direct
-    return
-  }
   const values = payload.values
-  if (!isRecordObject(values)) return
-  const fromValues = normalizeRevision(values.codex_options_revision)
-  if (fromValues !== null) _cachedOptionsRevision = fromValues
+  const fromValues = isRecordObject(values) ? normalizeRevision(values.codex_options_revision) : null
+  const nextRevision = Math.max(direct ?? 0, fromValues ?? 0)
+  if (nextRevision > _cachedOptionsRevision) _cachedOptionsRevision = nextRevision
 }
 
 export function getCachedOptionsRevision(): number {
@@ -317,6 +322,13 @@ function invalidateJsonCache(prefixPath: string): void {
   }
 }
 
+function isModelCatalogCachePath(path: string): boolean {
+  return path === '/models'
+    || path.startsWith('/models?')
+    || path === '/models/inventory'
+    || path.startsWith('/models/inventory?')
+}
+
 function bumpModelsInvalidationVersion(): number {
   const next = _modelsInvalidationVersion + 1
   _modelsInvalidationVersion = Number.isSafeInteger(next) ? next : 1
@@ -327,6 +339,10 @@ export function invalidateModelCatalogCaches(): number {
   invalidateJsonCache('/models')
   invalidateJsonCache('/models/inventory')
   return bumpModelsInvalidationVersion()
+}
+
+export function getModelCatalogInvalidationVersion(): number {
+  return _modelsInvalidationVersion
 }
 
 export function invalidateSupirModelsCache(): void {
@@ -358,14 +374,35 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 
 function requestJsonCached<T>(path: string): Promise<T> {
   const cached = _jsonCache.get(path)
-  if (cached !== undefined) return Promise.resolve(cached as T)
+  if (cached !== undefined) {
+    if (
+      isModelCatalogCachePath(path)
+      && cached.modelCatalogInvalidationVersion !== _modelsInvalidationVersion
+    ) {
+      _jsonCache.delete(path)
+    } else {
+      return Promise.resolve(cached.value as T)
+    }
+  }
 
   const inflight = _jsonInflight.get(path)
   if (inflight) return inflight as Promise<T>
 
+  const requestModelCatalogInvalidationVersion = isModelCatalogCachePath(path)
+    ? _modelsInvalidationVersion
+    : undefined
   const p = requestJson<T>(path)
     .then((value) => {
-      _jsonCache.set(path, value)
+      if (
+        requestModelCatalogInvalidationVersion !== undefined
+        && requestModelCatalogInvalidationVersion !== _modelsInvalidationVersion
+      ) {
+        return value
+      }
+      _jsonCache.set(path, {
+        value,
+        modelCatalogInvalidationVersion: requestModelCatalogInvalidationVersion,
+      })
       return value
     })
     .finally(() => {
@@ -434,6 +471,10 @@ export function fetchModelInventory(): Promise<InventoryResponse> {
   return requestJsonCached<InventoryResponse>('/models/inventory')
 }
 
+export function fetchFreshModelInventory(): Promise<InventoryResponse> {
+  return requestJson<InventoryResponse>('/models/inventory')
+}
+
 export function fetchFileMetadata(path: string): Promise<FileMetadataResponse> {
   return requestJson<FileMetadataResponse>(`/models/file-metadata?path=${encodeURIComponent(path)}`)
 }
@@ -445,7 +486,10 @@ export function fetchCheckpointMetadata(value: string): Promise<CheckpointMetada
 export async function refreshModelInventory(): Promise<InventoryResponse> {
   invalidateModelCatalogCaches()
   const inv = await requestJson<InventoryResponse>('/models/inventory/refresh', { method: 'POST' })
-  _jsonCache.set('/models/inventory', inv)
+  _jsonCache.set('/models/inventory', {
+    value: inv,
+    modelCatalogInvalidationVersion: _modelsInvalidationVersion,
+  })
   return inv
 }
 
@@ -654,12 +698,18 @@ export async function refreshModelInventoryAsync(options: { signal?: AbortSignal
     )
   })
 
-  _jsonCache.set('/models/inventory', refreshedInventory)
+  _jsonCache.set('/models/inventory', {
+    value: refreshedInventory,
+    modelCatalogInvalidationVersion: _modelsInvalidationVersion,
+  })
   return refreshedInventory
 }
 
 export function cacheModelInventorySnapshot(inv: InventoryResponse): void {
-  _jsonCache.set('/models/inventory', inv)
+  _jsonCache.set('/models/inventory', {
+    value: inv,
+    modelCatalogInvalidationVersion: _modelsInvalidationVersion,
+  })
 }
 
 export async function fetchSamplers(): Promise<SupportedSamplersResponse> {
@@ -707,9 +757,21 @@ export async function fetchOptions(): Promise<OptionsResponse> {
   return res
 }
 
-export async function updateOptions(payload: Record<string, unknown>): Promise<OptionsUpdateResponse> {
+export async function updateOptions(
+  payload: Record<string, unknown>,
+  options: { expectedRevision: number },
+): Promise<OptionsUpdateResponse> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  }
+  const expectedRevision = normalizeRevision(options.expectedRevision)
+  if (expectedRevision === null) {
+    throw new Error('updateOptions requires a non-negative expectedRevision.')
+  }
+  headers['X-Codex-Expected-Revision'] = String(expectedRevision)
   const res = await requestJson<OptionsUpdateResponse>('/options', {
     method: 'POST',
+    headers,
     body: JSON.stringify(payload),
   })
   cacheOptionsRevisionFromPayload(res)
@@ -761,7 +823,7 @@ export function fetchUpscalers(): Promise<UpscalersResponse> {
 export async function refreshUpscalers(): Promise<UpscalersResponse> {
   invalidateJsonCache('/upscalers')
   const res = await requestJson<UpscalersResponse>('/upscalers')
-  _jsonCache.set('/upscalers', res)
+  _jsonCache.set('/upscalers', { value: res })
   return res
 }
 
@@ -903,6 +965,10 @@ export function fetchPromptTokenCount(payload: PromptTokenCountRequest): Promise
 
 export function fetchPaths(): Promise<PathsResponse> {
   return requestJsonCached<PathsResponse>('/paths')
+}
+
+export function fetchFreshPaths(): Promise<PathsResponse> {
+  return requestJson<PathsResponse>('/paths')
 }
 
 export function updatePaths(paths: Record<string, string[]>): Promise<PathsUpdateResponse> {
