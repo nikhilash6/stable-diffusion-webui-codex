@@ -27,6 +27,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_key_is_connector` (function): Returns True when a raw `dit_root` key belongs in the connector bucket.
 - `split_ltx2_transformer_and_connectors_state` (function): Splits raw LTX core tensors into transformer vs connectors by strict prefixes.
 - `_validate_dit_root_component` (function): Validates the combined LTX Dit/connector contract before build-config separation.
+- `_resolve_core_only_transformer_state` (function): Splits the raw GGUF parser-owned transformer bucket and enforces the connector-free core-only contract.
 - `_validate_transformer_core_component` (function): Validates the GGUF core-only transformer contract before split-pack loader assembly.
 - `_validate_component_required_keys` (function): Validates required key markers for VAE/audio VAE/vocoder components.
 - `_build_ltx2_core_only_estimated_config` (function): Builds `CodexEstimatedConfig` for GGUF core-only checkpoints with parser-owned `transformer` only.
@@ -148,8 +149,31 @@ def _validate_dit_root_component(context) -> None:
         )
 
 
+def _resolve_core_only_transformer_state(
+    tensors: Mapping[str, Any],
+    *,
+    component: str,
+) -> dict[str, Any]:
+    transformer, embedded_connectors = split_ltx2_transformer_and_connectors_state(tensors)
+    if embedded_connectors:
+        raise ValidationError(
+            "LTX2 GGUF core-only checkpoint leaked connector-prefixed tensors into the parser-owned `transformer` component. "
+            "Connector tensors must resolve from the external embeddings sidecar, not from the core transformer checkpoint.",
+            component=component,
+        )
+    if not transformer:
+        raise ValidationError(
+            "LTX2 GGUF core-only checkpoint produced an empty transformer state after connector separation.",
+            component=component,
+        )
+    return transformer
+
+
 def _validate_transformer_core_component(context) -> None:
-    transformer = context.require("transformer").tensors
+    transformer = _resolve_core_only_transformer_state(
+        context.require("transformer").tensors,
+        component="transformer",
+    )
     if not any(all(key in transformer for key in group) for group in _DIT_REQUIRED_MARKER_GROUPS):
         raise ValidationError(
             "LTX2 GGUF core-only checkpoint is missing required transformer markers. "
@@ -238,7 +262,11 @@ def _build_ltx2_estimated_config(context, signature: ModelSignature) -> CodexEst
 
 
 def _build_ltx2_core_only_estimated_config(context, signature: ModelSignature) -> CodexEstimatedConfig:
-    return build_estimated_config(
+    transformer_state = _resolve_core_only_transformer_state(
+        context.require("transformer").tensors,
+        component="config",
+    )
+    base = build_estimated_config(
         context,
         signature,
         repo_override=_LTX2_ASSET_REPO,
@@ -249,6 +277,7 @@ def _build_ltx2_core_only_estimated_config(context, signature: ModelSignature) -
             "core_only": True,
         },
     )
+    return base.replace_components({"transformer": transformer_state})
 
 
 def build_plan(signature: ModelSignature) -> ParserPlanBundle:
