@@ -4105,6 +4105,9 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
             resolve_asset_by_sha=resolve_asset_by_sha,
             resolve_vae_path_by_sha=resolve_vae_path_by_sha,
         )
+        if "vae_source" not in extras:
+            vae_path = extras.get("vae_path")
+            extras["vae_source"] = "external" if isinstance(vae_path, str) and vae_path.strip() else "built_in"
         _apply_gguf_video_runtime_controls_from_payload(payload=payload, extras=extras)
         return model_ref, checkpoint_record
 
@@ -6590,18 +6593,38 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                     meta={"single_flight_enabled": single_flight},
                 )
 
+                from apps.backend.interfaces.api.tasks.generation_tasks import (
+                    build_engine_options as _build_engine_options,
+                    encode_images as _encode_images,
+                    resolve_request_smart_flags as _resolve_request_smart_flags,
+                )
+                from apps.backend.runtime.memory.smart_offload import smart_runtime_overrides
+
                 engine_opts: dict[str, object] = {
                     "export_video": _require_options_bool(options_snapshot, "codex_export_video")
                 }
                 if _require_options_bool(options_snapshot, "codex_core_streaming"):
                     engine_opts["core_streaming_enabled"] = True
+                request_extras = getattr(req, "extras", {}) or {}
+                if any(
+                    key in request_extras
+                    for key in (
+                        "checkpoint_core_only",
+                        "model_format",
+                        "text_encoder_override",
+                        "tenc_path",
+                        "vae_path",
+                        "vae_source",
+                    )
+                ):
+                    engine_opts.update(
+                        _build_engine_options(
+                            req=req,
+                            opts_snapshot=lambda: options_snapshot,
+                        )
+                    )
                 if compute_dtype is not None:
                     engine_opts["dtype"] = compute_dtype
-                from apps.backend.interfaces.api.tasks.generation_tasks import (
-                    encode_images as _encode_images,
-                    resolve_request_smart_flags as _resolve_request_smart_flags,
-                )
-                from apps.backend.runtime.memory.smart_offload import smart_runtime_overrides
 
                 smart_offload, smart_fallback, smart_cache = _resolve_request_smart_flags(req)
 
