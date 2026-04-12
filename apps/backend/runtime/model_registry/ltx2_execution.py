@@ -21,8 +21,10 @@ Symbols (top-level; keep in sync; no ghosts):
 - `LTX2_PROFILE_TWO_STAGE` (constant): Execution profile id for the explicit dev/full two-stage lane.
 - `LTX2_PROFILE_DISTILLED` (constant): Execution profile id for the current distilled lane.
 - `LTX2_EXECUTION_SURFACE_KEY` (constant): `/api/engines/capabilities` key for nested LTX execution metadata.
+- `_unknown_checkpoint_defaults` (function): Builds the blocked/unknown execution-default payload for unsupported LTX2 checkpoints.
+- `_resolve_ltx2_gguf_contract_blocked_reason` (function): Returns the earliest truthful GGUF contract failure for an LTX2 checkpoint, if any.
 - `Ltx2TwoStageAssets` (dataclass): Cached stage-2 asset-resolution result for the truthful LTX two-stage lane.
-- `Ltx2CheckpointExecutionDefaults` (dataclass): Checkpoint-scoped classification + defaults.
+- `Ltx2CheckpointExecutionDefaults` (dataclass): Checkpoint-scoped classification + defaults + block reason.
 - `Ltx2ExecutionSurface` (dataclass): Engine-scoped LTX execution-profile/default surface.
 - `resolve_ltx2_two_stage_assets` (function): Resolve the exact distilled LoRA + x2 spatial upscaler required for `two_stage`.
 - `resolve_ltx2_checkpoint_execution_defaults` (function): Classify one checkpoint and return its executable/default profile contract.
@@ -42,6 +44,7 @@ import re
 from typing import Any, Mapping
 
 from apps.backend.infra.config.paths import get_paths_for
+from apps.backend.runtime.model_registry.detectors.ltx2 import inspect_ltx2_gguf_path
 from apps.backend.runtime.models.types import CheckpointFormat, CheckpointRecord
 
 LTX2_KIND_DEV = "dev"
@@ -59,6 +62,7 @@ _LTX2_METADATA_ALLOWED_PROFILES_KEY = "ltx_allowed_execution_profiles"
 _LTX2_METADATA_DEFAULT_PROFILE_KEY = "ltx_default_execution_profile"
 _LTX2_METADATA_DEFAULT_STEPS_KEY = "ltx_default_steps"
 _LTX2_METADATA_DEFAULT_GUIDANCE_KEY = "ltx_default_guidance_scale"
+_LTX2_METADATA_BLOCKED_REASON_KEY = "ltx_blocked_reason"
 
 _BLOCKED_MARKERS = (
     "distilled-lora",
@@ -92,6 +96,7 @@ class Ltx2CheckpointExecutionDefaults:
     default_execution_profile: str | None
     default_steps: int | None
     default_guidance_scale: float | None
+    blocked_reason: str | None
 
 
 @dataclass(frozen=True)
@@ -126,7 +131,6 @@ def _candidate_strings(record: CheckpointRecord) -> tuple[str, ...]:
         record.title,
         record.name,
         record.model_name,
-        record.family_hint,
     )
     for raw_value in raw_values:
         normalized = _normalize_marker_input(raw_value)
@@ -332,14 +336,19 @@ def resolve_ltx2_two_stage_assets(record: CheckpointRecord) -> Ltx2TwoStageAsset
 def resolve_ltx2_checkpoint_execution_defaults(record: CheckpointRecord) -> Ltx2CheckpointExecutionDefaults:
     candidates = _candidate_strings(record)
     has_ltx_identity = any(marker in candidate for candidate in candidates for marker in _LTX_IDENTITY_MARKERS)
+    explicit_ltx_identity = has_ltx_identity or str(record.family_hint or "").strip().lower() == "ltx2"
     if _has_blocked_checkpoint_marker(record):
-        return Ltx2CheckpointExecutionDefaults(
-            checkpoint_kind=LTX2_KIND_UNKNOWN,
-            allowed_execution_profiles=(),
-            default_execution_profile=None,
-            default_steps=None,
-            default_guidance_scale=None,
-        )
+        return _unknown_checkpoint_defaults()
+
+    if not explicit_ltx_identity:
+        return _unknown_checkpoint_defaults()
+
+    gguf_contract_blocked_reason = _resolve_ltx2_gguf_contract_blocked_reason(
+        record,
+        has_native_ltx_identity=has_ltx_identity,
+    )
+    if gguf_contract_blocked_reason is not None:
+        return _unknown_checkpoint_defaults(blocked_reason=gguf_contract_blocked_reason)
 
     if has_ltx_identity and any(marker in candidate for candidate in candidates for marker in _DISTILLED_MARKERS):
         return Ltx2CheckpointExecutionDefaults(
@@ -348,6 +357,7 @@ def resolve_ltx2_checkpoint_execution_defaults(record: CheckpointRecord) -> Ltx2
             default_execution_profile=LTX2_PROFILE_DISTILLED,
             default_steps=8,
             default_guidance_scale=1.0,
+            blocked_reason=None,
         )
 
     if has_ltx_identity:
@@ -361,26 +371,35 @@ def resolve_ltx2_checkpoint_execution_defaults(record: CheckpointRecord) -> Ltx2
             default_execution_profile=LTX2_PROFILE_ONE_STAGE,
             default_steps=30,
             default_guidance_scale=4.0,
+            blocked_reason=None,
         )
 
+    return _unknown_checkpoint_defaults()
+
+
+def _unknown_checkpoint_defaults(*, blocked_reason: str | None = None) -> Ltx2CheckpointExecutionDefaults:
     return Ltx2CheckpointExecutionDefaults(
         checkpoint_kind=LTX2_KIND_UNKNOWN,
         allowed_execution_profiles=(),
         default_execution_profile=None,
         default_steps=None,
         default_guidance_scale=None,
+        blocked_reason=blocked_reason,
     )
 
 
 def build_ltx2_checkpoint_metadata(record: CheckpointRecord) -> dict[str, object]:
     defaults = resolve_ltx2_checkpoint_execution_defaults(record)
-    return {
+    payload = {
         _LTX2_METADATA_KIND_KEY: defaults.checkpoint_kind,
         _LTX2_METADATA_ALLOWED_PROFILES_KEY: list(defaults.allowed_execution_profiles),
         _LTX2_METADATA_DEFAULT_PROFILE_KEY: defaults.default_execution_profile,
         _LTX2_METADATA_DEFAULT_STEPS_KEY: defaults.default_steps,
         _LTX2_METADATA_DEFAULT_GUIDANCE_KEY: defaults.default_guidance_scale,
     }
+    if defaults.blocked_reason:
+        payload[_LTX2_METADATA_BLOCKED_REASON_KEY] = defaults.blocked_reason
+    return payload
 
 
 def build_ltx2_execution_surface() -> Ltx2ExecutionSurface:
@@ -443,8 +462,53 @@ def debug_probe() -> dict[str, Any]:
             "default_execution_profile": defaults.default_execution_profile,
             "default_steps": defaults.default_steps,
             "default_guidance_scale": defaults.default_guidance_scale,
+            "blocked_reason": defaults.blocked_reason,
         }
     return payload
+
+
+def _resolve_ltx2_gguf_contract_blocked_reason(
+    record: CheckpointRecord,
+    *,
+    has_native_ltx_identity: bool,
+) -> str | None:
+    raw_format = record.format.value if isinstance(record.format, CheckpointFormat) else str(record.format or "").strip().lower()
+    if raw_format != CheckpointFormat.GGUF.value:
+        return None
+    filename = str(record.filename or "").strip()
+    if not filename:
+        if not has_native_ltx_identity:
+            return None
+        return "Selected LTX2 GGUF checkpoint record is missing filename metadata."
+    try:
+        inspection = inspect_ltx2_gguf_path(filename)
+    except Exception as exc:
+        if not has_native_ltx_identity:
+            return None
+        return f"LTX2 GGUF header inspection failed for {Path(filename).name}: {exc}"
+    authoritative_ltx_identity = has_native_ltx_identity or inspection.has_required_transformer_markers
+    if inspection.connector_key_count > 0:
+        if not authoritative_ltx_identity:
+            return None
+        sample = ", ".join(repr(key) for key in inspection.connector_key_sample)
+        sample_suffix = f" sample_keys=[{sample}]" if sample else ""
+        return (
+            "LTX2 GGUF core-only checkpoint leaked connector-prefixed tensors into the core transformer checkpoint. "
+            "Connector tensors must resolve from the external embeddings sidecar, not from the core transformer checkpoint."
+            f"{sample_suffix}"
+        )
+    if inspection.transformer_key_count == 0:
+        if not authoritative_ltx_identity:
+            return None
+        return "LTX2 GGUF core-only checkpoint produced an empty transformer bucket during header inspection."
+    if not inspection.has_required_transformer_markers:
+        if not authoritative_ltx_identity:
+            return None
+        return (
+            "LTX2 GGUF core-only checkpoint is missing required transformer markers after connector separation. "
+            "Expected one supported adaln marker set plus `patchify_proj.weight`."
+        )
+    return None
 
 
 __all__ = [

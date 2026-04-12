@@ -4119,15 +4119,37 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
 
         defaults = resolve_ltx2_checkpoint_execution_defaults(checkpoint_record)
         if defaults.checkpoint_kind == LTX2_KIND_UNKNOWN:
+            detail = defaults.blocked_reason or (
+                "The checkpoint classified as 'unknown' from local signals and is blocked until a truthful lane exists."
+            )
             raise HTTPException(
                 status_code=409,
                 detail=(
                     "Selected LTX2 checkpoint is unsupported by the current executable tranche: "
                     f"{getattr(checkpoint_record, 'title', getattr(checkpoint_record, 'name', '<unknown>'))!r}. "
-                    "The checkpoint classified as 'unknown' from local signals and is blocked until a truthful lane exists."
+                    f"{detail}"
                 ),
             )
         return defaults
+
+    def _preflight_generic_video_route_checkpoint_contract(payload: Mapping[str, Any]) -> None:
+        video_engine_key = _canonical_engine_key(payload.get("engine")) if payload.get("engine") is not None else ""
+        if video_engine_key != "ltx2":
+            return
+        if _is_legacy_or_wan_video_route_engine(video_engine_key):
+            return
+        extras: Dict[str, Any] = {}
+        _, checkpoint_record = _resolve_generic_video_checkpoint_contract(
+            payload=payload,
+            extras=extras,
+            engine_key=video_engine_key,
+        )
+        ltx_defaults = _require_ltx2_checkpoint_execution_defaults(checkpoint_record=checkpoint_record)
+        _resolve_ltx2_requested_execution_profile(
+            payload=payload,
+            checkpoint_record=checkpoint_record,
+            defaults=ltx_defaults,
+        )
 
     def prepare_txt2img(payload: Dict[str, Any]) -> Tuple["Txt2ImgRequest", str, Optional[str]]:
         settings_revision = _require_int_field(payload, "settings_revision", minimum=0)
@@ -6931,6 +6953,7 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         _validate_route_engine_capability(payload, route_mode=GenerationRouteMode.TXT2VID)
         _reject_legacy_wan_request_key_aliases(payload, context="txt2vid")
         _validate_pre_task_txt2vid_payload(payload)
+        _preflight_generic_video_route_checkpoint_contract(payload)
 
         device = _parse_explicit_device(payload, route_mode=GenerationRouteMode.TXT2VID)
         loop = asyncio.get_running_loop()
@@ -6949,6 +6972,7 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         _validate_route_engine_capability(payload, route_mode=GenerationRouteMode.IMG2VID)
         _reject_legacy_wan_request_key_aliases(payload, context="img2vid")
         validate_pre_task_img2vid_payload(payload)
+        _preflight_generic_video_route_checkpoint_contract(payload)
 
         device = _parse_explicit_device(payload, route_mode=GenerationRouteMode.IMG2VID)
         loop = asyncio.get_running_loop()

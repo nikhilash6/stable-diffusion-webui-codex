@@ -6,11 +6,13 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: LTX2 monolithic-checkpoint detector for the model registry.
+Purpose: LTX2 checkpoint detector and GGUF contract inspector for the model registry.
 Matches strict monolithic LTX 2.x combined checkpoints using explicit local evidence:
 `model.diffusion_model.*` transformer+connector keys, plus `vae.*`, `audio_vae.*`, and `vocoder.*` component prefixes.
-Grounds expected architecture dimensions in vendored `apps/backend/huggingface/Lightricks/LTX-2/**` metadata and
-returns a structured backend-only `ModelSignature` without exposing runtime engine/capability support.
+Also exposes header-safe inspection for LTX2 core-only GGUF checkpoints so inventory/preflight can reject connector-contaminated
+transformer packs before the parser/load path. Grounds expected architecture dimensions in vendored
+`apps/backend/huggingface/Lightricks/LTX-2/**` metadata and returns a structured backend-only `ModelSignature`
+without exposing runtime engine/capability support.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_LTX2_CONFIG_REPO_HINT` (constant): Canonical vendored Hugging Face repo id used for LTX2 metadata/config hints.
@@ -19,7 +21,11 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_MONOLITHIC_COMPONENT_MIN_KEYS` (constant): Minimum per-component key-count thresholds required for strict monolithic matching.
 - `_LTX2_REQUIRED_CORE_KEYSETS` (constant): Accepted LTX2 transformer marker key sets under `model.diffusion_model.`.
 - `_CONNECTOR_SUBPREFIXES` (constant): Monolithic-only connector key prefixes used for strict LTX2 checkpoint evidence.
+- `Ltx2GgufCoreMetadata` (dataclass): Header-safe LTX2 GGUF core-only contract inspection result.
+- `_GGUFHeaderTensorRef` (dataclass): Lightweight GGUF header tensor record used for key-only inspection.
+- `_GGUFHeaderStateDict` (class): Mapping wrapper exposing GGUF tensor names without materializing weights.
 - `Ltx2Detector` (class): Detector that matches strict monolithic LTX2 checkpoints and builds an LTX2 `ModelSignature`.
+- `inspect_ltx2_gguf_path` (function): Returns header-safe LTX2 GGUF core-only contract metadata from a GGUF path.
 - `_supported_ltx2_metadata` (function): Loads and validates required local LTX2 metadata JSON files.
 - `_read_json` (function): Reads a required vendored JSON metadata file.
 - `_repo_hint_from_bundle` (function): Infers the best source checkpoint repo hint from the checkpoint filepath when available.
@@ -30,13 +36,16 @@ Symbols (top-level; keep in sync; no ghosts):
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Iterable, Optional
 import json
 
 import torch
 
+from apps.backend.runtime.model_parser.families.ltx2 import split_ltx2_transformer_and_connectors_state
 from apps.backend.runtime.model_registry.detectors.base import ModelDetector, REGISTRY
 from apps.backend.runtime.model_registry.signals import SignalBundle, count_blocks, has_all_keys
 from apps.backend.runtime.model_registry.specs import (
@@ -88,6 +97,45 @@ _CONNECTOR_SUBPREFIXES = (
     _MONOLITHIC_CORE_PREFIX + "audio_connector.",
     _MONOLITHIC_CORE_PREFIX + "text_proj_in.",
 )
+
+
+@dataclass(frozen=True)
+class Ltx2GgufCoreMetadata:
+    has_required_transformer_markers: bool
+    transformer_key_count: int
+    connector_key_count: int
+    connector_key_sample: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _GGUFHeaderTensorRef:
+    shape: tuple[int, ...]
+
+
+class _GGUFHeaderStateDict(Mapping[str, _GGUFHeaderTensorRef]):
+    def __init__(self, gguf_path: str) -> None:
+        from apps.backend.quantization.gguf import GGUFReader
+
+        reader = GGUFReader(gguf_path)
+        self._tensors = {
+            tensor.name: _GGUFHeaderTensorRef(tuple(int(v) for v in reversed(tensor.shape.tolist())))
+            for tensor in reader.tensors
+        }
+        self.filepath = gguf_path
+        self.source_format = "gguf"
+
+    def __getitem__(self, key: str) -> _GGUFHeaderTensorRef:
+        return self._tensors[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._tensors)
+
+    def __len__(self) -> int:
+        return len(self._tensors)
+
+    def shape_of(self, key: str) -> tuple[int, ...] | None:
+        tensor = self._tensors.get(key)
+        return None if tensor is None else tensor.shape
 
 
 class Ltx2Detector(ModelDetector):
@@ -324,6 +372,22 @@ def _has_connector_surface(keys: Iterable[str]) -> bool:
         if any(key.startswith(prefix) for key in keys):
             return True
     return False
+
+
+def inspect_ltx2_gguf_path(gguf_path: str) -> Ltx2GgufCoreMetadata:
+    header_state = _GGUFHeaderStateDict(gguf_path)
+    transformer, connectors = split_ltx2_transformer_and_connectors_state(header_state)
+    connector_key_sample = tuple(sorted(connectors.keys())[:5])
+    has_required_transformer_markers = any(
+        all(key in transformer for key in marker_group)
+        for marker_group in _LTX2_REQUIRED_CORE_KEYSETS
+    )
+    return Ltx2GgufCoreMetadata(
+        has_required_transformer_markers=has_required_transformer_markers,
+        transformer_key_count=len(transformer),
+        connector_key_count=len(connectors),
+        connector_key_sample=connector_key_sample,
+    )
 
 
 REGISTRY.register(Ltx2Detector())
