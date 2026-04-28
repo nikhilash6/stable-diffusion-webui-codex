@@ -9,9 +9,8 @@ Required Notice: see NOTICE
 Purpose: UI persistence and metadata API routes.
     Handles tabs/workflows JSON persistence, UI blocks filtering, and checkpoint-only presets application, with fail-loud tab-type validation for `/api/ui/tabs`
     while filtering stale unsupported top-level tab params during stored-tab load and rejecting unknown top-level LTX keys on create/update.
-    Live WAN tab/workflow types are exact (`wan22_14b` / `wan22_5b`); stored legacy generic `wan` / `wan22` entries are inferred once from their
-    persisted owner shape, ambiguous legacy WAN payloads now fail loud instead of defaulting to 14B, new generic WAN writes are rejected, and workflow
-    snapshot payloads/source-tab bindings stay normalized and unique. Image-tab persistence also owns the allowlist for nested automation-era params
+    Live WAN tab/workflow types are exact (`wan22_14b` / `wan22_5b`); stored legacy generic `wan` / `wan22` entries migrate once to `wan22_14b`,
+    new generic WAN writes are rejected, and workflow snapshot payloads/source-tab bindings stay normalized and unique. Image-tab persistence also owns the allowlist for nested automation-era params
     such as `runAction`, `initSource`, `supir`, and `ipAdapter`. Stored workflow snapshots now use the same fail-loud image param rules as live writes
     for removed keys and invalid `inpaintMode`, may carry a workflow-only `vae` selector for exact image-family restore, and still reject `vae` on live
     image tab params instead of laundering that global quicksettings owner into persisted tab state.
@@ -226,9 +225,6 @@ def build_router(
         "cfgScale",
         "seed",
     }
-    _WAN_SHARED_PARAM_TOP_LEVEL_KEYS = {"schemaVersion", "video", "assets"}
-    _WAN14B_DISCRIMINATOR_KEYS = _WAN14B_PARAM_TOP_LEVEL_KEYS - _WAN_SHARED_PARAM_TOP_LEVEL_KEYS
-    _WAN5B_DISCRIMINATOR_KEYS = _WAN5B_PARAM_TOP_LEVEL_KEYS - _WAN_SHARED_PARAM_TOP_LEVEL_KEYS
     _LTX_PARAM_TOP_LEVEL_KEYS = {
         "schemaVersion",
         "mode",
@@ -265,29 +261,10 @@ def build_router(
         "assets",
     }
 
-    def _infer_legacy_wan_stored_type(*, raw_params: object, owner: str) -> str:
-        if not isinstance(raw_params, dict):
-            raise ValueError(
-                f"{owner} uses legacy generic WAN type without a persisted owner shape; rewrite it to 'wan22_14b' or 'wan22_5b'"
-            )
-        has_5b_shape = any(key in raw_params for key in _WAN5B_DISCRIMINATOR_KEYS)
-        has_14b_shape = any(key in raw_params for key in _WAN14B_DISCRIMINATOR_KEYS)
-        if has_5b_shape and has_14b_shape:
-            raise ValueError(
-                f"{owner} mixes WAN 2.2 5B and 14B persisted owners; rewrite it to one exact type before loading"
-            )
-        if has_5b_shape:
-            return "wan22_5b"
-        if has_14b_shape:
-            return "wan22_14b"
-        raise ValueError(
-            f"{owner} uses legacy generic WAN type but its persisted params do not distinguish 5B vs 14B"
-        )
-
     def _normalize_loaded_tab_type(value: object, *, raw_params: object = None, owner: str = "stored payload") -> str:
         raw = str(value or "").strip().lower()
         if raw in ("wan", "wan22"):
-            return _infer_legacy_wan_stored_type(raw_params=raw_params, owner=owner)
+            return "wan22_14b"
         if raw == "wan22_14b_animate":
             return "wan22_14b"
         return _normalize_stored_tab_type(raw)
@@ -534,6 +511,7 @@ def build_router(
             tab_id = str(t.get("id") or f"#{index + 1}")
             old_type = t.get("type")
             params = t.get("params")
+            was_legacy_wan = str(old_type or "").strip().lower() in {"wan", "wan22"}
             try:
                 new_type = _normalize_loaded_tab_type(old_type, raw_params=params, owner=f"tab '{tab_id}'")
             except ValueError as exc:
@@ -541,6 +519,11 @@ def build_router(
             if new_type != old_type:
                 t["type"] = new_type
                 changed = True
+            if was_legacy_wan and new_type == "wan22_14b":
+                title = str(t.get("title") or "")
+                if title.strip().lower() in {"wan", "wan22", "wan 2.2"}:
+                    t["title"] = "WAN 2.2 14B"
+                    changed = True
             sanitized_params = _sanitize_stored_tab_params(tab_type=new_type, raw_params=params, tab_id=tab_id)
             if sanitized_params != params:
                 t["params"] = sanitized_params
@@ -837,6 +820,8 @@ def build_router(
         now = datetime.utcnow().isoformat()
         for t in data["tabs"]:
             if str(t.get("id")) == tab_id:
+                if "type" in payload:
+                    raise HTTPException(status_code=400, detail="tab type is immutable")
                 if "title" in payload:
                     t["title"] = str(payload["title"])
                 if "enabled" in payload:
