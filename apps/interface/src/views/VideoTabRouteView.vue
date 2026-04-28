@@ -32,8 +32,8 @@ Symbols (top-level; keep in sync; no ghosts):
 import { computed } from 'vue'
 
 import VideoModelTab from './VideoModelTab.vue'
-import { useModelTabsStore, type BaseTabType } from '../stores/model_tabs'
-import { isWanTabFamily } from '../utils/engine_taxonomy'
+import { useModelTabsStore } from '../stores/model_tabs'
+import { isVideoTabFamily, type VideoTabFamily } from '../utils/engine_taxonomy'
 
 const props = defineProps<{
   tabId: string
@@ -41,12 +41,12 @@ const props = defineProps<{
 
 const store = useModelTabsStore()
 
-type VideoTabType = Extract<BaseTabType, 'wan22_14b' | 'wan22_5b' | 'ltx2'>
+type VideoTabType = VideoTabFamily
 
 const tab = computed(() => store.tabs.find((entry) => entry.id === props.tabId) || null)
 const videoTabType = computed<VideoTabType | null>(() => {
   const value = tab.value?.type
-  if (value === 'ltx2' || isWanTabFamily(value)) return value
+  if (isVideoTabFamily(value)) return value
   return null
 })
 </script>

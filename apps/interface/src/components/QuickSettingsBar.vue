@@ -691,7 +691,6 @@ import { useSupirDiagnostics, resolveSupirSelectionState } from '../composables/
 import {
   isWanTabFamily,
   normalizeTabFamily,
-  semanticEngineFromTabFamily,
   tabFamilyFromSemanticEngine,
   type TabFamily,
 } from '../utils/engine_taxonomy'
@@ -1389,7 +1388,7 @@ const activeLtxMode = computed<LtxGenerationMode>(() => {
 const activeImageSurface = computed(() => {
   const tab = activeImageTab.value
   if (!tab) return null
-  return engineCaps.get(semanticEngineFromTabFamily(tab.type))
+  return engineCaps.get(tab.type)
 })
 const canToggleInitImage = computed(() => {
   const tab = activeImageTab.value
@@ -1576,7 +1575,7 @@ const activeImageAssetContract = computed(() => {
   if (checkpoint && modelInfo && typeof modelInfo.core_only !== 'boolean') {
     return null
   }
-  return engineCaps.getAssetContract(semanticEngineFromTabFamily(tab.type), {
+  return engineCaps.getAssetContract(tab.type, {
     checkpointCoreOnly: typeof modelInfo?.core_only === 'boolean' ? modelInfo.core_only : false,
   })
 })

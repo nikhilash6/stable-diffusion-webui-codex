@@ -47,7 +47,7 @@ import ImageModelTab from './ImageModelTab.vue'
 import VideoTabRouteView from './VideoTabRouteView.vue'
 import { useBootstrapStore } from '../stores/bootstrap'
 import { useModelTabsStore, type BaseTabType } from '../stores/model_tabs'
-import { isWanTabFamily } from '../utils/engine_taxonomy'
+import { isVideoTabFamily, type VideoTabFamily } from '../utils/engine_taxonomy'
 
 const route = useRoute()
 const bootstrap = useBootstrapStore()
@@ -57,18 +57,18 @@ const id = computed(() => String(route.params.tabId || ''))
 const tab = computed(() => store.tabs.find(t => t.id === id.value) || null)
 const tabLoadFailed = computed(() => !tab.value && bootstrap.deferredStatus === 'error')
 
-type VideoTabType = Extract<BaseTabType, 'wan22_14b' | 'wan22_5b' | 'ltx2'>
-type ImageTabType = Exclude<BaseTabType, 'wan22_14b' | 'wan22_5b' | 'ltx2'>
+type VideoTabType = VideoTabFamily
+type ImageTabType = Exclude<BaseTabType, VideoTabFamily>
 
 const videoTabType = computed<VideoTabType | null>(() => {
   const t = tab.value?.type
-  if (t === 'ltx2' || isWanTabFamily(t)) return t
+  if (isVideoTabFamily(t)) return t
   return null
 })
 
 const imageTabType = computed<ImageTabType | null>(() => {
   const t = tab.value?.type
-  if (!t || isWanTabFamily(t) || t === 'ltx2') return null
+  if (!t || isVideoTabFamily(t)) return null
   return t
 })
 

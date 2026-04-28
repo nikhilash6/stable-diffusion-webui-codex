@@ -566,10 +566,10 @@ const {
   resumeNotice,
 } = useWan22_5bVideoGeneration(props.tabId)
 
-const wanDependencyStatus = computed(() => engineCaps.getDependencyStatus('wan22'))
+const wanDependencyStatus = computed(() => engineCaps.getDependencyStatus('wan22_5b'))
 const wanDependencyReady = computed(() => Boolean(wanDependencyStatus.value?.ready))
-const wanDependencyError = computed(() => engineCaps.firstDependencyError('wan22'))
-const wanEngineSurface = computed(() => engineCaps.get('wan22'))
+const wanDependencyError = computed(() => engineCaps.firstDependencyError('wan22_5b'))
+const wanEngineSurface = computed(() => engineCaps.get('wan22_5b'))
 const wanStageSamplers = computed(() => {
   const allowedExact = new Set(['euler', 'euler a'])
   return samplers.value.filter((entry) => {

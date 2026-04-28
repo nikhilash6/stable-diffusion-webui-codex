@@ -7,19 +7,20 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Canonical frontend engine/tab taxonomy helpers.
-Centralizes tab-family aliases, image request engine-id resolution, backend engine-id -> semantic-engine resolution, and sampler/scheduler
-fallback defaults so stores/composables stop duplicating mapping tables. Fallback sampler/scheduler pairs must stay aligned to the live executable
-surface (for example SD15 now defaults to `ddim` / `ddim`). FLUX.2 stays first-class in frontend taxonomy (no FLUX.1 aliasing), while
-backend-only semantic engines such as `netflix_void` remain valid semantic ids but intentionally resolve to no UI tab family.
+Centralizes tab-family aliases, exact video-lane detection, image request engine-id resolution, backend engine-id -> semantic-engine resolution,
+and sampler/scheduler fallback defaults so stores/composables stop duplicating mapping tables. Fallback sampler/scheduler pairs must stay aligned
+to the live executable surface (for example SD15 now defaults to `ddim` / `ddim`). FLUX.2 stays first-class in frontend taxonomy (no FLUX.1
+aliasing), while backend-only semantic engines such as `netflix_void` remain valid semantic ids but intentionally resolve to no UI tab family.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `TabFamily` (type): Canonical model tab families used by the UI.
+- `VideoTabFamily` (type): Exact video tab families supported by the routed video workspace.
 - `SemanticEngine` (type): Backend semantic engine ids from `/api/engines/capabilities`.
 - `EngineRequestId` (type): Engine ids used in frontend payload dispatch (`flux1_kontext`, `flux1_chroma`, etc.).
 - `normalizeTabFamily` (function): Normalizes raw alias values into `TabFamily` or `null`.
 - `normalizeSemanticEngine` (function): Normalizes raw semantic-engine values into canonical `SemanticEngine` or `null`.
 - `isWanTabFamily` (function): Returns whether a tab family is an exact WAN lane.
-- `semanticEngineFromTabFamily` (function): Converts tab family to semantic engine id.
+- `isVideoTabFamily` (function): Returns whether a tab family is a routed exact video lane.
 - `tabFamilyFromSemanticEngine` (function): Converts semantic engine id to tab family when representable.
 - `resolveImageRequestEngineId` (function): Canonical image request tab/mode -> engine-id mapper.
 - `KNOWN_ENGINE_IDS` (constant): Known engine ids that must have valid semantic mapping.
@@ -30,6 +31,7 @@ Symbols (top-level; keep in sync; no ghosts):
 */
 
 export type TabFamily = 'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'chroma' | 'wan22_14b' | 'wan22_5b' | 'zimage' | 'anima' | 'ltx2'
+export type VideoTabFamily = Extract<TabFamily, 'wan22_14b' | 'wan22_5b' | 'ltx2'>
 
 export type SemanticEngine =
   | 'sd15'
@@ -140,9 +142,8 @@ export function isWanTabFamily(value: unknown): value is Extract<TabFamily, 'wan
   return value === 'wan22_14b' || value === 'wan22_5b'
 }
 
-export function semanticEngineFromTabFamily(family: TabFamily): SemanticEngine {
-  if (isWanTabFamily(family)) return 'wan22'
-  return family
+export function isVideoTabFamily(value: unknown): value is VideoTabFamily {
+  return value === 'ltx2' || isWanTabFamily(value)
 }
 
 export function tabFamilyFromSemanticEngine(value: unknown): TabFamily | null {
