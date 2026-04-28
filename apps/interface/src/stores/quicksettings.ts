@@ -9,8 +9,8 @@ Required Notice: see NOTICE
 Purpose: QuickSettings global store (models/options + asset SHA/variant selection).
 Loads lists from `/api/*`, persists option changes via `/api/options`, and maintains cached inventory-driven choice lists plus SHA/variant maps for VAEs/text encoders/WAN GGUF
 so UI selections resolve to backend SHA-based assets (no raw-path inputs). It also caches IP-Adapter model/image-encoder option lists from the canonical inventory snapshot,
-owns the global runtime-device override plus component storage/compute dtype overrides applied via options, and caches the current `/api/options` revision for generation payload contracts
-(`settings_revision`) plus bounded conditional option writes that must fail loud instead of overwriting newer owner state.
+owns the global runtime-device override plus component storage/compute dtype overrides applied via options, and reads the current `/api/options` revision through the shared
+API-client monotonic cache for generation payload contracts (`settings_revision`) plus bounded conditional option writes that must fail loud instead of overwriting newer owner state.
 Text-encoder choices are sourced from inventory files constrained by `*_tenc` roots (not folder roots), and stale root-label overrides are
 sanitized so `tenc_sha` resolution remains deterministic across families (including Anima and LTX2). Inventory slot metadata is cached alongside
 SHA mappings so SDXL core-only requests can emit explicit `tenc1_sha` / `tenc2_sha` selectors without guessing label order. VAE state defaults to canonical `built-in`
@@ -45,6 +45,7 @@ import {
   getModelCatalogInvalidationVersion,
   getCachedOptionsRevision,
   invalidateModelCatalogCaches,
+  promoteCachedOptionsRevision,
 } from '../api/client'
 import type { ModelsFreshnessMarker } from '../api/client'
 
@@ -365,7 +366,6 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
   const smartFallback = ref<boolean>(false)
   const smartCache = ref<boolean>(true)
   const coreStreaming = ref<boolean>(false)
-  const settingsRevision = ref<number>(Math.max(0, Math.trunc(getCachedOptionsRevision())))
   const lastAppliedNowMessages = ref<string[]>([])
   const lastRestartRequiredMessages = ref<string[]>([])
   let modelsRequestSerial = 0
@@ -588,47 +588,30 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
     return DEFAULT_VAE_SELECTION
   }
 
-  function syncSettingsRevisionFromCache(): void {
-    const cached = normalizeRevision(getCachedOptionsRevision())
-    if (cached !== null && cached > settingsRevision.value) {
-      settingsRevision.value = cached
-    }
-  }
-
-  function applySettingsRevision(value: unknown): void {
-    const normalized = normalizeRevision(value)
-    if (normalized !== null) settingsRevision.value = normalized
-  }
-
   function getSettingsRevision(): number {
-    syncSettingsRevisionFromCache()
-    return settingsRevision.value
+    return Math.max(0, Math.trunc(getCachedOptionsRevision()))
   }
 
   async function refreshSettingsRevision(fallbackRevision?: number): Promise<number> {
     try {
-      const res = await fetchOptions()
-      applySettingsRevision((res as any).revision ?? (res.values as any)?.codex_options_revision)
-      syncSettingsRevisionFromCache()
+      await fetchOptions()
     } catch (error) {
       const fallback = normalizeRevision(fallbackRevision)
       if (fallback !== null) {
-        settingsRevision.value = fallback
+        promoteCachedOptionsRevision(fallback)
       } else {
         throw error
       }
     }
-    return settingsRevision.value
+    return getSettingsRevision()
   }
 
   async function applyOptionUpdate(payload: Record<string, unknown>): Promise<void> {
     const response = await updateOptions(payload, { expectedRevision: getSettingsRevision() })
-    applySettingsRevision((response as any).revision)
     const appliedNowRaw = (response as any).applied_now
     const restartRequiredRaw = (response as any).restart_required
     lastAppliedNowMessages.value = Array.isArray(appliedNowRaw) ? appliedNowRaw.map((item) => String(item)) : []
     lastRestartRequiredMessages.value = Array.isArray(restartRequiredRaw) ? restartRequiredRaw.map((item) => String(item)) : []
-    syncSettingsRevisionFromCache()
   }
 
   function clearOptionApplyMessages(): void {
@@ -702,8 +685,6 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
     const res = await fetchOptions()
     if (!isCurrentOptionsRequest()) return
     const opts = res.values
-    applySettingsRevision((res as any).revision ?? (opts as any)?.codex_options_revision)
-    syncSettingsRevisionFromCache()
     const hasVaeByFamilyOption = Object.prototype.hasOwnProperty.call(opts, VAE_BY_FAMILY_OPTION_KEY)
     if (hasVaeByFamilyOption) {
       const nextFromBackend = parseVaeByFamilyOption((opts as Record<string, unknown>)[VAE_BY_FAMILY_OPTION_KEY])
@@ -1462,7 +1443,6 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
     smartFallback,
     smartCache,
     coreStreaming,
-    settingsRevision,
     lastAppliedNowMessages,
     lastRestartRequiredMessages,
     setSmartOffload,

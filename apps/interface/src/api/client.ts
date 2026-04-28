@@ -24,6 +24,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `getApiErrorStatus` (function): Reads an HTTP status code from request errors emitted by this client.
 - `getCurrentRevisionFromError` (function): Extracts `current_revision` from backend conflict errors (`409`) when present.
 - `getCachedOptionsRevision` (function): Returns the cached `/api/options` revision used by generation payload builders.
+- `promoteCachedOptionsRevision` (function): Monotonically promotes the cached `/api/options` revision from one validated value or conflict fallback.
 - `ModelsFreshnessMarker` (type): Deterministic model-list freshness marker (`invalidationVersion` + content fingerprint + request id).
 - `fetchModelsWithFreshness` (function): Fetches `/models` with a freshness marker used by stores to avoid stale-response ambiguity.
 - `invalidateModelCatalogCaches` (function): Centralized invalidation for model/inventory caches and invalidation epoch bumps.
@@ -215,10 +216,18 @@ function cacheOptionsRevisionFromPayload(payload: unknown): void {
   const values = payload.values
   const fromValues = isRecordObject(values) ? normalizeRevision(values.codex_options_revision) : null
   const nextRevision = Math.max(direct ?? 0, fromValues ?? 0)
-  if (nextRevision > _cachedOptionsRevision) _cachedOptionsRevision = nextRevision
+  promoteCachedOptionsRevision(nextRevision)
 }
 
 export function getCachedOptionsRevision(): number {
+  return _cachedOptionsRevision
+}
+
+export function promoteCachedOptionsRevision(value: unknown): number {
+  const nextRevision = normalizeRevision(value)
+  if (nextRevision !== null && nextRevision > _cachedOptionsRevision) {
+    _cachedOptionsRevision = nextRevision
+  }
   return _cachedOptionsRevision
 }
 
