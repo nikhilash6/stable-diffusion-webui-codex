@@ -270,6 +270,10 @@ When agent-side verification requires running the WebUI/backend on CPU, use the 
 - Required env for CPU lane: `CODEX_ROOT="$PWD" PYTHONPATH="$PWD" CODEX_TORCH_MODE=cpu CODEX_TORCH_BACKEND=cpu`.
 - Example check command pattern:
   - `CODEX_ROOT="$PWD" PYTHONPATH="$PWD" CODEX_TORCH_MODE=cpu CODEX_TORCH_BACKEND=cpu ./.uv/bin/uv run --python .venv/bin/python --no-sync -m apps.backend.interfaces.api.run_api --help`
+- When the API is running on the Windows host and you need to hit it from WSL, do **not** assume `localhost` forwarding works. Probe the WSL default gateway first and use it as the base URL:
+  - `WINDOWS_API_HOST="$(ip route | awk '/default/ {print $3; exit}')"`
+  - `curl "http://$WINDOWS_API_HOST:7850/api/version"`
+  - Fall back to a public tunnel only if the default-gateway probe fails.
 - WSL heavy-model safety rule: for LTX/WAN-class giant assets, default to header-only / metadata-only inspection in WSL. Do not materialize tensors, assemble full runtimes, initialize full pipelines, or run forward passes unless the user explicitly asks. Prefer GGUF metadata readers and SafeTensors header readers first.
 
 ---
