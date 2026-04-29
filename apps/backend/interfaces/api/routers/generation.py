@@ -1105,6 +1105,49 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
 
         return normalized
 
+    def _parse_video_output_options(
+        payload: Dict[str, Any],
+        *,
+        route_label: str,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        extras_updates: Dict[str, Any] = {}
+        if "video_return_frames" in payload:
+            raw_return_frames = payload.get("video_return_frames")
+            if raw_return_frames is not None and not isinstance(raw_return_frames, bool):
+                raise HTTPException(status_code=400, detail="'video_return_frames' must be a boolean when provided")
+            if isinstance(raw_return_frames, bool):
+                extras_updates["video_return_frames"] = raw_return_frames
+
+        try:
+            from apps.backend.core.params.video import VideoExportOptions
+
+            video_options = VideoExportOptions(
+                filename_prefix=(str(payload.get("video_filename_prefix")).strip() if payload.get("video_filename_prefix") else None),
+                format=(str(payload.get("video_format")).strip() if payload.get("video_format") else None),
+                pix_fmt=(str(payload.get("video_pix_fmt")).strip() if payload.get("video_pix_fmt") else None),
+                crf=(int(payload.get("video_crf")) if payload.get("video_crf") is not None else None),
+                loop_count=(int(payload.get("video_loop_count")) if payload.get("video_loop_count") is not None else None),
+                pingpong=_optional_bool_field(payload, "video_pingpong"),
+                save_metadata=_optional_bool_field(payload, "video_save_metadata"),
+                save_output=_optional_bool_field(payload, "video_save_output"),
+                trim_to_audio=_optional_bool_field(payload, "video_trim_to_audio"),
+            ).as_dict()
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _router_log.warning("%s video export options validation failed: %s", route_label, exc)
+            raise HTTPException(
+                status_code=400,
+                detail=public_http_error_detail(exc, fallback="Invalid video export options"),
+            ) from exc
+
+        video_interpolation = _optional_video_interpolation_field(payload)
+        if video_interpolation is not None:
+            extras_updates["video_interpolation"] = video_interpolation
+        video_upscaling = _optional_video_upscaling_field(payload)
+        if video_upscaling is not None:
+            extras_updates["video_upscaling"] = video_upscaling
+        return video_options, extras_updates
 
     def _require_options_bool(options_snapshot: Any, key: str) -> bool:
         value = getattr(options_snapshot, key, False)
@@ -5410,42 +5453,8 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         seed_val = parsed.seed
         cfg_val = parsed.guidance_scale
 
-        if "video_return_frames" in payload:
-            raw_return_frames = payload.get("video_return_frames")
-            if raw_return_frames is not None and not isinstance(raw_return_frames, bool):
-                raise HTTPException(status_code=400, detail="'video_return_frames' must be a boolean when provided")
-            if isinstance(raw_return_frames, bool):
-                extras["video_return_frames"] = raw_return_frames
-        # Video export options (structured in request.video_options; also kept in extras.video for debugging)
-        video_options = None
-        try:
-            from apps.backend.core.params.video import VideoExportOptions
-
-            video_options = VideoExportOptions(
-                filename_prefix=(str(payload.get("video_filename_prefix")).strip() if payload.get("video_filename_prefix") else None),
-                format=(str(payload.get("video_format")).strip() if payload.get("video_format") else None),
-                pix_fmt=(str(payload.get("video_pix_fmt")).strip() if payload.get("video_pix_fmt") else None),
-                crf=(int(payload.get("video_crf")) if payload.get("video_crf") is not None else None),
-                loop_count=(int(payload.get("video_loop_count")) if payload.get("video_loop_count") is not None else None),
-                pingpong=_optional_bool_field(payload, "video_pingpong"),
-                save_metadata=_optional_bool_field(payload, "video_save_metadata"),
-                save_output=_optional_bool_field(payload, "video_save_output"),
-                trim_to_audio=_optional_bool_field(payload, "video_trim_to_audio"),
-            ).as_dict()
-        except HTTPException:
-            raise
-        except Exception as exc:
-            _router_log.warning("txt2vid video export options validation failed: %s", exc)
-            raise HTTPException(
-                status_code=400,
-                detail=public_http_error_detail(exc, fallback="Invalid video export options"),
-            ) from exc
-        video_interpolation = _optional_video_interpolation_field(payload)
-        if video_interpolation is not None:
-            extras["video_interpolation"] = video_interpolation
-        video_upscaling = _optional_video_upscaling_field(payload)
-        if video_upscaling is not None:
-            extras["video_upscaling"] = video_upscaling
+        video_options, video_extras_updates = _parse_video_output_options(payload, route_label="txt2vid")
+        extras.update(video_extras_updates)
         if use_generic_video_route:
             if model_ref is None:
                 model_ref, _checkpoint_record = _resolve_generic_video_checkpoint_contract(
@@ -5810,41 +5819,8 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                 detail=public_http_error_detail(exc, fallback="Invalid 'img2vid_init_image' payload"),
             ) from None
 
-        if "video_return_frames" in payload:
-            raw_return_frames = payload.get("video_return_frames")
-            if raw_return_frames is not None and not isinstance(raw_return_frames, bool):
-                raise HTTPException(status_code=400, detail="'video_return_frames' must be a boolean when provided")
-            if isinstance(raw_return_frames, bool):
-                extras["video_return_frames"] = raw_return_frames
-        video_options = None
-        try:
-            from apps.backend.core.params.video import VideoExportOptions
-
-            video_options = VideoExportOptions(
-                filename_prefix=(str(payload.get("video_filename_prefix")).strip() if payload.get("video_filename_prefix") else None),
-                format=(str(payload.get("video_format")).strip() if payload.get("video_format") else None),
-                pix_fmt=(str(payload.get("video_pix_fmt")).strip() if payload.get("video_pix_fmt") else None),
-                crf=(int(payload.get("video_crf")) if payload.get("video_crf") is not None else None),
-                loop_count=(int(payload.get("video_loop_count")) if payload.get("video_loop_count") is not None else None),
-                pingpong=_optional_bool_field(payload, "video_pingpong"),
-                save_metadata=_optional_bool_field(payload, "video_save_metadata"),
-                save_output=_optional_bool_field(payload, "video_save_output"),
-                trim_to_audio=_optional_bool_field(payload, "video_trim_to_audio"),
-            ).as_dict()
-        except HTTPException:
-            raise
-        except Exception as exc:
-            _router_log.warning("img2vid video export options validation failed: %s", exc)
-            raise HTTPException(
-                status_code=400,
-                detail=public_http_error_detail(exc, fallback="Invalid video export options"),
-            ) from exc
-        video_interpolation = _optional_video_interpolation_field(payload)
-        if video_interpolation is not None:
-            extras["video_interpolation"] = video_interpolation
-        video_upscaling = _optional_video_upscaling_field(payload)
-        if video_upscaling is not None:
-            extras["video_upscaling"] = video_upscaling
+        video_options, video_extras_updates = _parse_video_output_options(payload, route_label="img2vid")
+        extras.update(video_extras_updates)
         if use_generic_video_route:
             if model_ref is None:
                 model_ref, _checkpoint_record = _resolve_generic_video_checkpoint_contract(
@@ -6520,42 +6496,8 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
             field="mask_video",
         )
 
-        if "video_return_frames" in payload:
-            raw_return_frames = payload.get("video_return_frames")
-            if raw_return_frames is not None and not isinstance(raw_return_frames, bool):
-                raise HTTPException(status_code=400, detail="'video_return_frames' must be a boolean when provided")
-            if isinstance(raw_return_frames, bool):
-                extras["video_return_frames"] = raw_return_frames
-
-        video_options = None
-        try:
-            from apps.backend.core.params.video import VideoExportOptions
-
-            video_options = VideoExportOptions(
-                filename_prefix=(str(payload.get("video_filename_prefix")).strip() if payload.get("video_filename_prefix") else None),
-                format=(str(payload.get("video_format")).strip() if payload.get("video_format") else None),
-                pix_fmt=(str(payload.get("video_pix_fmt")).strip() if payload.get("video_pix_fmt") else None),
-                crf=(int(payload.get("video_crf")) if payload.get("video_crf") is not None else None),
-                loop_count=(int(payload.get("video_loop_count")) if payload.get("video_loop_count") is not None else None),
-                pingpong=_optional_bool_field(payload, "video_pingpong"),
-                save_metadata=_optional_bool_field(payload, "video_save_metadata"),
-                save_output=_optional_bool_field(payload, "video_save_output"),
-                trim_to_audio=_optional_bool_field(payload, "video_trim_to_audio"),
-            ).as_dict()
-        except HTTPException:
-            raise
-        except Exception as exc:
-            _router_log.warning("vid2vid video export options validation failed: %s", exc)
-            raise HTTPException(
-                status_code=400,
-                detail=public_http_error_detail(exc, fallback="Invalid video export options"),
-            ) from exc
-        video_interpolation = _optional_video_interpolation_field(payload)
-        if video_interpolation is not None:
-            extras["video_interpolation"] = video_interpolation
-        video_upscaling = _optional_video_upscaling_field(payload)
-        if video_upscaling is not None:
-            extras["video_upscaling"] = video_upscaling
+        video_options, video_extras_updates = _parse_video_output_options(payload, route_label="vid2vid")
+        extras.update(video_extras_updates)
 
         smart_offload, smart_fallback, smart_cache = _resolve_smart_flags()
         request = Vid2VidRequest(
