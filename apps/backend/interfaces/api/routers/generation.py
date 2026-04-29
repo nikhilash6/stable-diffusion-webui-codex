@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Generation API routes (txt2img/img2img/image-automation/txt2vid/img2vid/vid2vid).
-Contains request parsing and payload validation (including hires tile config via `extras.hires.tile` / `img2img_hires_tile`, Z-Image Turbo/Base
+Contains request parsing and payload validation (including hires tile config via `extras.hires.tile` / `img2img_extras.hires.tile`, Z-Image Turbo/Base
 `extras.zimage_variant`, and WAN video export options like `video_return_frames`), and delegates image task workers to
 `apps/backend/interfaces/api/tasks/generation_tasks.py`.
 Also owns the backend-owned `/api/image-automation` envelope (loop/seed/prompt/init-source parsing plus repo-fenced folder and wildcard roots),
@@ -16,7 +16,7 @@ SUPIR mode under `img2img_extras.supir` for truthful SDXL img2img/inpaint admiss
 when SUPIR mode is active.
 Txt2img model-stage ownership is explicit: top-level `extras.swap_model` is the first-pass mid-generation stage config, `extras.hires.swap_model`
 is the selector-only second-pass replacement seam, and `extras.refiner` / `extras.hires.refiner` remain SDXL-native refiner stages.
-Hires supports sampler/scheduler overrides for the hires pass (txt2img: `extras.hires.sampler` / `extras.hires.scheduler`; img2img: `img2img_hires_sampling` / `img2img_hires_scheduler`) and validates override compatibility at API parse-time.
+Hires supports sampler/scheduler overrides for the hires pass (txt2img: `extras.hires.sampler` / `extras.hires.scheduler`; img2img: `img2img_extras.hires.sampler` / `img2img_extras.hires.scheduler`) and validates override compatibility at API parse-time.
 Img2img masking uses Forge/A1111 “Only masked” semantics only (no whole-picture inpaint area), supports optional multi-region inpaint passes via
 `img2img_mask_region_split`, and is rejected at request time when the active engine capability surface does not support mask/inpaint semantics.
 The public masked-runtime field is now `img2img_inpaint_mode`; the router rejects removed `img2img_mask_enforcement`, validates exact-engine mode support,
@@ -154,8 +154,25 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
     _TXT2IMG_EXTRAS_KEYS = set(EXTRAS_KEYS.ALL) | _IMAGE_REQUEST_SELECTOR_KEYS
     _TXT2IMG_HIRES_KEYS = set(TXT2IMG_KEYS.HIRES_ALL)
     _IMG2IMG_EXTRAS_KEYS = (
-        (set(EXTRAS_KEYS.ALL) | {"supir"}) - {"hires", "refiner", "batch_size", "batch_count"}
+        (set(EXTRAS_KEYS.ALL) | {"supir"}) - {"refiner", "batch_size", "batch_count"}
     ) | _IMAGE_REQUEST_SELECTOR_KEYS
+    _IMG2IMG_HIRES_KEYS = {
+        "cfg",
+        "denoise",
+        "distilled_cfg",
+        "enable",
+        "negative_prompt",
+        "prompt",
+        "resize_x",
+        "resize_y",
+        "sampler",
+        "scale",
+        "scheduler",
+        "steps",
+        "tile",
+        "upscaler",
+    }
+    _IMG2IMG_UNSUPPORTED_HIRES_KEYS = {"modules", "refiner", "swap_model"}
     _IMAGE_AUTOMATION_ALLOWED_KEYS = {"mode", "template", "loop", "seed_policy", "prompt_source", "init_source"}
     _IMAGE_AUTOMATION_LOOP_KEYS = {"mode", "count", "delay_ms", "stop_on_error"}
     _IMAGE_AUTOMATION_SEED_POLICY_KEYS = {"mode", "increment_step"}
@@ -176,20 +193,6 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         "img2img_eta_noise_seed_delta",
         "img2img_extras",
         "img2img_height",
-        "img2img_hires_cfg",
-        "img2img_hires_denoise",
-        "img2img_hires_distilled_cfg",
-        "img2img_hires_enable",
-        "img2img_hires_neg_prompt",
-        "img2img_hires_prompt",
-        "img2img_hires_resize_x",
-        "img2img_hires_resize_y",
-        "img2img_hires_sampling",
-        "img2img_hires_scale",
-        "img2img_hires_scheduler",
-        "img2img_hires_steps",
-        "img2img_hires_tile",
-        "img2img_hires_upscaler",
         "img2img_image_cfg_scale",
         "img2img_init_image",
         "img2img_inpaint_full_res_padding",
@@ -2311,6 +2314,130 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
 
         return extras, hires_cfg
 
+    def _reject_removed_img2img_second_pass_keys(payload: Mapping[str, Any]) -> None:
+        for key in payload.keys():
+            if not isinstance(key, str) or not key.startswith("img2img_"):
+                continue
+            suffix = key[len("img2img_"):]
+            if suffix.startswith("hires_") or suffix.startswith("hr_"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unsupported removed img2img hires key: {key}. Use 'img2img_extras.hires'.",
+                )
+
+    def _parse_img2img_nested_hires_config(
+        hires: object,
+        *,
+        default_denoise: float,
+        default_cfg: float,
+        default_distilled: float,
+    ) -> Optional[Dict[str, Any]]:
+        if hires is None:
+            return None
+        if not isinstance(hires, dict):
+            raise HTTPException(status_code=400, detail="'img2img_extras.hires' must be an object")
+        for key in sorted(_IMG2IMG_UNSUPPORTED_HIRES_KEYS):
+            if key in hires:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'img2img_extras.hires.{key}' is unsupported for img2img.",
+                )
+        _reject_unknown_keys(hires, _IMG2IMG_HIRES_KEYS, "img2img_extras.hires")
+        if _optional_bool_field(hires, "enable") is not True:
+            return None
+        try:
+            tile_cfg = tile_config_from_payload(hires.get("tile"), context="img2img_extras.hires.tile")
+        except ValueError as exc:
+            _router_log.warning("img2img_extras.hires.tile validation failed: %s", exc)
+            raise HTTPException(
+                status_code=400,
+                detail=public_http_error_detail(exc, fallback="Invalid 'img2img_extras.hires.tile' configuration"),
+            ) from None
+        return {
+            "denoise": (
+                _require_float_field(hires, "denoise", minimum=0.0, maximum=1.0)
+                if "denoise" in hires
+                else float(default_denoise)
+            ),
+            "scale": _require_float_field(hires, "scale") if "scale" in hires else 1.0,
+            "resize_x": _require_int_field(hires, "resize_x", minimum=0) if "resize_x" in hires else 0,
+            "resize_y": _require_int_field(hires, "resize_y", minimum=0) if "resize_y" in hires else 0,
+            "steps": _require_int_field(hires, "steps", minimum=0) if "steps" in hires else 0,
+            "upscaler": (
+                _require_str_field(hires, "upscaler", allow_empty=False, trim=True)
+                if "upscaler" in hires
+                else "Latent"
+            ),
+            "tile": {
+                "tile": int(tile_cfg.tile),
+                "overlap": int(tile_cfg.overlap),
+                "fallback_on_oom": bool(tile_cfg.fallback_on_oom),
+                "min_tile": int(tile_cfg.min_tile),
+            },
+            "sampler": hires.get("sampler"),
+            "scheduler": hires.get("scheduler"),
+            "prompt": hires.get("prompt") or "",
+            "negative_prompt": hires.get("negative_prompt") or "",
+            "cfg": _require_float_field(hires, "cfg") if hires.get("cfg") is not None else float(default_cfg),
+            "distilled_cfg": (
+                _require_float_field(hires, "distilled_cfg")
+                if hires.get("distilled_cfg") is not None
+                else float(default_distilled)
+            ),
+        }
+
+    def _parse_img2img_nested_hires_from_extras(
+        raw_extras: object,
+        *,
+        default_denoise: float,
+        default_cfg: float,
+        default_distilled: float,
+    ) -> Optional[Dict[str, Any]]:
+        if raw_extras is None:
+            return None
+        if not isinstance(raw_extras, dict):
+            raise HTTPException(status_code=400, detail="'img2img_extras' must be an object")
+        _reject_unknown_keys(raw_extras, _IMG2IMG_EXTRAS_KEYS, "img2img_extras")
+        return _parse_img2img_nested_hires_config(
+            raw_extras.get("hires"),
+            default_denoise=default_denoise,
+            default_cfg=default_cfg,
+            default_distilled=default_distilled,
+        )
+
+    def _validate_pre_task_img2img_payload(payload: Mapping[str, Any]) -> None:
+        _reject_removed_img2img_second_pass_keys(payload)
+        hires_cfg = _parse_img2img_nested_hires_from_extras(
+            payload.get("img2img_extras"),
+            default_denoise=0.0,
+            default_cfg=1.0,
+            default_distilled=3.5,
+        )
+        if hires_cfg is None:
+            return
+        if "img2img_mask" in payload and payload.get("img2img_mask") is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "img2img hires does not support masks/inpaint in this backend seam yet. "
+                    "Disable hires or remove 'img2img_mask'."
+                ),
+            )
+        raw_extras = payload.get("img2img_extras")
+        raw_supir_payload = raw_extras.get("supir") if isinstance(raw_extras, dict) else None
+        try:
+            supir_config = parse_supir_mode_config(raw_supir_payload)
+        except SupirConfigError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=public_http_error_detail(exc, fallback="Invalid 'img2img_extras.supir' configuration"),
+            ) from None
+        if supir_config is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="'img2img_extras.supir' cannot be combined with img2img hires in tranche 1.",
+            )
+
     def _resolve_model_ref_from_sha_or_name(
         *,
         model_override: Any,
@@ -4359,6 +4486,8 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
             template,
             route_mode=GenerationRouteMode.TXT2IMG if mode == "txt2img" else GenerationRouteMode.IMG2IMG,
         )
+        if mode == "img2img":
+            _validate_pre_task_img2img_payload(template)
 
         batch_count_field = "img2img_batch_count" if mode == "img2img" else "batch_count"
         batch_size_field = "img2img_batch_size" if mode == "img2img" else "batch_size"
@@ -4653,6 +4782,7 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
             ) from None
 
     def prepare_img2img(payload: Dict[str, Any]) -> Tuple[Img2ImgRequest, str, Optional[str]]:
+        _reject_removed_img2img_second_pass_keys(payload)
         _reject_unknown_keys(payload, _IMG2IMG_ALLOWED_KEYS, "img2img")
         settings_revision = _require_int_field(payload, "settings_revision", minimum=0)
         if "img2img_init_image" not in payload:
@@ -4848,100 +4978,8 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         clip_skip = core.clip_skip
         noise_source = core.noise_source
         ensd_raw = core.ensd_raw
-
-        def _reject_legacy_hires_keys(payload: Mapping[str, Any]) -> None:
-            prefix = "img2img_"
-            legacy_marker = "hr_"
-            for key in payload.keys():
-                if not isinstance(key, str):
-                    continue
-                if key.startswith(prefix) and key[len(prefix):].startswith(legacy_marker):
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Unsupported legacy hires key: {key}. Use 'img2img_hires_*'.",
-                    )
-
-        _reject_legacy_hires_keys(payload)
-
-        enable_hires = _require_bool_field(payload, "img2img_hires_enable") if "img2img_hires_enable" in payload else False
-        if enable_hires and mask_image is not None:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "img2img hires does not support masks/inpaint in this backend seam yet. "
-                    "Disable hires or remove 'img2img_mask'."
-                ),
-            )
-        if enable_hires:
-            try:
-                hr_tile_cfg = tile_config_from_payload(payload.get("img2img_hires_tile"), context="img2img_hires_tile")
-            except ValueError as exc:
-                _router_log.warning("img2img_hires_tile validation failed: %s", exc)
-                raise HTTPException(
-                    status_code=400,
-                    detail=public_http_error_detail(exc, fallback="Invalid 'img2img_hires_tile' configuration"),
-                ) from None
-            hr_tile = {
-                "tile": int(hr_tile_cfg.tile),
-                "overlap": int(hr_tile_cfg.overlap),
-                "fallback_on_oom": bool(hr_tile_cfg.fallback_on_oom),
-                "min_tile": int(hr_tile_cfg.min_tile),
-            }
-            hr_sampler_name = payload.get("img2img_hires_sampling")
-            hr_sampler_name = _parse_optional_sampler_field(
-                value=hr_sampler_name,
-                field_name="img2img_hires_sampling",
-            )
-            if hr_sampler_name is not None:
-                _validate_er_sde_release_scope(
-                    engine_key=engine_key,
-                    sampler=hr_sampler_name,
-                    field_name="img2img_hires_sampling",
-                )
-            hr_scheduler = _parse_optional_scheduler_field(
-                value=payload.get("img2img_hires_scheduler"),
-                field_name="img2img_hires_scheduler",
-            )
-            if hr_sampler_name is not None or hr_scheduler is not None:
-                resolved_hr_sampler, resolved_hr_scheduler = _resolve_hires_sampler_scheduler_override(
-                    base_sampler=str(sampler_name),
-                    base_scheduler=str(scheduler_name),
-                    sampler_override=hr_sampler_name,
-                    scheduler_override=hr_scheduler,
-                    sampler_field_name="img2img_hires_sampling",
-                    scheduler_field_name="img2img_hires_scheduler",
-                )
-                if hr_sampler_name is not None:
-                    hr_sampler_name = resolved_hr_sampler
-                hr_scheduler = resolved_hr_scheduler
-                _enforce_family_sampler_scheduler_support(
-                    engine_key=engine_key,
-                    family_name=family_name,
-                    family_capability=family_capability,
-                    sampler_name=str(resolved_hr_sampler),
-                    scheduler_name=str(resolved_hr_scheduler),
-                    sampler_field_name="img2img_hires_sampling",
-                    scheduler_field_name="img2img_hires_scheduler",
-                )
-            hires_data = {
-                "enable": True,
-                "scale": _require_float_field(payload, 'img2img_hires_scale') if 'img2img_hires_scale' in payload else 1.0,
-                "resize_x": _require_int_field(payload, "img2img_hires_resize_x", minimum=0) if "img2img_hires_resize_x" in payload else 0,
-                "resize_y": _require_int_field(payload, "img2img_hires_resize_y", minimum=0) if "img2img_hires_resize_y" in payload else 0,
-                "steps": _require_int_field(payload, "img2img_hires_steps", minimum=0) if "img2img_hires_steps" in payload else 0,
-                "denoise": _require_float_field(payload, 'img2img_hires_denoise', minimum=0.0, maximum=1.0) if 'img2img_hires_denoise' in payload else denoise,
-                "upscaler": payload.get('img2img_hires_upscaler', 'Latent'),
-                "tile": hr_tile,
-                "additional_modules": [],
-                "sampler_name": hr_sampler_name,
-                "scheduler": hr_scheduler,
-                "prompt": payload.get('img2img_hires_prompt', ''),
-                "negative_prompt": payload.get('img2img_hires_neg_prompt', ''),
-                "cfg": _require_float_field(payload, 'img2img_hires_cfg') if 'img2img_hires_cfg' in payload else cfg_scale,
-                "distilled_cfg": _require_float_field(payload, 'img2img_hires_distilled_cfg') if 'img2img_hires_distilled_cfg' in payload else (distilled_cfg_scale or 3.5),
-            }
-        else:
-            hires_data = {"enable": False}
+        hires_cfg: Optional[Dict[str, Any]] = None
+        hires_data = {"enable": False}
 
         resize_mode = _parse_img2img_resize_mode(payload)
         if resize_mode is not None and engine_key != "zimage":
@@ -4965,6 +5003,13 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
             _reject_unknown_keys(raw_extras, _IMG2IMG_EXTRAS_KEYS, "img2img_extras")
             raw_extras = dict(raw_extras)
             raw_supir_payload = raw_extras.get("supir")
+            hires_cfg = _parse_img2img_nested_hires_config(
+                raw_extras.get("hires"),
+                default_denoise=denoise,
+                default_cfg=cfg_scale,
+                default_distilled=distilled_cfg_scale or 3.5,
+            )
+            raw_extras.pop("hires", None)
             ip_adapter_payload = _parse_ip_adapter_payload(
                 raw_extras.get("ip_adapter"),
                 field_name="img2img_extras.ip_adapter",
@@ -5050,6 +5095,58 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                 extras["model_format"] = model_format
             if vae_source is not None:
                 extras["vae_source"] = vae_source
+        if hires_cfg is not None:
+            hires_sampler = _parse_optional_sampler_field(
+                value=hires_cfg.get("sampler"),
+                field_name="img2img_extras.hires.sampler",
+            )
+            if hires_sampler is not None:
+                hires_cfg["sampler"] = hires_sampler
+                _validate_er_sde_release_scope(
+                    engine_key=engine_key,
+                    sampler=hires_sampler,
+                    field_name="img2img_extras.hires.sampler",
+                )
+            hires_scheduler = _parse_optional_scheduler_field(
+                value=hires_cfg.get("scheduler"),
+                field_name="img2img_extras.hires.scheduler",
+            )
+            if hires_sampler is not None or hires_scheduler is not None:
+                resolved_hires_sampler, resolved_hires_scheduler = _resolve_hires_sampler_scheduler_override(
+                    base_sampler=str(sampler_name),
+                    base_scheduler=str(scheduler_name),
+                    sampler_override=hires_sampler,
+                    scheduler_override=hires_scheduler,
+                    sampler_field_name="img2img_extras.hires.sampler",
+                    scheduler_field_name="img2img_extras.hires.scheduler",
+                )
+                if hires_sampler is not None:
+                    hires_cfg["sampler"] = resolved_hires_sampler
+                hires_cfg["scheduler"] = resolved_hires_scheduler
+                _enforce_family_sampler_scheduler_support(
+                    engine_key=engine_key,
+                    family_name=family_name,
+                    family_capability=family_capability,
+                    sampler_name=str(resolved_hires_sampler),
+                    scheduler_name=str(resolved_hires_scheduler),
+                    sampler_field_name="img2img_extras.hires.sampler",
+                    scheduler_field_name="img2img_extras.hires.scheduler",
+                )
+            hires_data = _build_hires(
+                hires_cfg,
+                width_val,
+                height_val,
+                cfg_scale,
+                distilled_cfg_scale or 3.5,
+            )
+        if bool(hires_data.get("enable")) and mask_image is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "img2img hires does not support masks/inpaint in this backend seam yet. "
+                    "Disable hires or remove 'img2img_mask'."
+                ),
+            )
         if isinstance(extras.get("ip_adapter"), dict):
             _enforce_ip_adapter_engine_support(
                 engine_key=engine_key,
@@ -6904,6 +7001,7 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
             raise HTTPException(status_code=400, detail="Payload must be JSON object")
         _enforce_generation_settings_contract(payload)
         _validate_route_engine_capability(payload, route_mode=GenerationRouteMode.IMG2IMG)
+        _validate_pre_task_img2img_payload(payload)
 
         device = _parse_explicit_device(
             payload,

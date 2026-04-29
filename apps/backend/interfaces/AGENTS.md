@@ -56,4 +56,4 @@ Status: Active
 - 2026-01-06: `/api/{samplers,schedulers}` now returns minimal entries; `/api/{txt2img,img2img}` validates canonical sampler/scheduler selection (including per-sampler scheduler compatibility) and fails fast with HTTP 400.
 - 2026-01-06: `/api/{txt2vid,img2vid}` default sampler now uses `uni-pc` (scheduler `simple`) to match WAN22 diffusers scheduler metadata.
 - 2026-01-08: `run_api.py` was modularized into router modules under `apps/backend/interfaces/api/routers` (composition-only entrypoint; route logic moved to focused router files).
-- 2026-03-06: `/api/img2img` no longer hard-rejects FLUX.2 partial denoise at request parse-time now that the backend continuation path is real; the same router explicitly rejects masked FLUX.2 hires (`img2img_mask` + `img2img_hires_enable`) until that backend path exists.
+- 2026-03-06: `/api/img2img` no longer hard-rejects FLUX.2 partial denoise at request parse-time now that the backend continuation path is real; the same router explicitly rejects masked FLUX.2 hires (`img2img_mask` + `img2img_extras.hires.enable`) until that backend path exists.

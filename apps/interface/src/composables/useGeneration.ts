@@ -16,8 +16,8 @@ Delegates the shared task-stream/resume/history shell to `useTaskRunLifecycle.ts
 automation replay recovery, and result/history shaping local. Persists a per-tab resume marker to `localStorage` and auto-reattaches to
 in-flight tasks after reload (SSE replay via `after` / `lastEventId`), reconstructing truthful `currentRun` / history-selection state and
 preserving wall-clock gentime for runs that finish after resume.
-FLUX.2 img2img guidance emission is variant-aware (`img2img_cfg_scale` xor `img2img_distilled_cfg_scale`), and img2img hires emission is
-shared with the canonical hires payload builder while remaining blocked for masked runs. Native SDXL SUPIR mode stays on the single nested frontend owner
+FLUX.2 img2img guidance emission is variant-aware (`img2img_cfg_scale` xor `img2img_distilled_cfg_scale`), and img2img hires emission uses
+the nested `img2img_extras.hires` owner while remaining blocked for masked runs. Native SDXL SUPIR mode stays on the single nested frontend owner
 `params.supir` and is emitted only through `img2img_extras.supir` for truthful SDXL img2img/inpaint runs, with diagnostics-backed sampler metadata
 owning the effective runtime sampler/scheduler pair and fail-loud rejection of stale APG/advanced-guidance overlap.
 Masked img2img runtime selection now flows through strict `inpaintMode` / `img2img_inpaint_mode`, with exact-engine mode discoverability coming from
@@ -64,7 +64,7 @@ import { useQuicksettingsStore } from '../stores/quicksettings'
 import { useEngineCapabilitiesStore } from '../stores/engine_capabilities'
 import { useUpscalersStore } from '../stores/upscalers'
 import {
-  buildImg2ImgHiresPayloadFields,
+  buildNormalizedHiresOptions,
   buildTxt2ImgPayload,
   type NestedStageSelectorPayloads,
   type Txt2ImgRequest,
@@ -457,6 +457,12 @@ export function buildImg2ImgPayload(args: BuildImg2ImgPayloadArgs): Record<strin
   if (hiresEnabled && params.hires?.refiner?.enabled) {
     throw new Error('img2img hires refiner is not supported yet. Disable the hires refiner or switch back to txt2img.')
   }
+  const hiresModules = Array.isArray(params.hires?.modules)
+    ? params.hires.modules.map((entry) => String(entry ?? '').trim()).filter((entry) => entry.length > 0)
+    : []
+  if (hiresEnabled && hiresModules.length > 0) {
+    throw new Error('img2img hires modules are not supported yet. Remove hires modules or switch back to txt2img.')
+  }
   if (params.refiner?.enabled) {
     throw new Error('img2img refiner is not supported yet. Disable the refiner or switch back to txt2img.')
   }
@@ -483,18 +489,19 @@ export function buildImg2ImgPayload(args: BuildImg2ImgPayloadArgs): Record<strin
     img2img_extras: { ...args.extras },
   }
   if (hiresEnabled) {
-    Object.assign(
-      payload,
-      buildImg2ImgHiresPayloadFields(
-        {
-          prompt: params.prompt,
-          negativePrompt: args.supportsNegativePrompt ? params.negativePrompt : '',
-          hires: params.hires,
-        },
-        args.guidanceMode,
-        { hiresFallbackOnOom: args.hiresFallbackOnOom, hiresMinTile: args.hiresMinTile },
-      ),
+    const hiresPayload = buildNormalizedHiresOptions(
+      {
+        prompt: params.prompt,
+        negativePrompt: args.supportsNegativePrompt ? params.negativePrompt : '',
+        hires: params.hires,
+      },
+      args.guidanceMode,
+      { hiresFallbackOnOom: args.hiresFallbackOnOom, hiresMinTile: args.hiresMinTile },
     )
+    if (hiresPayload) {
+      const img2imgExtras = payload.img2img_extras as Record<string, unknown>
+      img2imgExtras.hires = hiresPayload
+    }
   }
   if (args.engineId === 'zimage' && !useMask) {
     payload.img2img_resize_mode = resizeMode

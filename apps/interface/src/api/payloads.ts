@@ -9,8 +9,8 @@ Required Notice: see NOTICE
 Purpose: Zod request schemas + payload builders for image generation (txt2img/img2img).
 Defines the canonical `Txt2ImgRequestSchema`, UI form-state types, and helpers to build request payloads (including hires/refiner) and to
 apply engine-agnostic request normalization/validation (including required `settings_revision`). FLUX.2 guidance mode is checkpoint-resolved
-by callers (`cfg` for base-4B, `distilled_cfg` for distilled 4B) instead of being hard-coded by engine id, and hires normalization is shared
-between txt2img (`extras.hires`) and img2img (`img2img_hires_*`) payload builders. The canonical txt2img schema now requires the explicit
+by callers (`cfg` for base-4B, `distilled_cfg` for distilled 4B) instead of being hard-coded by engine id, and hires normalization feeds the
+nested hires owners used by txt2img and img2img payload builders. The canonical txt2img schema now requires the explicit
 image selectors carried in `extras` (`model_sha`, `checkpoint_core_only`, `model_format`, `vae_source`) so local validation matches the
 backend image contract.
 
@@ -33,10 +33,9 @@ Symbols (top-level; keep in sync; no ghosts):
 - `RefinerFormState` (interface): UI form state for refiner options.
  - `Txt2ImgFormState` (interface): UI form state for txt2img/img2img payload building.
  - `NestedStageSelectorPayloads` (interface): Optional resolved selector payloads for nested stage-local `swap_model` / `refiner` seams.
- - `BuildImagePayloadOptions` (interface): Shared payload-builder options for hires normalization and nested selector injection.
+- `BuildImagePayloadOptions` (interface): Shared payload-builder options for hires normalization and nested selector injection.
 - `normalizeDevice` (function): Normalizes and validates a device token.
-- `buildNormalizedHiresOptions` (function): Normalizes shared hires form state into the canonical hires payload shape used by txt2img/img2img builders.
-- `buildImg2ImgHiresPayloadFields` (function): Flattens normalized hires state into the img2img `img2img_hires_*` contract.
+- `buildNormalizedHiresOptions` (function): Normalizes shared hires form state into the canonical nested hires payload shape used by txt2img/img2img builders.
 - `buildTxt2ImgPayload` (function): Builds and validates a `Txt2ImgRequest` from UI form state (supports hires tile prefs: fallback + min_tile).
 - `formatZodError` (function): Converts Zod errors (or unknown errors) into a readable message.
 */
@@ -420,7 +419,7 @@ function resolveGuidanceMode(state: Txt2ImgFormState): Txt2ImgGuidanceMode {
   return 'cfg'
 }
 
-function buildNormalizedHiresOptions(
+export function buildNormalizedHiresOptions(
   state: Pick<Txt2ImgFormState, 'prompt' | 'negativePrompt' | 'hires'> & Partial<Pick<Txt2ImgFormState, 'steps'>>,
   guidanceMode: Txt2ImgGuidanceMode,
   opts: BuildImagePayloadOptions = {},
@@ -491,33 +490,6 @@ function buildNormalizedHiresOptions(
       opts.nestedSelectorPayloads?.hiresRefiner,
     ),
   })
-}
-
-export function buildImg2ImgHiresPayloadFields(
-  state: Pick<Txt2ImgFormState, 'prompt' | 'negativePrompt' | 'hires'>,
-  guidanceMode: Txt2ImgGuidanceMode,
-  opts: BuildImagePayloadOptions = {},
-): Record<string, unknown> {
-  const hires = buildNormalizedHiresOptions(state, guidanceMode, opts)
-  if (!hires) return {}
-
-  const payload: Record<string, unknown> = {
-    img2img_hires_enable: true,
-    img2img_hires_denoise: hires.denoise,
-    img2img_hires_scale: hires.scale,
-    img2img_hires_resize_x: hires.resize_x,
-    img2img_hires_resize_y: hires.resize_y,
-    img2img_hires_steps: hires.steps,
-    img2img_hires_upscaler: hires.upscaler,
-    img2img_hires_tile: hires.tile,
-    img2img_hires_prompt: hires.prompt ?? '',
-    img2img_hires_neg_prompt: hires.negative_prompt ?? '',
-  }
-  if (hires.sampler) payload.img2img_hires_sampling = hires.sampler
-  if (hires.scheduler) payload.img2img_hires_scheduler = hires.scheduler
-  if (typeof hires.cfg === 'number') payload.img2img_hires_cfg = hires.cfg
-  if (typeof hires.distilled_cfg === 'number') payload.img2img_hires_distilled_cfg = hires.distilled_cfg
-  return payload
 }
 
 export function buildTxt2ImgPayload(
