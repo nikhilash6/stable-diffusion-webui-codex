@@ -31,7 +31,7 @@ Symbols (top-level; keep in sync; no ghosts):
                   :prompt="wan.highPrompt"
                   :negative="wan.highNegative"
                   :hide-negative="wan.hideHighNegativePrompt"
-                  token-engine="wan"
+                  token-engine="wan22_14b"
                   collapsible
                   :open="wan.highPromptOpen"
                   @update:prompt="wan.setHighPromptText"
@@ -56,7 +56,7 @@ Symbols (top-level; keep in sync; no ghosts):
                   :prompt="wan.lowPrompt"
                   :negative="wan.lowNegative"
                   :hide-negative="wan.hideLowNegativePrompt"
-                  token-engine="wan"
+                  token-engine="wan22_14b"
                   collapsible
                   :open="wan.lowPromptOpen"
                   @update:prompt="wan.setLowPromptText"
@@ -835,7 +835,7 @@ Symbols (top-level; keep in sync; no ghosts):
                 :prompt="wan5b.prompt"
                 :negative="wan5b.negativePrompt"
                 :hide-negative="wan5b.hideNegativePrompt"
-                token-engine="wan"
+                token-engine="wan22_5b"
                 :corner-label="wan5b.modeLabel"
                 collapsible
                 :open="wan5b.promptOpen"

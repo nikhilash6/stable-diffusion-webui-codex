@@ -1,6 +1,6 @@
 # apps/interface/src/components/model-tabs Overview
 Date: 2026-03-13
-Last Review: 2026-04-03
+Last Review: 2026-04-28
 Status: Active
 
 ## Purpose
@@ -18,3 +18,4 @@ Status: Active
 - Shared presentational seams belong in `apps/interface/src/components/**`; shared styling belongs in `apps/interface/src/styles/**`.
 - 2026-03-21: `WanVideoWorkspace.vue` now passes the WAN `4n+1` frame contract explicitly into the shared `VideoSettingsCard.vue`; the workspace owns WAN frame alignment instead of relying on shared-component defaults.
 - 2026-04-03: LTX no longer has a live body owner in this folder; the strict geometry/frame/execution-profile contract now renders through `apps/interface/src/views/VideoModelTab.vue` plus `apps/interface/src/views/video-model/VideoModelTabLtxRuntime.vue`.
+- 2026-04-28: While `WanVideoWorkspace.vue` remains reference-only, its maintenance-sync prompt token counters must still use the exact `wan22_14b` token engine; do not keep generic `wan` / `wan22` token-count aliases in this baseline.

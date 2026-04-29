@@ -2650,15 +2650,16 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         engine_key: str,
     ) -> tuple[str | None, Mapping[str, object] | None]:
         from apps.backend.runtime.model_registry.capabilities import (
-            _ENGINE_ID_PRIMARY_FAMILY,
+            primary_family_for_engine_id,
             serialize_family_capabilities,
         )
 
         normalized_engine = str(engine_key or "").strip()
         if normalized_engine == "":
             return None, None
-        family = _ENGINE_ID_PRIMARY_FAMILY.get(normalized_engine)
-        if family is None:
+        try:
+            family = primary_family_for_engine_id(normalized_engine)
+        except KeyError:
             return None, None
         family_capabilities = serialize_family_capabilities()
         capability_contract = family_capabilities.get(family.value)

@@ -118,7 +118,7 @@ Symbols (top-level; keep in sync; no ghosts):
               </button>
             </WanSubHeader>
             <div v-if="highPromptOpen" class="mt-2">
-              <PromptFields v-model:prompt="highPrompt" v-model:negative="highNegative" :hide-negative="hideHighNegativePrompt" token-engine="wan" />
+              <PromptFields v-model:prompt="highPrompt" v-model:negative="highNegative" :hide-negative="hideHighNegativePrompt" token-engine="wan22_14b" />
             </div>
             <LoraModal v-model="showHighPromptLoraModal" :show-negative-target="!hideHighNegativePrompt" @insert="onHighPromptLoraInsert" />
           </div>
@@ -139,7 +139,7 @@ Symbols (top-level; keep in sync; no ghosts):
               </button>
             </WanSubHeader>
             <div v-if="lowPromptOpen" class="mt-2" id="wan-guided-low-prompt">
-              <PromptFields v-model:prompt="lowPrompt" v-model:negative="lowNegative" :hide-negative="hideLowNegativePrompt" token-engine="wan" />
+              <PromptFields v-model:prompt="lowPrompt" v-model:negative="lowNegative" :hide-negative="hideLowNegativePrompt" token-engine="wan22_14b" />
             </div>
             <LoraModal v-model="showLowPromptLoraModal" :show-negative-target="!hideLowNegativePrompt" @insert="onLowPromptLoraInsert" />
           </div>

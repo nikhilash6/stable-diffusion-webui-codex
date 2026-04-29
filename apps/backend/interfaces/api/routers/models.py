@@ -12,7 +12,7 @@ surfaces, embeddings, and engine capabilities.
 Inventory payloads include first-class IP-Adapter model and image-encoder lists from the dedicated roots in `apps/paths.json`.
 Capability surfaces include semantic-engine asset contracts (owner-resolved from canonical engine ids), backend-owned exact-engine inpaint-mode maps,
 and backend-owned dependency checks so the UI can enforce sha-only external asset selection and readiness gating deterministically. Also provides prompt token-counting
-(`/api/models/prompt-token-count`) using vendored offline tokenizers, including FLUX.2 Klein 4B, LTX2, WAN22 animate engine ids, and
+(`/api/models/prompt-token-count`) using vendored offline tokenizers for supported prompt-token engine ids, including FLUX.2 Klein 4B, LTX2, exact WAN ids, and
 Anima runtime-equivalent Qwen+T5 prompt tokenization/max-length checks with the same family-owned offline tokenizer rules used by the runtime. Raw `/api/samplers`
 inventory keeps unsupported rows visible with non-executable metadata (`supported=false`, `default_scheduler=null`, `allowed_schedulers=[]`),
 while supported rows must resolve complete executable registry metadata.
@@ -20,7 +20,7 @@ while supported rows must resolve complete executable registry metadata.
 Symbols (top-level; keep in sync; no ghosts):
 - `build_router` (function): Build the APIRouter for model/inventory endpoints.
 - `_count_anima_tokens` (function): Counts Anima prompt tokens with runtime-equivalent preprocessing and fail-loud max-length checks.
-- `_count_prompt_tokens` (function): Returns tokenizer-accurate prompt token counts for supported semantic engines.
+- `_count_prompt_tokens` (function): Returns tokenizer-accurate prompt token counts for supported prompt-token engine ids.
 - `_sanitize_model_path_input` (function): Sanitizes incoming model path strings (quotes/slashes/whitespace normalization).
 - `_normalize_library_kind` (function): Validates `checkpoint|vae|text_encoder` path-library kinds.
 - `_kind_for_library_key` (function): Resolves library kind from a paths.json key suffix (`_ckpt|_vae|_tenc`).
@@ -86,8 +86,6 @@ _ENGINE_TOKENIZER_KEY: Dict[str, str] = {
     "flux1_chroma": "chroma",
     "zimage": "zimage",
     "anima": "anima",
-    "wan": "wan",
-    "wan22": "wan",
     "wan22_5b": "wan",
     "wan22_14b": "wan",
     "wan22_14b_animate": "wan",
@@ -167,14 +165,14 @@ def _count_prompt_tokens(engine: str, prompt: str) -> int:
     normalized = str(engine or "").strip().lower()
     if not normalized:
         raise RuntimeError("Prompt token count requires a non-empty engine id.")
-    if not prompt and normalized != "anima":
-        return 0
     tokenizer_key = _ENGINE_TOKENIZER_KEY.get(normalized)
     if tokenizer_key is None:
         raise RuntimeError(
             f"Unsupported engine '{engine}' for prompt token count. "
             f"Supported: {', '.join(sorted(_ENGINE_TOKENIZER_KEY.keys()))}."
         )
+    if not prompt and tokenizer_key != "anima":
+        return 0
 
     if tokenizer_key == "anima":
         return _count_anima_tokens(prompt)

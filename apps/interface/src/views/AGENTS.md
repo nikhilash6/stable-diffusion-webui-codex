@@ -1,7 +1,7 @@
 # apps/interface/src/views Overview
 <!-- tags: frontend, views, model-tabs -->
 Date: 2025-10-28
-Last Review: 2026-04-12
+Last Review: 2026-04-28
 Status: Active
 
 ## Purpose
@@ -22,6 +22,7 @@ Status: Active
 - 2026-04-11: `WorkflowsList.vue` may create a replacement tab only when the bound `source_tab_id` is missing. If the stored workflow points at an existing tab of a different exact type, restore must fail loud and let `/api/ui/workflows` own the repair boundary instead of silently rebinding to a fresh tab.
 - 2026-04-12: `ImageModelTab.vue` history apply and `WorkflowsList.vue` workflow restore now share the same image-VAE truth path: fetch fresh inventory/path data, hydrate the store-owned quicksettings VAE/path snapshots, canonicalize through `src/utils/vae_choices.ts`, and apply VAE through quicksettings. History apply invalidates model-catalog cache immediately after the fresh hydrate; workflow restore invalidates before the fresh restore hydrate and again before `/workflows -> /models/:tabId` navigation, so the globally mounted header cannot overwrite the restored VAE with a warm or pre-existing in-flight inventory response.
 - 2026-04-12: `Settings.vue` now passes the live `/api/options` revision into `SettingsForm.vue`; stale Settings-page conflicts must stay local to that form instead of escalating into the global bootstrap fatal screen.
+- 2026-04-28: `VideoModelTab.vue` prompt token counters use exact WAN token engines (`wan22_14b` for high/low 14B prompts, `wan22_5b` for the 5B prompt). Do not route token counting through generic `wan` / `wan22` aliases.
 - All generation workspaces live under model tabs (`/models/:tabId`):
   - `ModelTabView.vue` mounts `VideoTabRouteView.vue` when `tab.type === 'wan22_14b' | 'wan22_5b' | 'ltx2'`.
   - `ModelTabView.vue` mounts `ImageModelTab.vue` when `tab.type` is `sd15|sdxl|flux1|flux2|chroma|zimage|anima`.
