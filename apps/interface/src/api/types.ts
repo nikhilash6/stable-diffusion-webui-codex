@@ -11,7 +11,7 @@ Defines TypeScript interfaces/types for backend responses (models/options/sample
 Inventory DTOs now include first-class IP-Adapter model/image-encoder collections from `/api/models/inventory`, SUPIR diagnostics DTOs from `/api/supir/models`, add-path contracts expose explicit nullable `size_bytes`
 metadata (`number | null`) for byte-progress UX and fail-loud validation in sequential library adds. SUPIR diagnostics now include structured
 stable sampler rows (`SupirSamplerInfo`) with backend-owned native sampler/scheduler metadata, and engine capabilities include explicit masked-img2img
-support, vid2vid discoverability, SUPIR-mode discoverability, exact-engine img2img inpaint-mode maps, plus the optional nested LTX execution-profile surface used by the current checkpoint-aware LTX defaults lane.
+support, vid2vid discoverability, SUPIR-mode discoverability, exact-engine img2img inpaint-mode maps, parked exact-engine statuses, plus the optional nested LTX execution-profile surface used by the current checkpoint-aware LTX defaults lane.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `ModelInfo` (interface): Model list entry returned by `/api/models`, including explicit `format` and `core_only` checkpoint selectors.
@@ -552,7 +552,7 @@ export interface EngineCapabilitiesResponse {
   asset_contracts?: Record<string, EngineAssetContractVariants>
   engine_id_to_semantic_engine: Record<string, string>
   exact_engine_inpaint_modes: Record<string, string[]>
-  parked_exact_engines?: Record<string, ParkedExactEngineStatus>
+  parked_exact_engines: Record<string, ParkedExactEngineStatus>
   dependency_checks: Record<string, EngineDependencyStatus>
 }
 

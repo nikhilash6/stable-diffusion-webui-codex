@@ -32,7 +32,7 @@ Status: Active
 - `EngineCapabilitiesResponse` is served by `/api/engines/capabilities`; it includes:
   - `asset_contracts` (base + core-only; now includes `tenc_slots`/`tenc_slot_labels` for slot-accurate requirements)
   - `engine_id_to_semantic_engine` (explicit key-space mapping; required by frontend taxonomy resolution)
-  - optional `parked_exact_engines` (exact parked-placeholder ids such as `sd35` / `netflix_void` / `svd` / `hunyuan_video`; these must not also appear in runnable maps)
+  - required `parked_exact_engines` (exact parked-placeholder ids such as `sd35` / `netflix_void` / `svd` / `hunyuan_video`; these must not also appear in runnable maps)
   - `dependency_checks` (backend-owned readiness rows per semantic engine; `ready` covers only unscoped/global rows, while mode-scoped rows such as SDXL inpaint assets stay separately evaluable through each row's `inpaint_modes`)
 - 2026-03-07: `types.ts` `EngineCapabilities` sampler/scheduler recommendation fields are `recommended_samplers` / `recommended_schedulers`.
 - 2026-03-09: `types.ts` `FamilyCapabilities` now preserves optional family-scoped sampling filters from `/api/engines/capabilities` (`supported_samplers`, `supported_schedulers`, `excluded_samplers`, `excluded_schedulers`) for frontend family-aware sampler/scheduler gating.

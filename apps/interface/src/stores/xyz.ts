@@ -12,6 +12,7 @@ per-cell results. Hires upscaler values are stable ids (`latent:*` / `spandrel:*
 Preflight now fails loud when VAE selection is empty before queuing XYZ requests, and queued txt2img payloads reuse the shared image request contract helper so the sweep lane emits the
 same explicit checkpoint/VAE selectors (`model_sha`, `checkpoint_core_only`, `model_format`, `vae_source`), FLUX.2 guidance mode, and asset-contract-backed extras as the main image generation lane.
 The standalone `/xyz` route now pins itself to a compatible image-tab owner (active image tab, then most recently updated image tab, else a new `sdxl` tab) instead of baselining from generic active-tab state.
+Baseline sampler/scheduler resolution validates current params or backend capability defaults against executable sampler/scheduler catalogs before queuing requests.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `Status` (type): XYZ sweep lifecycle status (`idle`/`running`/`stopped`/`error`/`done`).
@@ -27,17 +28,17 @@ Symbols (top-level; keep in sync; no ghosts):
 import { defineStore } from 'pinia'
 import { computed, reactive, ref } from 'vue'
 
-import { cancelTask, startTxt2Img, subscribeTask } from '../api/client'
+import { cancelTask, fetchSamplers, fetchSchedulers, startTxt2Img, subscribeTask } from '../api/client'
 import { buildTxt2ImgPayload } from '../api/payloads'
 import type { Txt2ImgRequest } from '../api/payloads'
 import type { GeneratedImage, TaskEvent } from '../api/types'
 import { buildExplicitImageRequestContract } from '../utils/image_request_contract'
 import { AXIS_OPTIONS, buildCombos, labelOf, parseAxisValues, type AxisParam, type AxisValue, type XyzCell } from '../utils/xyz'
 import { useModelTabsStore, type ImageBaseParams, type ImageTabType, type TabByType } from './model_tabs'
-import { useEngineCapabilitiesStore } from './engine_capabilities'
+import { normalizeSamplerSchedulerSelection, useEngineCapabilitiesStore, type SamplingDefaults } from './engine_capabilities'
 import { useQuicksettingsStore } from './quicksettings'
 import { useUpscalersStore } from './upscalers'
-import { fallbackSamplingDefaultsForTabFamily, isWanTabFamily, normalizeTabFamily, resolveImageRequestEngineId, type TabFamily } from '../utils/engine_taxonomy'
+import { isWanTabFamily, normalizeTabFamily, resolveImageRequestEngineId } from '../utils/engine_taxonomy'
 
 type Status = 'idle' | 'running' | 'stopped' | 'error' | 'done'
 type StopMode = 'immediate' | 'after_current'
@@ -168,11 +169,11 @@ export const useXyzStore = defineStore('xyz', () => {
     return created
   }
 
-  function buildBaseForm(tab: CompatibleImageTab): any {
+  function buildBaseForm(tab: CompatibleImageTab, samplingDefaults: SamplingDefaults): any {
     const quick = useQuicksettingsStore()
     const caps = useEngineCapabilitiesStore()
     const params = tab.params as ImageBaseParams
-    const tabFamily = tab.type as TabFamily
+    const tabFamily = tab.type
     const engineKey = resolveImageRequestEngineId(tabFamily, false)
     const checkpoint = String(params.checkpoint || '').trim()
     const modelLabel = checkpoint || quick.currentModel
@@ -201,20 +202,7 @@ export const useXyzStore = defineStore('xyz', () => {
     })
     const guidanceMode = requestContract.guidanceMode
     const extras: Record<string, unknown> = { ...requestContract.extras }
-    const fallbackSampling = fallbackSamplingDefaultsForTabFamily(tabFamily)
-    const samplingDefaults = caps.resolveSamplingDefaults(engineKey, {
-      fallbackSampler: fallbackSampling.sampler,
-      fallbackScheduler: fallbackSampling.scheduler,
-    })
-    const sampler =
-      (typeof params?.sampler === 'string' && params.sampler.trim())
-        ? params.sampler
-        : samplingDefaults.sampler
-    const scheduler =
-      (typeof params?.scheduler === 'string' && params.scheduler.trim())
-        ? params.scheduler
-        : samplingDefaults.scheduler
-    
+
     return {
       prompt: params?.prompt ?? '',
       negativePrompt: params?.negativePrompt ?? '',
@@ -222,8 +210,8 @@ export const useXyzStore = defineStore('xyz', () => {
       height: params?.height ?? 1024,
       steps: params?.steps ?? 30,
       guidanceScale: params?.cfgScale ?? 7,
-      sampler,
-      scheduler,
+      sampler: samplingDefaults.sampler,
+      scheduler: samplingDefaults.scheduler,
       seed: params?.seed ?? -1,
       batchSize: 1,
       batchCount: 1,
@@ -329,6 +317,15 @@ export const useXyzStore = defineStore('xyz', () => {
       return
     }
     const params = baselineTab.params
+    const caps = useEngineCapabilitiesStore()
+    await caps.init()
+    const engineKey = resolveImageRequestEngineId(baselineTab.type, false)
+    const familyCapabilities = caps.getFamilyForEngine(engineKey)
+    if (!familyCapabilities) {
+      errorMessage.value = `Family capabilities for '${engineKey}' are not loaded.`
+      status.value = 'error'
+      return
+    }
 
     if (!enabled.value) {
       errorMessage.value = 'Enable XYZ before running.'
@@ -380,6 +377,29 @@ export const useXyzStore = defineStore('xyz', () => {
       status.value = 'error'
       return
     }
+    const backendSamplingDefaults = caps.resolveSamplingDefaults(engineKey)
+    let resolvedSampling: SamplingDefaults | null = null
+    try {
+      const [samplerResponse, schedulerResponse] = await Promise.all([fetchSamplers(), fetchSchedulers()])
+      resolvedSampling = normalizeSamplerSchedulerSelection({
+        samplers: samplerResponse.samplers,
+        schedulers: schedulerResponse.schedulers,
+        familyCapabilities,
+        sampler: params.sampler,
+        scheduler: params.scheduler,
+        preferredSamplers: backendSamplingDefaults ? [backendSamplingDefaults.sampler] : [],
+        preferredSchedulers: backendSamplingDefaults ? [backendSamplingDefaults.scheduler] : [],
+      })
+    } catch (error) {
+      errorMessage.value = error instanceof Error ? error.message : String(error)
+      status.value = 'error'
+      return
+    }
+    if (!resolvedSampling) {
+      errorMessage.value = `XYZ requires a valid sampler and scheduler for '${engineKey}' before queuing requests. Select valid values or refresh backend capabilities.`
+      status.value = 'error'
+      return
+    }
 
     errorMessage.value = ''
     resetStopState()
@@ -395,7 +415,7 @@ export const useXyzStore = defineStore('xyz', () => {
     // Pre-build job queue with payload snapshots
     for (const [index, combo] of comboList.entries()) {
       try {
-        const form = buildBaseForm(baselineTab)
+        const form = buildBaseForm(baselineTab, resolvedSampling)
         if (xEnabled.value) applyAxis(form, xParam.value, combo.x)
         if (combo.y !== null && yEnabled.value) applyAxis(form, yParam.value, combo.y)
         if (combo.z !== null && zEnabled.value) applyAxis(form, zParam.value, combo.z)

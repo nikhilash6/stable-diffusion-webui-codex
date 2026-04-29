@@ -21,6 +21,7 @@ shared no-stretch img2vid guide controls (`img2vidImageScale`, `img2vidCropOffse
 `flux2/*` Qwen selector without overriding shared img2img denoise state. LTX normalization treats `mode` as the canonical owner of txt2vid/img2vid,
 persists explicit `executionProfile` state, and leaves stale/blank profile values visible until the active checkpoint metadata or user choice resolves
 them truthfully without silently rewriting stored raw profile ids.
+Image-tab sampler/scheduler defaults are consumed only from backend capabilities; when those defaults are unavailable the store leaves fields blank for request-boundary validation instead of inventing frontend fallback values.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `BaseTabType` (type): API tab type discriminator (from backend `ApiTab['type']`).
@@ -98,7 +99,7 @@ import type { ApiTab } from '../api/types'
 import type { HiresFormState, RefinerFormState, SwapModelFormState, SwapStageFormState } from '../api/payloads'
 import { type EngineType, getEngineConfig, getEngineDefaults } from './engine_config'
 import { useEngineCapabilitiesStore } from './engine_capabilities'
-import { fallbackSamplingDefaultsForTabFamily, isWanTabFamily, normalizeTabFamily, type TabFamily } from '../utils/engine_taxonomy'
+import { isWanTabFamily, normalizeTabFamily, resolveImageRequestEngineId } from '../utils/engine_taxonomy'
 import { DEFAULT_IMG2IMG_RESIZE_MODE, normalizeImg2ImgResizeMode, type Img2ImgResizeMode } from '../utils/img2img_resize'
 import { parseInpaintMode } from '../utils/image_params'
 import {
@@ -698,9 +699,8 @@ function defaultParams<T extends BaseTabType>(
   const config = getEngineConfig(type as EngineType)
   const defaults = getEngineDefaults(type as EngineType)
   const guidance = (!config.capabilities.usesCfg && defaults.distilledCfg !== undefined) ? defaults.distilledCfg : defaults.cfg
-  const samplingDefaults = fallbackSamplingDefaultsForTabFamily(type as TabFamily)
-  const resolvedSampler = String(opts?.sampler || '').trim() || samplingDefaults.sampler
-  const resolvedScheduler = String(opts?.scheduler || '').trim() || samplingDefaults.scheduler
+  const resolvedSampler = String(opts?.sampler || '').trim()
+  const resolvedScheduler = String(opts?.scheduler || '').trim()
   const refinerDefaults: RefinerFormState = {
     enabled: false,
     swapAtStep: 1,
@@ -2179,13 +2179,9 @@ export const useModelTabsStore = defineStore('modelTabs', () => {
   }
 
   function preferredSamplingDefaultsForType(type: BaseTabType): { sampler: string; scheduler: string } | null {
-    if (isWanTabFamily(type)) return null
+    if (isWanTabFamily(type) || type === 'ltx2') return null
     const capsStore = useEngineCapabilitiesStore()
-    const fallback = fallbackSamplingDefaultsForTabFamily(type as TabFamily)
-    return capsStore.resolveSamplingDefaults(type, {
-      fallbackSampler: fallback.sampler,
-      fallbackScheduler: fallback.scheduler,
-    })
+    return capsStore.resolveSamplingDefaults(resolveImageRequestEngineId(type, false))
   }
 
   function defaultParamsForType<T extends BaseTabType>(type: T): TabParamsByType[T] {

@@ -21,7 +21,7 @@ Hires settings list upscalers from `/api/upscalers` and share tile controls with
 Also shares the global `min_tile` preference (tiled lower bound) with `/upscale`.
 The generic first-pass model-swap stage lives under `params.swapModel`, the generic second-pass model selector lives under `params.hires.swapModel`,
 and global + hires refiner cards stay on the SDXL-native `refiner` seams with the shared capability-gated advanced guidance/APG state surface.
-Sampler/scheduler selectors normalize current selections against the executable `/api/samplers` + `/api/schedulers` inventory, keep base sampler/scheduler real, and scrub invalid hires overrides while still using backend recommendation lists for grouped option rendering (`Recommended` vs `Use at your own risk`) with inline technical warnings on out-of-recommendation selections.
+Sampler/scheduler selectors normalize current/backend-capability selections against the executable `/api/samplers` + `/api/schedulers` inventory, keep base sampler/scheduler real without frontend fallback defaults, and scrub invalid hires overrides while still using backend recommendation lists for grouped option rendering (`Recommended` vs `Use at your own risk`) with inline technical warnings on out-of-recommendation selections.
 Surfaces a one-shot toast when the generation composable auto-reattaches to an in-flight task after a reload/crash.
 Generate CTA and run preflight are capability-driven (`/api/engines/capabilities`) plus asset-contract-aware, failing loud in the UI when the
 current checkpoint/text-encoder/VAE contract is not runnable.
@@ -86,7 +86,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `supportsImg2ImgMasking` (const): Truthful backend-capability-driven mask/inpaint support gate for img2img engines.
 - `hideNegativePrompt` (const): Hides the base Negative Prompt field when the active checkpoint/model does not support it or effective base CFG is `<= 1`.
 - `recommendedSamplers` / `recommendedSchedulers` (const): Sanitized recommendation lists passed into sampler/scheduler selectors.
-- `resolveLiveSamplingDefaults` (function): Resolves executable sampler/scheduler defaults from backend capabilities plus per-family fallbacks.
+- `resolveLiveSamplingDefaults` (function): Resolves executable sampler/scheduler defaults from backend capabilities only.
 - `normalizeLiveSamplingSelection` (function): Normalizes sampler/scheduler pairs against live executable catalog, family capability constraints, and sampler-allowed schedulers.
 - `normalizedBaseSampling` (const): Live-normalized base sampler/scheduler pair used by selector state and hires override cleanup.
 - `xyzSamplerChoices`/`xyzSchedulerChoices` (const): Sampler/scheduler names passed to embedded XYZ autofill (scheduler list is sampler-compatible).
@@ -574,7 +574,7 @@ import { useQuicksettingsStore } from '../stores/quicksettings'
 import { useBootstrapStore } from '../stores/bootstrap'
 import { useUpscalersStore } from '../stores/upscalers'
 import { useXyzStore } from '../stores/xyz'
-import { fallbackSamplingDefaultsForTabFamily, isWanTabFamily, normalizeTabFamily } from '../utils/engine_taxonomy'
+import { isWanTabFamily, normalizeTabFamily } from '../utils/engine_taxonomy'
 import { buildExplicitImageRequestContract } from '../utils/image_request_contract'
 import { filterModelTitlesForFamily } from '../utils/model_family_filters'
 import { buildFamilyVaeValidationChoices, canonicalizeVaeChoice, resolveInventoryVaeSha } from '../utils/vae_choices'
@@ -1144,18 +1144,7 @@ const recommendedSchedulers = computed(() =>
 )
 
 function resolveLiveSamplingDefaults(): { sampler: string; scheduler: string } {
-  const family = normalizeTabFamily(props.type)
-  if (!family || isWanTabFamily(family)) {
-    return {
-      sampler: String(engineSurface.value?.default_sampler || '').trim(),
-      scheduler: String(engineSurface.value?.default_scheduler || '').trim(),
-    }
-  }
-  const fallback = fallbackSamplingDefaultsForTabFamily(family)
-  return engineCaps.resolveSamplingDefaults(resolvedEngineForMode.value, {
-    fallbackSampler: fallback.sampler,
-    fallbackScheduler: fallback.scheduler,
-  })
+  return engineCaps.resolveSamplingDefaults(resolvedEngineForMode.value) ?? { sampler: '', scheduler: '' }
 }
 
 function normalizeLiveSamplingSelection(rawSampler: string, rawScheduler: string): { sampler: string; scheduler: string } | null {
@@ -1247,8 +1236,7 @@ function normalizeXyzSamplingAxisText(axisParam: string, axisValuesText: string)
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0 && allowed.has(entry))
   const deduped = Array.from(new Set(values))
-  const normalizedValues = deduped.length > 0 ? deduped : [choices[0]]
-  return normalizedValues.join(', ')
+  return deduped.join(', ')
 }
 
 function onSamplerChange(value: string): void {
@@ -1587,8 +1575,10 @@ const resolutionPresets = computed((): [number, number][] => {
 })
 
 const runSummary = computed(() => {
-  const sampler = params.value.sampler || engineSurface.value?.default_sampler || ''
-  const scheduler = params.value.scheduler || engineSurface.value?.default_scheduler || ''
+  const normalizedSampling = normalizeLiveSamplingSelection(params.value.sampler, params.value.scheduler)
+  const defaults = resolveLiveSamplingDefaults()
+  const sampler = normalizedSampling?.sampler || defaults.sampler
+  const scheduler = normalizedSampling?.scheduler || defaults.scheduler
   const seedLabel = params.value.seed === -1 ? 'seed random' : `seed ${params.value.seed}`
   return `${params.value.width}×${params.value.height} px · ${params.value.steps} steps · ${cfgLabel.value} ${params.value.cfgScale} · ${sampler} / ${scheduler} · ${seedLabel} · batch ${params.value.batchCount}×${params.value.batchSize}`
 })

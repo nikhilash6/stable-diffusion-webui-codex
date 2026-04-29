@@ -20,6 +20,7 @@ FLUX.2 img2img guidance emission is variant-aware (`img2img_cfg_scale` xor `img2
 the nested `img2img_extras.hires` owner while remaining blocked for masked runs. Native SDXL SUPIR mode stays on the single nested frontend owner
 `params.supir` and is emitted only through `img2img_extras.supir` for truthful SDXL img2img/inpaint runs, with diagnostics-backed sampler metadata
 owning the effective runtime sampler/scheduler pair and fail-loud rejection of stale APG/advanced-guidance overlap.
+Non-SUPIR image runs resolve the executable sampler/scheduler pair from strictly validated current params or backend capability defaults before any task start.
 Masked img2img runtime selection now flows through strict `inpaintMode` / `img2img_inpaint_mode`, with exact-engine mode discoverability coming from
 `/api/engines/capabilities.exact_engine_inpaint_modes` and invalid stale values failing loud before submit. Image run-history snapshots now also carry the
 active family-scoped VAE selection so history replay can restore the same asset owner instead of leaking whichever global VAE happens to be selected later.
@@ -31,6 +32,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `getTabState` (function): Returns (and initializes) the `GenerationState` for a given tab id from internal maps.
 - `usesStaticDistilledCfgEngine` (function): Returns whether an engine id uses a fixed distilled-guidance contract independent of checkpoint metadata.
 - `resolveEngineForRequest` (function): Canonical tab-type/mode -> backend engine mapping used for capability checks and request dispatch.
+- `resolveEffectiveImageSampling` (function): Resolves a strict current/backend sampler-scheduler pair for image requests.
 - `buildImg2ImgGuidanceFields` (function): Emits the single img2img guidance field that matches the resolved guidance mode.
 - `BuildImg2ImgPayloadArgs` (interface): Input contract for deterministic img2img payload assembly.
 - `buildImg2ImgPayload` (function): Builds img2img start payload at the source, including capability-gated unmasked hires fields.
@@ -61,7 +63,7 @@ import {
   type SupirModeFormState,
 } from '../stores/model_tabs'
 import { useQuicksettingsStore } from '../stores/quicksettings'
-import { useEngineCapabilitiesStore } from '../stores/engine_capabilities'
+import { normalizeSamplerSchedulerSelection, useEngineCapabilitiesStore, type SamplingDefaults } from '../stores/engine_capabilities'
 import { useUpscalersStore } from '../stores/upscalers'
 import {
   buildNormalizedHiresOptions,
@@ -69,11 +71,14 @@ import {
   type NestedStageSelectorPayloads,
   type Txt2ImgRequest,
 } from '../api/payloads'
-import { cancelTask, fetchTaskResult, startImageAutomation, startImg2Img, startTxt2Img } from '../api/client'
+import { cancelTask, fetchSamplers, fetchSchedulers, fetchTaskResult, startImageAutomation, startImg2Img, startTxt2Img } from '../api/client'
 import type {
+  FamilyCapabilities,
   GeneratedImage,
   GuidanceAdvancedCapabilities,
   ImageAutomationRequest,
+  SamplerInfo,
+  SchedulerInfo,
   SupirSamplerInfo,
   TaskErrorCode,
   TaskEvent,
@@ -339,6 +344,28 @@ function defaultState(): GenerationState {
 
 export function resolveEngineForRequest(tabType: string, useInitImage: boolean): string {
   return resolveImageRequestEngineId(tabType, useInitImage)
+}
+
+export function resolveEffectiveImageSampling(opts: {
+  engineId: string
+  samplers: SamplerInfo[]
+  schedulers: SchedulerInfo[]
+  familyCapabilities: FamilyCapabilities
+  currentSampler: string | null | undefined
+  currentScheduler: string | null | undefined
+  backendDefaults: SamplingDefaults | null
+}): SamplingDefaults {
+  const resolved = normalizeSamplerSchedulerSelection({
+    samplers: opts.samplers,
+    schedulers: opts.schedulers,
+    familyCapabilities: opts.familyCapabilities,
+    sampler: opts.currentSampler,
+    scheduler: opts.currentScheduler,
+    preferredSamplers: opts.backendDefaults ? [opts.backendDefaults.sampler] : [],
+    preferredSchedulers: opts.backendDefaults ? [opts.backendDefaults.scheduler] : [],
+  })
+  if (resolved) return resolved
+  throw new Error(`Image generation requires a valid sampler and scheduler for '${opts.engineId}'. Select valid values or refresh backend capabilities.`)
 }
 
 function normalizeBooleanParam(rawValue: unknown, fallback: boolean): boolean {
@@ -704,7 +731,7 @@ export function useGeneration(tabId: string) {
   ): string {
     const sampler = p.supir.enabled
       ? String(effectiveSampling?.supirLabel || effectiveSampling?.sampler || p.supir.sampler || p.sampler || '').trim()
-      : String(p.sampler || '').trim()
+      : String(effectiveSampling?.sampler || p.sampler || '').trim()
     const scheduler = String(effectiveSampling?.scheduler || p.scheduler || '').trim()
     const seedLabel = p.seed === -1 ? 'seed random' : `seed ${p.seed}`
     const clipSkipLabel = Number.isFinite(p.clipSkip) && p.clipSkip > 0 && p.clipSkip !== 1 ? ` · clip-skip ${p.clipSkip}` : ''
@@ -858,8 +885,8 @@ export function useGeneration(tabId: string) {
 
       width: p.width,
       height: p.height,
-      sampler: String(p.sampler || '').trim(),
-      scheduler: String(p.scheduler || '').trim(),
+      sampler: String(effectiveSampling?.sampler || p.sampler || '').trim(),
+      scheduler: String(effectiveSampling?.scheduler || p.scheduler || '').trim(),
       steps: p.steps,
       cfgScale: p.cfgScale,
       seed: p.seed,
@@ -1180,6 +1207,19 @@ export function useGeneration(tabId: string) {
       ...extractLoraNamesFromPrompt(p.prompt),
       ...(supportsNegative ? extractLoraNamesFromPrompt(p.negativePrompt) : []),
     ]
+    const resolveEffectiveSampling = async (): Promise<SamplingDefaults> => {
+      const backendDefaults = backendCaps.resolveSamplingDefaults(engineOverrideForRequest)
+      const [samplerResponse, schedulerResponse] = await Promise.all([fetchSamplers(), fetchSchedulers()])
+      return resolveEffectiveImageSampling({
+        engineId: engineOverrideForRequest,
+        samplers: samplerResponse.samplers,
+        schedulers: schedulerResponse.schedulers,
+        familyCapabilities: familyCaps,
+        currentSampler: p.sampler,
+        currentScheduler: p.scheduler,
+        backendDefaults,
+      })
+    }
 
     const guidancePayload = buildGuidancePayload(p.guidanceAdvanced, guidanceSupport)
     if (guidancePayload) {
@@ -1215,6 +1255,8 @@ export function useGeneration(tabId: string) {
           scheduler: supirPayload.samplerInfo.native_scheduler,
           supirLabel: supirPayload.samplerInfo.label,
         }
+      } else {
+        effectiveSampling = await resolveEffectiveSampling()
       }
     } catch (error) {
       state.value.status = 'error'
@@ -1290,8 +1332,8 @@ export function useGeneration(tabId: string) {
             height: p.height,
             steps: p.steps,
             guidanceScale: p.cfgScale,
-            sampler: p.sampler,
-            scheduler: p.scheduler,
+            sampler: effectiveSampling?.sampler ?? p.sampler,
+            scheduler: effectiveSampling?.scheduler ?? p.scheduler,
             seed: p.seed,
             clipSkip: p.clipSkip,
             batchSize: requestBatchSize,

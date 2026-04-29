@@ -8,8 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: Canonical frontend engine/tab taxonomy helpers.
 Centralizes tab-family aliases, exact video-lane detection, image request engine-id resolution, exact backend engine-id -> semantic-engine resolution,
-and sampler/scheduler fallback defaults so stores/composables stop duplicating mapping tables. Fallback sampler/scheduler pairs must stay aligned
-to the live executable surface (for example SD15 now defaults to `ddim` / `ddim`). FLUX.2 stays first-class in frontend taxonomy (no FLUX.1
+and semantic/tab conversion so stores/composables stop duplicating mapping tables. FLUX.2 stays first-class in frontend taxonomy (no FLUX.1
 aliasing), while backend-only semantic engines such as `netflix_void` remain valid semantic ids but intentionally resolve to no UI tab family.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -23,11 +22,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `isVideoTabFamily` (function): Returns whether a tab family is a routed exact video lane.
 - `tabFamilyFromSemanticEngine` (function): Converts semantic engine id to tab family when representable.
 - `resolveImageRequestEngineId` (function): Canonical image request tab/mode -> engine-id mapper.
-- `KNOWN_ENGINE_IDS` (constant): Known engine ids that must have valid semantic mapping.
-- `isKnownEngineId` (function): Type guard for `KNOWN_ENGINE_IDS`.
-- `resolveSemanticEngineForEngineId` (function): Resolves engine id to semantic id using backend map, failing loud for missing known mappings.
-- `SamplingDefaults` (interface): Sampler/scheduler pair.
-- `fallbackSamplingDefaultsForTabFamily` (function): Stable frontend fallback sampler/scheduler defaults by tab family.
+- `resolveSemanticEngineForEngineId` (function): Resolves engine id to semantic id using only the backend capability map.
 */
 
 export type TabFamily = 'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'chroma' | 'wan22_14b' | 'wan22_5b' | 'zimage' | 'anima' | 'ltx2'
@@ -93,37 +88,6 @@ const SEMANTIC_ENGINE_SET: ReadonlySet<string> = new Set<string>([
   'svd',
 ])
 
-const ENGINE_ID_SET: ReadonlySet<string> = new Set<string>([
-  'sd15',
-  'sd20',
-  'sdxl',
-  'sdxl_refiner',
-  'flux1',
-  'flux1_kontext',
-  'flux1_fill',
-  'flux2',
-  'flux1_chroma',
-  'zimage',
-  'anima',
-  'wan22_5b',
-  'wan22_14b',
-  'wan22_14b_animate',
-  'ltx2',
-])
-
-const TAB_FAMILY_FALLBACK_SAMPLING: Readonly<Record<TabFamily, SamplingDefaults>> = Object.freeze({
-  sd15: { sampler: 'ddim', scheduler: 'ddim' },
-  sdxl: { sampler: 'euler', scheduler: 'euler_discrete' },
-  flux1: { sampler: 'euler', scheduler: 'simple' },
-  flux2: { sampler: 'euler', scheduler: 'simple' },
-  chroma: { sampler: 'euler', scheduler: 'simple' },
-  zimage: { sampler: 'euler', scheduler: 'simple' },
-  anima: { sampler: 'euler', scheduler: 'simple' },
-  ltx2: { sampler: 'euler', scheduler: 'simple' },
-  wan22_14b: { sampler: 'uni-pc', scheduler: 'simple' },
-  wan22_5b: { sampler: 'uni-pc', scheduler: 'simple' },
-})
-
 function normalizeKey(value: unknown): string {
   return String(value || '').trim().toLowerCase()
 }
@@ -132,14 +96,6 @@ export function normalizeSemanticEngine(value: unknown): SemanticEngine | null {
   const key = normalizeKey(value)
   if (!key) return null
   return SEMANTIC_ENGINE_SET.has(key) ? (key as SemanticEngine) : null
-}
-
-export const KNOWN_ENGINE_IDS: readonly EngineRequestId[] = Object.freeze(Array.from(ENGINE_ID_SET) as EngineRequestId[])
-
-export function isKnownEngineId(value: unknown): value is EngineRequestId {
-  const key = normalizeKey(value)
-  if (!key) return false
-  return ENGINE_ID_SET.has(key)
 }
 
 export function normalizeTabFamily(value: unknown): TabFamily | null {
@@ -187,18 +143,5 @@ export function resolveSemanticEngineForEngineId(
   const mappedRaw = typeof map[id] === 'string' ? map[id] : ''
   const mappedSemantic = normalizeSemanticEngine(mappedRaw)
   if (mappedSemantic) return mappedSemantic
-
-  if (isKnownEngineId(id)) {
-    throw new Error(`Missing or invalid semantic-engine mapping for known engine id '${id}'.`)
-  }
   return null
-}
-
-export interface SamplingDefaults {
-  sampler: string
-  scheduler: string
-}
-
-export function fallbackSamplingDefaultsForTabFamily(family: TabFamily): SamplingDefaults {
-  return TAB_FAMILY_FALLBACK_SAMPLING[family]
 }
