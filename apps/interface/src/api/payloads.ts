@@ -164,7 +164,6 @@ const HiresOptionsSchema = z
       }),
     tile: UpscalerTileSchema.optional(),
     swap_model: SwapModelOptionsSchema.optional(),
-    modules: z.array(z.string().min(1)).optional(),
     sampler: z.string().min(1).optional(),
     scheduler: z.string().min(1).optional(),
     prompt: z.string().optional(),
@@ -244,7 +243,6 @@ export interface HiresFormState {
   upscaler: string
   tile: UpscalerTileFormState
   swapModel?: SwapModelFormState
-  modules?: string[]
   sampler?: string
   scheduler?: string
   prompt?: string
@@ -439,9 +437,6 @@ export function buildNormalizedHiresOptions(
   const minTile = Math.max(1, Math.min(tileSize, hiresMinTilePref))
   const sampler = String(state.hires.sampler ?? '').trim()
   const scheduler = String(state.hires.scheduler ?? '').trim()
-  const modules = Array.isArray(state.hires.modules)
-    ? state.hires.modules.map((entry) => String(entry ?? '').trim()).filter((entry) => entry.length > 0)
-    : []
   const guidanceValue = guidanceMode === 'distilled_cfg'
     ? state.hires.distilledCfg
     : state.hires.cfg
@@ -475,7 +470,6 @@ export function buildNormalizedHiresOptions(
       state.hires.swapModel,
       opts.nestedSelectorPayloads?.hiresSwapModel,
     ),
-    modules: modules.length > 0 ? modules : undefined,
     sampler: sampler || undefined,
     scheduler: scheduler || undefined,
     prompt: hiresPrompt,

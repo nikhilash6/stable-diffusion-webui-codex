@@ -317,6 +317,18 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                 },
             )
 
+    def _reject_removed_txt2img_hires_modules_from_hires(hires: object) -> None:
+        if isinstance(hires, Mapping) and "modules" in hires:
+            raise HTTPException(
+                status_code=400,
+                detail="'extras.hires.modules' has been removed because hires modules have no execution owner.",
+            )
+
+    def _reject_removed_txt2img_hires_modules(payload: Mapping[str, Any]) -> None:
+        extras = payload.get("extras")
+        if isinstance(extras, Mapping):
+            _reject_removed_txt2img_hires_modules_from_hires(extras.get("hires"))
+
     def _reject_legacy_wan_request_key_aliases(payload: Mapping[str, Any], *, context: str) -> None:
         aliases: dict[str, str] = {}
         for raw_key in payload.keys():
@@ -2270,19 +2282,13 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         if hires is not None:
             if not isinstance(hires, dict):
                 raise HTTPException(status_code=400, detail="'extras.hires' must be an object")
+            _reject_removed_txt2img_hires_modules_from_hires(hires)
             _reject_unknown_keys(hires, _TXT2IMG_HIRES_KEYS | {"enable"}, "extras.hires")
             if _optional_bool_field(hires, "enable") is True:
                 required = ['denoise', 'scale', 'resize_x', 'resize_y', 'steps', 'upscaler']
                 for key in required:
                     if key not in hires:
                         raise HTTPException(status_code=400, detail=f"Missing 'extras.hires.{key}'")
-                hr_modules = hires.get('modules')
-                if hr_modules is not None:
-                    if not isinstance(hr_modules, list) or any(not isinstance(entry, str) for entry in hr_modules):
-                        raise HTTPException(status_code=400, detail="'extras.hires.modules' must be an array of strings")
-                    modules_list = list(hr_modules)
-                else:
-                    modules_list = []
                 refiner_raw = hires.get('refiner')
                 refiner_cfg = (
                     _parse_refiner_payload(refiner_raw, field_name="extras.hires.refiner")
@@ -2321,7 +2327,6 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                     "upscaler": _require_str_field(hires, 'upscaler', allow_empty=False, trim=True),
                     "tile": tile,
                     "swap_model": swap_model_cfg,
-                    "modules": modules_list,
                     "sampler": hires.get('sampler'),
                     "scheduler": hires.get('scheduler'),
                     "prompt": hires.get('prompt') or '',
@@ -2671,7 +2676,6 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                 "resize_x": width,
                 "resize_y": height,
                 "swap_model": None,
-                "additional_modules": [],
                 "sampler_name": None,
                 "scheduler": None,
                 "prompt": "",
@@ -2690,7 +2694,6 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
             "resize_x": cfg["resize_x"],
             "resize_y": cfg["resize_y"],
             "swap_model": cfg.get("swap_model"),
-            "additional_modules": cfg.get("modules") or [],
             "sampler_name": cfg.get("sampler"),
             "scheduler": cfg.get("scheduler"),
             "prompt": cfg.get("prompt") or "",
@@ -4524,6 +4527,8 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         if not isinstance(template_raw, dict):
             raise HTTPException(status_code=400, detail="'template' must be an object")
         template = dict(template_raw)
+        if mode == "txt2img":
+            _reject_removed_txt2img_hires_modules(template)
         _enforce_generation_settings_contract(template)
         _validate_route_engine_capability(
             template,
@@ -6923,6 +6928,7 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
     async def txt2img(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Payload must be JSON object")
+        _reject_removed_txt2img_hires_modules(payload)
         _enforce_generation_settings_contract(payload)
         _validate_route_engine_capability(payload, route_mode=GenerationRouteMode.TXT2IMG)
 

@@ -457,12 +457,6 @@ export function buildImg2ImgPayload(args: BuildImg2ImgPayloadArgs): Record<strin
   if (hiresEnabled && params.hires?.refiner?.enabled) {
     throw new Error('img2img hires refiner is not supported yet. Disable the hires refiner or switch back to txt2img.')
   }
-  const hiresModules = Array.isArray(params.hires?.modules)
-    ? params.hires.modules.map((entry) => String(entry ?? '').trim()).filter((entry) => entry.length > 0)
-    : []
-  if (hiresEnabled && hiresModules.length > 0) {
-    throw new Error('img2img hires modules are not supported yet. Remove hires modules or switch back to txt2img.')
-  }
   if (params.refiner?.enabled) {
     throw new Error('img2img refiner is not supported yet. Disable the refiner or switch back to txt2img.')
   }

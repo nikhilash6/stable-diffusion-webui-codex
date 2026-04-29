@@ -237,7 +237,6 @@ class CodexHiresConfig:
     distilled_cfg: float = 3.5
     sampler_name: Optional[str] = None
     scheduler: Optional[str] = None
-    additional_modules: Tuple[str, ...] = field(default_factory=tuple)
     swap_model: "SwapModelConfig | None" = None
     refiner: "RefinerConfig | None" = None
 
@@ -311,7 +310,6 @@ class CodexHiresConfig:
             "distilled_cfg": self.distilled_cfg,
             "sampler_name": self.sampler_name,
             "scheduler": self.scheduler,
-            "additional_modules": list(self.additional_modules),
         }
         if self.swap_model is not None and self.swap_model.is_configured():
             result["swap_model"] = self.swap_model.as_payload()
@@ -335,12 +333,6 @@ class CodexHiresConfig:
         self.distilled_cfg = float(payload.get("distilled_cfg", self.distilled_cfg))
         self.sampler_name = payload.get("sampler_name", self.sampler_name)
         self.scheduler = payload.get("scheduler", self.scheduler)
-        modules = payload.get("additional_modules")
-        if modules is not None:
-            if isinstance(modules, (list, tuple)):
-                self.additional_modules = tuple(str(m) for m in modules)
-            else:
-                self.additional_modules = (str(modules),)
         if "swap_model" in payload:
             swap_payload = payload["swap_model"]
             if isinstance(swap_payload, SwapModelConfig):

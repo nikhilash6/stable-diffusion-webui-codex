@@ -725,7 +725,6 @@ function defaultParams<T extends BaseTabType>(
     upscaler: 'latent:bicubic-aa',
     tile: { tile: 256, overlap: 16 },
     swapModel: undefined,
-    modules: [],
     sampler: undefined,
     scheduler: undefined,
     prompt: undefined,
@@ -1581,6 +1580,7 @@ function normalizeImageParams(raw: unknown, defaults: ImageBaseParams): ImageBas
       ...(hiresTilePatch as Partial<HiresFormState['tile']>),
     },
   }
+  delete (mergedHires as unknown as Record<string, unknown>).modules
 
   const merged: ImageBaseParams = {
     ...defaults,

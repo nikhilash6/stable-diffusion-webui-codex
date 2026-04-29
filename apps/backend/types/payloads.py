@@ -77,7 +77,6 @@ class Txt2ImgKeys:
         "upscaler",
         "tile",
         "swap_model",
-        "modules",
         "refiner",
         "distilled_cfg",
     })

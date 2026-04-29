@@ -122,7 +122,6 @@ def _build_hires_config(data: Mapping[str, Any] | None, *, default_cfg: float, d
             distilled_cfg=default_distilled,
             sampler_name=None,
             scheduler=None,
-            additional_modules=tuple(),
             swap_model=None,
             refiner=None,
         )
@@ -133,14 +132,6 @@ def _build_hires_config(data: Mapping[str, Any] | None, *, default_cfg: float, d
     distilled_value = payload.get("distilled_cfg", default_distilled)
     sampler_name = payload.get("sampler_name")
     scheduler = payload.get("scheduler")
-
-    modules_raw = payload.get("additional_modules")
-    if modules_raw is None:
-        modules_tuple: tuple[str, ...] = tuple()
-    elif isinstance(modules_raw, (list, tuple)):
-        modules_tuple = tuple(str(m) for m in modules_raw)
-    else:
-        modules_tuple = (str(modules_raw),)
 
     raw_swap_model = payload.get("swap_model")
     if raw_swap_model is not None and not isinstance(raw_swap_model, Mapping):
@@ -166,7 +157,6 @@ def _build_hires_config(data: Mapping[str, Any] | None, *, default_cfg: float, d
         distilled_cfg=float(distilled_value),
         sampler_name=sampler_name,
         scheduler=scheduler,
-        additional_modules=modules_tuple,
         swap_model=swap_model_cfg,
         refiner=refiner_cfg if refiner_cfg.enabled else None,
     )
