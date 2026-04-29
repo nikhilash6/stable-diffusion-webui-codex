@@ -9,7 +9,7 @@ Required Notice: see NOTICE
 Purpose: Engine-agnostic landing page and model-tab manager UI with global dependency overview.
 Renders the Home workspace, exposes one dependency-check surface for all engines, creates new tabs, and manages existing tabs
 (enable/disable, rename, load/unload, duplicate, remove) while linking users to model tabs (`/models/:tabId`), gallery/workflows,
-and utilities; XYZ guidance points to the embedded Generation Parameters card (with `/xyz` compatibility route).
+the root WebUI Atlas, and utilities; XYZ guidance points to the embedded Generation Parameters card (with `/xyz` compatibility route).
 
 Symbols (top-level; keep in sync; no ghosts):
 - `Home` (component): Home workspace + tab manager; drives tab CRUD and status actions via stores/API (contains nested UI helpers and dialogs).
@@ -223,8 +223,8 @@ Symbols (top-level; keep in sync; no ghosts):
           <ul class="cdx-list">
             <li class="cdx-list-item">
               <div class="cdx-list-main">
-                <div class="cdx-list-title">Repository structure</div>
-                <div class="cdx-list-meta"><code>SUBSYSTEM-MAP.md</code></div>
+                <div class="cdx-list-title">Repository Atlas</div>
+                <div class="cdx-list-meta"><code>AGENTS.md</code></div>
               </div>
             </li>
             <li class="cdx-list-item">

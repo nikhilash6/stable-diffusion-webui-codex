@@ -26,22 +26,22 @@ You do **not** materialize eager `dict(...)` copies of checkpoint mappings as co
 
 ---
 
-### ACT II – WHERE THE TRUTH LIVES: `.sangoi` AND REUSE
+### ACT II – WHERE THE TRUTH LIVES: `.sangoi`, REUSE, AND THE WEBUI ATLAS
 
-Before you do anything else, you read `SUBSYSTEM-MAP-INDEX.md` first. You use it to find the real seam, then jump into `SUBSYSTEM-MAP.md` only for the bounded hotspot/pipeline/owner section you need.
-If you don't know what to change, you don't guess — you search the index first.
-`SUBSYSTEM-MAP-INDEX.md` is lookup-only.
-`SUBSYSTEM-MAP.md` is discovery and navigation only: hotspot directory, pipeline node chains, owner seams, and pointers to generated artifacts/policy.
-Contract authority lives here in root `AGENTS.md` (policy) and in `.sangoi/reference/**` (detailed contracts). Keep those roles split. Do not dump contract matrices back into `SUBSYSTEM-MAP.md`.
-When touching `SUBSYSTEM-MAP-INDEX.md` or `SUBSYSTEM-MAP.md`, run this operational checklist before handoff:
+Before broad grep, use the WebUI Atlas below as the prompt-resident owner map for this repository.
+If you don't know what to change, you do not guess. You open the Atlas section for the hotspot, pipeline, or owner seam first, then open the canonical owner path before followers.
 
-- Keep it discovery-only (no contract matrices / drift ledgers).
-- Keep the index/map split honest:
-  - `SUBSYSTEM-MAP-INDEX.md` = lookup-only front door
-  - `SUBSYSTEM-MAP.md` = discovery/node atlas only
-- Ensure hotspot discoverability is explicit (`keymaps`, `vae_codex3d.py`, `hires_fix.py`).
-- Update `SUBSYSTEM-MAP-INDEX.md` and `SUBSYSTEM-MAP.md` in the same tranche when any mapped node chain changes because of file moves, owner-path changes, public route additions/removals, or top-level owner functions changing.
-- If a touched `apps/**` file is part of a mapped node chain or hotspot entry, refresh its file header block in the same tranche. This is additive to the standing rule that every touched `apps/**` file header must stay truthful.
+Contract authority lives here in root `AGENTS.md` for policy and in `.sangoi/reference/**` for detailed contracts. Keep those roles split.
+The Atlas is discovery-only: hotspot routing, bounded pipeline node chains, owner seams, generated artifact pointers, and policy pointers.
+Do not turn the Atlas into contract matrices, migration ledgers, drift reports, or mutable backend counts/timestamps.
+Generated reports under `.sangoi/reports/tooling/` own mutable backend snapshots, counts, hashes, and timestamps.
+
+When a mapped node chain changes because of file moves, owner-path changes, public route additions/removals, or top-level owner functions changing, update this Atlas in the same tranche.
+If a touched `apps/**` file is part of an Atlas pipeline, hotspot, or owner seam entry, refresh its file header block in the same tranche. This is additive to the standing rule that every touched `apps/**` file header must stay truthful.
+When the Atlas or backend discovery surface changes, run this operational checklist before handoff:
+
+- Keep the Atlas discovery-only; no contract matrices, drift ledgers, or stale migration notes.
+- Ensure hotspot discoverability stays explicit for keymaps, `vae_codex3d.py`, and `hires_fix.py`.
 - Regenerate backend index artifacts:
   - `backend_py_paths_file="$(mktemp /tmp/backend_py_paths.XXXXXX.txt)"`
   - `git ls-files apps/backend | rg "\\.py$" | LC_ALL=C sort > "$backend_py_paths_file"`
@@ -52,10 +52,217 @@ When touching `SUBSYSTEM-MAP-INDEX.md` or `SUBSYSTEM-MAP.md`, run this operation
   - `bash .sangoi/.tools/link-check.sh .sangoi`
   - `bash .sangoi/.tools/link-check.sh .`
 
-- If you touch an `apps/**` source file, you keep its **file header block** honest. If the purpose or top-level symbols changed, you update them.
-  - What it is: the standardized top-of-file block containing `Repository:` + `SPDX-License-Identifier:` + `Purpose:` + `Symbols (top-level; keep in sync):`.
-  - Where it lives: `.py` = module docstring (first statement); `.ts` = top block comment (`/* ... */`); `.vue` = top HTML comment (before `<template>`).
-  - Standard: `.sangoi/policies/file-header-block.md`. Helper: `python3 .sangoi/.tools/review_apps_header_updates.py`.
+If you touch an `apps/**` source file, you keep its **file header block** honest. If the purpose or top-level symbols changed, you update them.
+
+- What it is: the standardized top-of-file block containing `Repository:` + `SPDX-License-Identifier:` + `Purpose:` + `Symbols (top-level; keep in sync):`.
+- Where it lives: `.py` = module docstring (first statement); `.ts` = top block comment (`/* ... */`); `.vue` = top HTML comment (before `<template>`).
+- Standard: `.sangoi/policies/file-header-block.md`. Helper: `python3 .sangoi/.tools/review_apps_header_updates.py`.
+
+## WebUI Atlas
+
+Last reviewed on 2026-04-29 during the root Atlas consolidation.
+
+<!-- Merge-safety anchor: this prompt-resident WebUI Atlas replaces the former split-file discovery front door; update it whenever a hot path, owner file, public route, or shipped entrypoint moves. -->
+
+### How to use this atlas
+
+- Optimize for owner-first navigation: open the governing seam before opening followers, generated reports, tests, or wide UI files.
+- Treat this Atlas as the default "open this first" map so a fresh session does not need broad grep just to rediscover the runtime shape.
+- Follow one hot path top-down before widening sideways. Most wrong reads here come from opening followers in parallel before the governing seam is locked.
+- When you land in a folder that already has its own `AGENTS.md`, read that local sub-atlas immediately before editing inside that folder.
+- Treat this Atlas as a first-pass routing map, not permission to guess gated names, stale symbols, or follower behavior without checking the live owner file.
+- Use `.sangoi/reports/tooling/backend-py-book-index.md` only for generated backend file discovery and counts; it is not policy authority.
+
+### High-churn hotspots and fanout seams
+
+- Keymaps: `apps/backend/runtime/state_dict/key_mapping.py`
+  - Aliases: checkpoint keyspace mapping; WAN LoRA logical keys; Anima raw `net.*` core keyspace.
+  - Open this when mapping upstream checkpoint keyspaces into canonical runtime lookup views without rewriting stored keys.
+  - Secondary seams: `apps/backend/runtime/state_dict/keymap_anima_transformer.py`, `apps/backend/runtime/state_dict/keymap_wan22_transformer.py`, `apps/backend/runtime/state_dict/AGENTS.md`.
+- Native Conv3D VAE: `apps/backend/runtime/common/vae_codex3d.py`
+  - Aliases: codex3d vae; conv3d native.
+  - Open this for WAN-style native 3D VAE load/detect, shift/scale policy, or codex 3D lane questions.
+  - Secondary seams: `apps/backend/runtime/families/wan22/vae_io.py`, `apps/backend/runtime/state_dict/keymap_wan22_vae.py`.
+- Hires Fix: `apps/backend/runtime/pipeline_stages/hires_fix.py`
+  - Aliases: hires second pass; high-res fix.
+  - Open this for second pass, hires geometry, continuation semantics, or hires telemetry ownership.
+  - Secondary seams: `apps/backend/runtime/families/sd/hires_fix.py`, `apps/backend/use_cases/img2img.py`.
+- Image Automation: `apps/backend/use_cases/image_automation.py`
+  - Aliases: infinite generate; folder loop; wildcard batch.
+  - Open this for repeat/infinite runs, prompt-list/wildcard expansion, folder source cycling, or automation summaries.
+  - Secondary seams: `apps/backend/interfaces/api/tasks/generation_tasks.py`, `apps/backend/interfaces/api/routers/generation.py`.
+- IP-Adapter: `apps/backend/runtime/pipeline_stages/ip_adapter.py`
+  - Aliases: image prompt adapter; reference image conditioning.
+  - Open this for adapter model/image-encoder selection, reference-image preprocessing, or per-sampling patch application.
+  - Secondary seams: `apps/backend/runtime/adapters/ip_adapter/`, `apps/backend/interfaces/api/routers/generation.py`.
+- SUPIR Runtime: `apps/backend/runtime/families/supir/runtime.py`
+  - Aliases: supir mode; sdxl restore; img2img restore branch.
+  - Open this for native SDXL img2img/inpaint SUPIR mode, restore-anchor sampling, or SUPIR variant/base-checkpoint validation.
+  - Secondary seams: `apps/backend/use_cases/img2img.py`, `apps/backend/interfaces/api/routers/generation.py`, `apps/backend/runtime/families/supir/loader.py`.
+- attention_sram_v1: `apps/backend/runtime/attention/sram/__init__.py`
+  - Aliases: SRAM attention; split-KV; shared-memory attention.
+  - Open this for runtime bridge, extension build/warmup, split-KV heuristics, or shared-memory kernel lane work.
+  - Secondary seams: `apps/backend/runtime/kernels/attention_sram_v1/`, `apps/backend/runtime/families/wan22/model.py`.
+- Generation Router: `apps/backend/interfaces/api/routers/generation.py`
+  - Aliases: generation endpoints; request parsing; SUPIR preflight.
+  - Open this for public generation routes, payload parsers, task spawn, or route-level fail-loud guards.
+  - Secondary seams: `apps/backend/interfaces/api/tasks/generation_tasks.py`, `apps/backend/interfaces/api/run_api.py`, `apps/backend/runtime/logging.py`.
+- Task Streaming: `apps/backend/interfaces/api/routers/tasks.py`
+  - Aliases: task SSE; replay buffer; `/api/tasks/{id}/events`.
+  - Open this for task snapshots, SSE replay/gap recovery, terminal result/end emission, or cancellation semantics.
+  - Secondary seams: `apps/backend/interfaces/api/task_registry.py`, `apps/backend/interfaces/api/tasks/generation_tasks.py`.
+- Orchestrator: `apps/backend/core/orchestrator.py`
+  - Aliases: engine dispatch; model load/cache; runtime coordinator.
+  - Open this for engine resolution, load/unload/cache ownership, or wrapper dispatch.
+  - Secondary seams: `apps/backend/core/engine_interface.py`, `apps/backend/engines/common/base.py`.
+
+### Pipeline owner paths
+
+#### txt2img
+
+- Public route: `apps/backend/interfaces/api/routers/generation.py` (`/api/txt2img`)
+  - Validates payload, route capability, and explicit device; creates `TaskEntry`; starts `run_txt2img_task`.
+- Shared image task worker: `apps/backend/interfaces/api/tasks/generation_tasks.py`
+  - Calls `prepare_txt2img(...)`, owns inference-gate/task lifecycle, and reuses shared image result packaging before `InferenceOrchestrator.run(...)`.
+- Orchestrator: `apps/backend/core/orchestrator.py`
+  - Resolves engine registry/load/cache state and dispatches to the engine `txt2img(...)` wrapper.
+- Engine wrapper: `apps/backend/engines/common/base.py`
+  - Delegates the mode to `run_txt2img(...)` instead of owning a second pipeline.
+- Canonical use-case: `apps/backend/use_cases/txt2img.py`
+  - Owns progress/result emission, decode, and cleanup inside the worker-thread envelope.
+- Stage runner: `apps/backend/use_cases/txt2img_pipeline/runner.py`
+  - Executes the staged txt2img pipeline and returns the `GenerationResult`.
+- Terminal surfaces: `apps/backend/interfaces/api/tasks/generation_tasks.py` and `apps/backend/interfaces/api/routers/tasks.py`
+  - Encode/save images, store the result payload, and expose terminal result/end through `GET /api/tasks/{id}` and `/api/tasks/{id}/events`.
+
+#### img2img
+
+- Public route: `apps/backend/interfaces/api/routers/generation.py` (`/api/img2img`)
+  - Validates payload and route capability, rejects masked requests when semantic capability says masking is unsupported, validates exact-engine `img2img_inpaint_mode`, preflights native `img2img_extras.supir` and exact SDXL Fooocus/BrushNet assets, then creates the task and picks the explicit device.
+- Shared image task worker: `apps/backend/interfaces/api/tasks/generation_tasks.py`
+  - Calls `prepare_img2img(...)`, owns inference-gate/task lifecycle, and packages the terminal image result.
+- Orchestrator: `apps/backend/core/orchestrator.py`
+  - Resolves engine/load/cache state and dispatches to the mode wrapper.
+- Engine wrapper: `apps/backend/engines/common/base.py`
+  - Delegates to `run_img2img(...)`.
+- Canonical use-case: `apps/backend/use_cases/img2img.py`
+  - Owns classic-family dispatch, init-image planning, prompt/sampling plans, optional native SUPIR mode, optional masked img2img, exact-engine SDXL Fooocus/BrushNet branching, and optional hires continuation.
+- Shared stage helpers: `apps/backend/runtime/pipeline_stages/masked_img2img.py`, `apps/backend/runtime/pipeline_stages/sampling_execute.py`, `apps/backend/runtime/families/sd/fooocus_inpaint.py`, `apps/backend/runtime/families/sd/brushnet.py`, and `apps/backend/runtime/pipeline_stages/hires_fix.py`
+  - Prepare generic masked bundles/image conditioning/hires latents; `sampling_execute.py` activates the post-LoRA sampling snapshot and enters request-scoped SDXL Fooocus/BrushNet patch sessions before sampler/IP-Adapter.
+- Terminal surfaces: `apps/backend/interfaces/api/tasks/generation_tasks.py` and `apps/backend/interfaces/api/routers/tasks.py`
+  - Store the encoded result payload and expose terminal snapshot/SSE state.
+- Branch notes:
+  - Classic base img2img resolves SD-vs-flow dispatch locally in `apps/backend/use_cases/img2img.py` before masked/unmasked prep.
+  - SDXL SUPIR mode stays inside canonical img2img: route preflight lives in `apps/backend/interfaces/api/routers/generation.py`; request-scoped restore runtime lives in `apps/backend/runtime/families/supir/runtime.py`.
+  - SDXL exact-engine inpaint stays inside canonical img2img: exact-engine mode/asset preflight lives in `apps/backend/interfaces/api/routers/generation.py`; `img2img.py` installs the temporary request-scoped sampling-session factory only for non-SUPIR exact modes; `sampling_execute.py` enters the Fooocus/BrushNet session after canonical LoRA activation.
+  - Kontext-specific img2img work stays local to `apps/backend/use_cases/img2img.py`.
+  - FLUX.2 keeps its own engine-side img2img seam at `apps/backend/engines/flux2/img2img.py`; the public route still enters through the same router/task/orchestrator chain.
+
+#### image_automation
+
+- Public route: `apps/backend/interfaces/api/routers/generation.py` (`/api/image-automation`)
+  - Parses the backend-owned automation contract, selects the explicit device from the template payload, and creates `run_image_automation_task(...)`.
+- Automation task worker: `apps/backend/interfaces/api/tasks/generation_tasks.py`
+  - Owns task lifecycle, inference gate, per-iteration execution wrapper, automation summary, and terminal task result storage.
+- Automation loop owner: `apps/backend/use_cases/image_automation.py`
+  - Expands prompts/wildcards, selects folder/init/reference inputs, manages loop cancellation, and emits iteration/progress events.
+- Iteration delegate: `apps/backend/interfaces/api/tasks/generation_tasks.py` (`_execute_prepared_image_request`)
+  - Turns each prepared iteration back into the canonical txt2img/img2img request path.
+- Underlying mode: `apps/backend/use_cases/txt2img.py` or `apps/backend/use_cases/img2img.py`
+  - Executes the actual generation for one iteration.
+- Terminal surfaces: `apps/backend/interfaces/api/tasks/generation_tasks.py` and `apps/backend/interfaces/api/routers/tasks.py`
+  - Publish `automation_iteration` events, store the final automation summary/result, and expose replay through task snapshot/SSE.
+
+#### txt2vid
+
+- Public route: `apps/backend/interfaces/api/routers/generation.py` (`/api/txt2vid`)
+  - Validates payload/capability, rejects legacy aliases, creates the task, and selects the explicit device.
+- Shared video task worker: `apps/backend/interfaces/api/routers/generation.py`
+  - Parses the request, owns task lifecycle for video modes, and stores the terminal result payload.
+- Orchestrator: `apps/backend/core/orchestrator.py`
+  - Resolves engine/load/cache state and dispatches to the engine `txt2vid(...)` wrapper.
+- Engine wrapper: `apps/backend/engines/ltx2/ltx2.py` or `apps/backend/engines/wan22/wan22_14b.py`
+  - Delegates to `run_txt2vid(...)` for the active engine family.
+- Canonical use-case: `apps/backend/use_cases/txt2vid.py`
+  - Owns execution-profile branching, shared video plan/export helpers, optional upscaling/interpolation, and terminal `ResultEvent` emission.
+- Shared video helpers: `apps/backend/runtime/pipeline_stages/video.py`
+  - Own `build_video_plan(...)`, `build_ltx2_video_plan(...)`, WAN Diffusers stage-LoRA preflight/apply, export helpers, and post-generation video stages.
+- Terminal surfaces: `apps/backend/interfaces/api/routers/generation.py` and `apps/backend/interfaces/api/routers/tasks.py`
+  - Store the final result in the task entry and expose terminal snapshot/SSE state.
+- Branch notes:
+  - LTX2 keeps its execution-profile branch inside `apps/backend/use_cases/txt2vid.py`.
+  - WAN22 keeps GGUF/diffusers branch decisions inside the same use-case after wrapper/orchestrator hand-off.
+
+#### img2vid
+
+- Public route: `apps/backend/interfaces/api/routers/generation.py` (`/api/img2vid`)
+  - Validates payload/capability, applies route-specific preflight, creates the task, and selects the explicit device.
+- Shared video task worker: `apps/backend/interfaces/api/routers/generation.py`
+  - Parses the request, owns task lifecycle, and stores the terminal result payload.
+- Orchestrator: `apps/backend/core/orchestrator.py`
+  - Resolves engine/load/cache state and dispatches to the engine `img2vid(...)` wrapper.
+- Engine wrapper: `apps/backend/engines/ltx2/ltx2.py` or `apps/backend/engines/wan22/wan22_14b.py`
+  - Delegates to `run_img2vid(...)` for the active engine family.
+- Canonical use-case: `apps/backend/use_cases/img2vid.py`
+  - Owns image-video execution profiles, WAN temporal-mode branching, shared video plan/export helpers, and terminal `ResultEvent` emission.
+- Shared video helpers: `apps/backend/runtime/pipeline_stages/video.py`
+  - Own plan/export/upscale/interpolation helpers shared with txt2vid plus WAN Diffusers stage-LoRA preflight/apply.
+- Terminal surfaces: `apps/backend/interfaces/api/routers/generation.py` and `apps/backend/interfaces/api/routers/tasks.py`
+  - Store the final result in the task entry and expose terminal snapshot/SSE state.
+
+#### vid2vid
+
+- Public route: `apps/backend/interfaces/api/routers/generation.py` (`/api/vid2vid`)
+  - Current public truth: the route is parked and fails fast with `400` before staging/task creation while no families are implemented.
+- Dormant wrapper: `apps/backend/engines/wan22/wan22_14b.py`
+  - In-tree wrapper hook still exists for the future re-enable path.
+- Dormant use-case: `apps/backend/use_cases/vid2vid.py`
+  - Holds the bounded vid2vid execution owner once the public route is re-enabled.
+
+#### API bootstrap
+
+- App bootstrap: `apps/backend/interfaces/api/run_api.py`
+  - Builds the FastAPI app, validates startup/runtime settings, and mounts routers. Repo-owned bootstrap/server logs consume the canonical wrapper family from `apps/backend/runtime/logging.py`; the remaining raw logger carve-out is the explicit `uvicorn.access` seam.
+- Router mount: `apps/backend/interfaces/api/run_api.py`
+  - Includes `system`, `settings`, `ui`, `models`, `paths`, `options`, `tasks`, `tests`, `tools`, `upscale`, `supir`, and `generation`; the `supir` router is diagnostics-only.
+- Public entry: router modules under `apps/backend/interfaces/api/routers/`
+  - Expose task-backed generation/system/tool surfaces.
+
+### Owner seam map
+
+- Generation Router seam: `apps/backend/interfaces/api/routers/generation.py`
+  - Owns public generation routes, payload parsing, route-level capability guards, exact-engine SUPIR-mode preflight for canonical img2img/inpaint, task creation, and worker thread hand-off.
+  - Do not move mode execution into this file; it stays validate + dispatch + stream.
+- Image Task Worker: `apps/backend/interfaces/api/tasks/generation_tasks.py`
+  - Owns shared image task lifecycle, inference-gate integration, encoded image result packaging/save/provenance hooks, and automation task wrapper around canonical image modes.
+  - Open this file when the question is task result packaging rather than public payload parsing.
+- Task Registry + SSE: `apps/backend/interfaces/api/task_registry.py` and `apps/backend/interfaces/api/routers/tasks.py`
+  - Own in-memory task snapshots, bounded replay buffer and gap detection, terminal `result|error|end` emission, and cancellation API.
+  - Open these files first when reconnect/replay/status drift is the seam.
+- Backend Logging seam: `apps/backend/runtime/logging.py`
+  - Owns normalized repo-owned logger acquisition via `get_backend_logger(...)`, logger-style repo-owned emission through `BackendLoggerProxy`, human-readable wrapper emission via `emit_backend_message(...)`, structured telemetry emission via `emit_backend_event(...)`, and canonical uvicorn/bootstrap logging config via `build_backend_uvicorn_log_config(...)`.
+  - Secondary seams: `apps/backend/interfaces/api/run_api.py`, `apps/backend/runtime/diagnostics/error_summary.py`, `apps/backend/runtime/diagnostics/exception_hook.py`, `apps/backend/infra/stdio.py`.
+  - Open this for logger namespace normalization, repo-owned backend log formatting/emission, bootstrap/server log config, or the split between operational logs, concise runtime summaries, full exception dumps, and exact stdout/stderr contracts.
+- Orchestrator seam: `apps/backend/core/orchestrator.py`
+  - Owns engine registry lookup, load/unload/cache residency decisions, and dispatch from task workers into engine wrappers.
+  - It coordinates execution; it is not the terminal result owner.
+- Shared pipeline stages: `apps/backend/runtime/pipeline_stages/`
+  - High-value entries: `hires_fix.py`, `masked_img2img.py`, `video.py`, `ip_adapter.py`.
+  - Open this directory when the question is a shared stage reused by multiple canonical use-cases.
+  - `video.py` is the current shared owner for WAN Diffusers stage-LoRA preflight/apply across `txt2vid`, `img2vid`, and `vid2vid`.
+
+### Generated artifact and policy pointers
+
+- Backend header snapshot: `.sangoi/reports/tooling/apps-backend-file-header-blocks.md`
+  - Use it when you need the current backend file-header snapshot that feeds the grouped book index.
+- Backend Python book index: `.sangoi/reports/tooling/backend-py-book-index.md`
+  - Use it when you need the full grouped backend file list and current generated subtree/timestamp scope.
+- Tool command catalog: `.sangoi/.tools/AGENTS.md`
+  - Use it for current commands/failure modes for header dumps, backend book-index rebuilds, and link/header lint checks.
+- Report catalogs: `.sangoi/reports/AGENTS.md` and `.sangoi/reports/tooling/AGENTS.md`
+  - Use these to distinguish active report-catalog truth from retained audit artifacts.
+- File header standard: `.sangoi/policies/file-header-block.md`
+  - Use it when a touched `apps/**` file header needs truthful `Purpose` / `Symbols` sync.
 
 ---
 
@@ -71,7 +278,7 @@ When your turn is done:
 
 - You verify the **file header block** (top-of-file `Repository/SPDX/Purpose/Symbols`) for **every touched file** under `apps/**` (even if the diff "seems small”), and update Purpose/Symbols if needed.
 - Use `python3 .sangoi/.tools/review_apps_header_updates.py --show-body-diff` to review "changed body, unchanged header” cases.
-- If the touched `apps/**` file is referenced by a mapped node chain, hotspot entry, or owner seam in the subsystem docs, update the manual map/index in the same tranche instead of leaving the atlas stale.
+- If the touched `apps/**` file is referenced by a mapped node chain, hotspot entry, or owner seam in the WebUI Atlas, update this root `AGENTS.md` in the same tranche instead of leaving the Atlas stale.
 
 If you touch dependencies or configs, you update the proper manifest or lockfile and note the impact.
 
