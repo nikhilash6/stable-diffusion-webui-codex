@@ -12,7 +12,8 @@ Masked img2img (“inpaint”) uses Forge/A1111 “Only masked” semantics and 
 Exact-engine SDXL `fooocus_inpaint` and `brushnet` stay on request-scoped family helper seams while the shared masked stage remains generic-only; the canonical sampling stage now enters those exact-engine sessions after LoRA activation instead of mutating only the pre-sampling active snapshot.
 The hires pass init is prepared via the global family-dispatched hires-fix stage (`apps/backend/runtime/pipeline_stages/hires_fix.py`).
 When configured, the hires second pass parses LoRA tags from the hires prompt/negative prompt pair, inherits base/request LoRAs when the hires
-prompt omits them, and resolves explicit hires request overrides by deriving a dedicated `SamplingPlan` for the hires pass.
+prompt omits them, and resolves explicit hires request overrides by deriving a dedicated `SamplingPlan` for the hires pass, including sampler-specific
+ER-SDE options when the hires sampler selects ER-SDE.
 When smart offload is enabled, keeps required text-encoder patchers loaded across cond+uncond and unloads them after conditioning.
 The wrapper executes sampling + decode + post-cleanup inside the same worker-thread envelope so model residency/offload policies remain single-owner per job.
 Worker-thread smart runtime overrides are propagated through `_image_streaming._run_inference_worker(...)`, the wrapper seeds a per-run progress-owner token before pre-sampling VAE encode begins, and decode/cleanup hooks run under a `finally` contract.
@@ -100,6 +101,7 @@ from apps.backend.runtime.pipeline_stages.sampling_execute import execute_sampli
 from apps.backend.runtime.pipeline_stages.sampling_plan import (
     build_sampling_plan,
     ensure_sampler_and_rng,
+    resolve_er_sde_options_for_sampler,
     resolve_sampler_scheduler_override,
 )
 from apps.backend.runtime.pipeline_stages.scripts import run_process_scripts
@@ -696,12 +698,17 @@ def _run_hires_pass(
             plan,
             steps=int(processing.steps),
             guidance_scale=float(processing.guidance_scale),
+            er_sde=None,
         )
         hires_sampler, hires_scheduler = resolve_sampler_scheduler_override(
             base_sampler=str(hires_runtime_plan.sampler_name or ""),
             base_scheduler=str(hires_runtime_plan.scheduler_name or ""),
             sampler_override=getattr(hi_cfg, "sampler_name", None),
             scheduler_override=getattr(hi_cfg, "scheduler", None),
+        )
+        hires_runtime_plan = replace(
+            hires_runtime_plan,
+            er_sde=resolve_er_sde_options_for_sampler(processing, hires_sampler),
         )
         processing.sampler_name = hires_sampler
         processing.scheduler = hires_scheduler

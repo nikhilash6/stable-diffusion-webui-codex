@@ -11,6 +11,7 @@ Coordinates prompt parsing, conditioning, sampling execution, generic first-pass
 Conditioning smart-cache entries are keyed by model/load identity plus wrapped prompt metadata and stored detached on CPU to avoid stale hits and cross-request GPU pinning.
 The hires stage delegates family-dispatched init preparation and continuation semantics to the global hires-fix workflow stage (`apps/backend/runtime/pipeline_stages/hires_fix.py`).
 When configured, the hires second pass parses LoRA-only prompt tags, inherits base/request LoRAs when the hires prompt omits them, resolves explicit hires request overrides by deriving a dedicated `SamplingPlan` for the hires pass, and calls the shared sampler with the internal fixed-step img2img continuation flag only from this hires seam.
+Sampler-specific hires plan options such as ER-SDE stay attached to the derived hires plan rather than leaking through flat processing fields.
 First-pass base decode before hires is now upscaler-aware (`latent:*` skips decode; pixel upscalers decode).
 When smart offload is enabled, keeps required text-encoder patchers loaded across cond+uncond and unloads them after conditioning.
 
@@ -76,6 +77,7 @@ from apps.backend.runtime.pipeline_stages.sampling_execute import execute_sampli
 from apps.backend.runtime.pipeline_stages.sampling_plan import (
     build_sampling_plan,
     ensure_sampler_and_rng,
+    resolve_er_sde_options_for_sampler,
     resolve_sampler_scheduler_override,
 )
 from apps.backend.patchers.lora_apply import selection_hash_for_request
@@ -971,6 +973,7 @@ class Txt2ImgPipelineRunner:
                 state.sampling_plan,
                 steps=int(processing.steps),
                 guidance_scale=float(processing.guidance_scale),
+                er_sde=None,
             )
             hires_sampler, hires_scheduler = resolve_sampler_scheduler_override(
                 base_sampler=str(hires_runtime_plan.sampler_name or ""),
@@ -1106,6 +1109,7 @@ class Txt2ImgPipelineRunner:
                 scheduler_name=hires_scheduler,
                 steps=int(processing.steps),
                 guidance_scale=float(processing.guidance_scale),
+                er_sde=resolve_er_sde_options_for_sampler(processing, hires_sampler),
             )
 
             # Recompute conditioning for hires pass with updated width/height/targets (SDXL parity).

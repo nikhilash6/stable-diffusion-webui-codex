@@ -13,7 +13,8 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_normalize_scheduler_name` (function): Validate a scheduler name for the given sampler.
 - `resolve_sampler_scheduler_override` (function): Resolve sampler/scheduler for a derived plan (e.g., hires pass) with override semantics.
 - `resolve_noise_settings` (function): Derive `NoiseSettings` for a run from processing overrides and env.
-- `resolve_er_sde_options` (function): Build normalized typed ER-SDE options from processing overrides.
+- `_resolve_er_sde_payload_options` (function): Build normalized typed ER-SDE options from processing overrides.
+- `resolve_er_sde_options_for_sampler` (function): Attach ER-SDE options only when the active sampler is ER-SDE.
 - `build_sampling_plan` (function): Build a `SamplingPlan` from processing state and explicit seeds/subseeds.
 - `ensure_sampler` (function): Ensure `processing.sampler` exists for the current sampling plan without installing a fresh RNG.
 - `ensure_sampler_and_rng` (function): Ensure `processing.sampler` and `processing.rng` exist for the current sampling plan.
@@ -143,7 +144,7 @@ def resolve_noise_settings(processing: Any) -> NoiseSettings:
     return settings
 
 
-def resolve_er_sde_options(processing: Any) -> ErSdeOptions | None:
+def _resolve_er_sde_payload_options(processing: Any) -> ErSdeOptions | None:
     """Resolve ER-SDE options from processing overrides with strict validation."""
     overrides = getattr(processing, "override_settings", {})
     if not isinstance(overrides, dict):
@@ -157,6 +158,13 @@ def resolve_er_sde_options(processing: Any) -> ErSdeOptions | None:
         eta=float(normalized["eta"]),
         s_noise=float(normalized["s_noise"]),
     )
+
+
+def resolve_er_sde_options_for_sampler(processing: Any, sampler_name: str | None) -> ErSdeOptions | None:
+    """Resolve ER-SDE options only for an active ER-SDE sampler selection."""
+    if not isinstance(sampler_name, str) or sampler_name.strip().lower() != "er sde":
+        return None
+    return _resolve_er_sde_payload_options(processing)
 
 
 def build_sampling_plan(
@@ -179,10 +187,6 @@ def build_sampling_plan(
         raise ValueError("processing.scheduler must be set to a non-empty scheduler name")
     normalized_scheduler = _normalize_scheduler_name(sampler_name, scheduler_name)
     processing.scheduler = normalized_scheduler
-    hr_sampler_name = getattr(processing, "hr_sampler_name", None)
-    er_sde_in_use = sampler_name.strip().lower() == "er sde"
-    if isinstance(hr_sampler_name, str) and hr_sampler_name.strip().lower() == "er sde":
-        er_sde_in_use = True
     return SamplingPlan(
         sampler_name=sampler_name,
         scheduler_name=normalized_scheduler,
@@ -192,7 +196,7 @@ def build_sampling_plan(
         subseeds=list(subseeds),
         subseed_strength=float(subseed_strength),
         noise_settings=noise_settings,
-        er_sde=resolve_er_sde_options(processing) if er_sde_in_use else None,
+        er_sde=resolve_er_sde_options_for_sampler(processing, sampler_name),
     )
 
 
