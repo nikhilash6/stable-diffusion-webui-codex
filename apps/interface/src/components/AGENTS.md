@@ -1,7 +1,7 @@
 <!-- tags: frontend, components, prompt, hires, refiner -->
 # apps/interface/src/components Overview
 Date: 2025-12-06
-Last Review: 2026-04-12
+Last Review: 2026-04-29
 Status: Active
 
 ## Purpose
@@ -78,11 +78,11 @@ Status: Active
 - 2026-02-07: `DependencyCheckPanel.vue` now serves a single Home-level dependency overview grouped by semantic engine; image/WAN tabs no longer render local dependency panels.
 - 2026-02-06: `QuickSettingsBar.vue` bootstrap init is now routed through `stores/bootstrap` (no fire-and-forget startup calls; inventory/paths loading is fail-loud).
 - 2026-02-06: `QuickSettingsBar.vue` now catches and surfaces tab/options mutation failures (toasts) in async handlers and route-sync watchers, avoiding unhandled promise rejections from tab updates.
-- 2026-02-06: `QuickSettingsBar.vue` now resolves family fallback using canonical taxonomy helpers + backend `engine_id_to_semantic_engine` mapping (no duplicated ad-hoc alias table in the component).
-- 2026-02-06: `QuickSettingsBar.vue` family fallback now guards on `engineCaps.loaded` before semantic-map resolution (prevents pre-bootstrap alias-map throws while preserving fail-loud behavior after load).
+- 2026-04-29: `QuickSettingsBar.vue` non-model fallback consumes `/api/ui/blocks.semantic_engine` as a semantic-only value through `normalizeSemanticEngine(...)`; it must not route that fallback through the exact backend `engine_id_to_semantic_engine` map.
+- 2026-04-29: `QuickSettingsBar.vue` family fallback still guards on `engineCaps.loaded` before semantic fallback resolution (prevents pre-bootstrap fallback churn while preserving exact-id failures in capability callers after load).
 - 2026-02-06: `QuickSettingsBar.vue` now narrows active tabs with typed `ImageTab`/`WanTab` helpers and updates image-tab params through a typed helper (`updateImageTabParams`), reducing `tab.params as any` usage in model/text-encoder/ZImage/WAN controls.
 - 2026-04-05: `QuickSettingsBar.vue` must reuse `src/utils/image_params.ts::buildUseInitImagePatch(...)` for the shared `IMG2IMG` toggle cleanup; do not hand-roll a second init-image/mask reset path in the header when `PngInfo.vue` and the image views already depend on that same canonical cleanup contract.
-- 2026-04-13: `QuickSettingsBar.vue` must query engine capabilities and asset contracts by the active exact `tab.type`, not by a component-local `tab.type -> semantic engine` conversion. The backend-owned `engine_id_to_semantic_engine` map already lives inside `engine_capabilities.ts`; do not reintroduce another semantic lookup shim in the header.
+- 2026-04-29: `QuickSettingsBar.vue` image capability and asset-contract lookups must use the canonical exact request id from `resolveImageRequestEngineId(...)`; Chroma tab family resolves to `flux1_chroma` before exact capability lookup. Do not pass semantic-only `chroma` or generic `wan22` to exact capability APIs, and do not reintroduce a component-local semantic lookup shim in the header.
 - 2026-02-08: `RefinerSettingsCard.vue` / `HiresSettingsCard.vue` swap-model controls now use step-pointer semantics (`Swap At Step`, min 1) and avoid “refiner step-count” wording.
 - 2026-04-08: `InitialImageBlock.vue` is now the sole live public owner for img2img/inpaint and img2vid initial-image surfaces. Parent views remain the source of truth for normalization/clamps/file handlers, while the block itself only owns the shared UI structure and optional surface sections.
 - 2026-04-08: `ImageSourceBlock.vue` is now the shared live owner for `DIR|IMG` source switching, constrained picker rendering, and `ImageFolderSourceFields.vue` composition. Keep `InitialImageBlock.vue` and `IpAdapterCard.vue` as the public owners above it, and keep the shared picker on the constrained `thumbnail` path.

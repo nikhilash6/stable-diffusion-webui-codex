@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Canonical frontend engine/tab taxonomy helpers.
-Centralizes tab-family aliases, exact video-lane detection, image request engine-id resolution, backend engine-id -> semantic-engine resolution,
+Centralizes tab-family aliases, exact video-lane detection, image request engine-id resolution, exact backend engine-id -> semantic-engine resolution,
 and sampler/scheduler fallback defaults so stores/composables stop duplicating mapping tables. Fallback sampler/scheduler pairs must stay aligned
 to the live executable surface (for example SD15 now defaults to `ddim` / `ddim`). FLUX.2 stays first-class in frontend taxonomy (no FLUX.1
 aliasing), while backend-only semantic engines such as `netflix_void` remain valid semantic ids but intentionally resolve to no UI tab family.
@@ -16,7 +16,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `TabFamily` (type): Canonical model tab families used by the UI.
 - `VideoTabFamily` (type): Exact video tab families supported by the routed video workspace.
 - `SemanticEngine` (type): Backend semantic engine ids from `/api/engines/capabilities`.
-- `EngineRequestId` (type): Engine ids used in frontend payload dispatch (`flux1_kontext`, `flux1_chroma`, etc.).
+- `EngineRequestId` (type): Exact backend request engine ids used in frontend payload dispatch (`flux1_kontext`, `flux1_chroma`, etc.).
 - `normalizeTabFamily` (function): Normalizes raw alias values into `TabFamily` or `null`.
 - `normalizeSemanticEngine` (function): Normalizes raw semantic-engine values into canonical `SemanticEngine` or `null`.
 - `isWanTabFamily` (function): Returns whether a tab family is an exact WAN lane.
@@ -48,12 +48,20 @@ export type SemanticEngine =
   | 'svd'
 
 export type EngineRequestId =
-  | SemanticEngine
-  | 'flux1_chroma'
+  | 'sd15'
+  | 'sd20'
+  | 'sdxl'
+  | 'sdxl_refiner'
+  | 'flux1'
   | 'flux1_kontext'
   | 'flux1_fill'
-  | 'wan22_14b'
+  | 'flux2'
+  | 'flux1_chroma'
+  | 'zimage'
+  | 'anima'
   | 'wan22_5b'
+  | 'wan22_14b'
+  | 'wan22_14b_animate'
   | 'ltx2'
 
 const TAB_FAMILY_ALIASES: Readonly<Record<string, TabFamily>> = Object.freeze({
@@ -87,18 +95,20 @@ const SEMANTIC_ENGINE_SET: ReadonlySet<string> = new Set<string>([
 
 const ENGINE_ID_SET: ReadonlySet<string> = new Set<string>([
   'sd15',
+  'sd20',
   'sdxl',
+  'sdxl_refiner',
   'flux1',
-  'flux2',
-  'flux1_chroma',
   'flux1_kontext',
   'flux1_fill',
+  'flux2',
+  'flux1_chroma',
   'zimage',
   'anima',
-  'ltx2',
-  'wan22',
-  'wan22_14b',
   'wan22_5b',
+  'wan22_14b',
+  'wan22_14b_animate',
+  'ltx2',
 ])
 
 const TAB_FAMILY_FALLBACK_SAMPLING: Readonly<Record<TabFamily, SamplingDefaults>> = Object.freeze({
@@ -173,9 +183,6 @@ export function resolveSemanticEngineForEngineId(
 ): SemanticEngine | null {
   const id = normalizeKey(engineId)
   if (!id) return null
-
-  const semanticDirect = normalizeSemanticEngine(id)
-  if (semanticDirect) return semanticDirect
 
   const mappedRaw = typeof map[id] === 'string' ? map[id] : ''
   const mappedSemantic = normalizeSemanticEngine(mappedRaw)

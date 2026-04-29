@@ -6,7 +6,7 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Semantic engine capability surfaces exposed to the UI layer, plus explicit parked exact-engine stubs.
+Purpose: Semantic engine capability surfaces, exact-engine inpaint-mode truth, and explicit parked exact-engine stubs exposed to the UI layer.
 Defines `SemanticEngine` tags and an `EngineParamSurface` describing which high-level UI sections and tasks are expected to be used for each engine,
 including explicit masked-img2img/inpaint support, vid2vid discoverability, and native IP-Adapter/SUPIR discoverability, with executable defaults and
 recommendation hints for the live surface (for example SD15 `ddim`/`ddim`, WAN22 `uni-pc bh2`/`simple`, and LTX2 `euler`/`simple` with no sampler fiction
@@ -369,7 +369,6 @@ EXACT_ENGINE_INPAINT_MODES: Dict[str, tuple[str, ...]] = {
     "flux1_chroma": (),
     "zimage": _GENERIC_INPAINT_MODES,
     "anima": (),
-    "wan22": (),
     "wan22_5b": (),
     "wan22_14b": (),
     "wan22_14b_animate": (),

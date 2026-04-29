@@ -68,6 +68,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `onUseInitImageChange` (function): Toggles active image-tab mode between txt2img and img2img from quick settings.
 - `canShowModeToggles` (computed): Enables IMG2IMG/INPAINT quicksettings controls when the active image tab supports img2img.
 - `useInitImage` / `useMask` / `hasInitImage` / `initSourceIsImg` (computed): Shared-header mode/source/materialized-image state for the active image tab.
+- `activeImageRequestEngineId` (computed): Resolves the active image tab to the exact backend request id used for capability and asset-contract lookups.
 - `supirEnabled` / `canShowSupirToggle` / `supirSelectionState` (computed): Shared-header SUPIR toggle state, discoverability, and blocking contract for SDXL img2img/inpaint.
 - `supportsInpaint` (computed): Flags whether the active image-tab semantic capability truthfully supports mask/inpaint semantics.
 - `isActiveImageTabRunning` (computed): Tracks whether the active image tab currently has an in-flight generation task.
@@ -691,6 +692,8 @@ import { useSupirDiagnostics, resolveSupirSelectionState } from '../composables/
 import {
   isWanTabFamily,
   normalizeTabFamily,
+  normalizeSemanticEngine,
+  resolveImageRequestEngineId,
   tabFamilyFromSemanticEngine,
   type TabFamily,
 } from '../utils/engine_taxonomy'
@@ -952,7 +955,7 @@ const activeFamily = computed<TabFamily>(() => {
 
   // Fallback when no model tab is active (settings/tools pages etc.).
   if (!engineCaps.loaded) return 'sd15'
-  const semantic = engineCaps.semanticEngineForId(uiBlocks.semanticEngine || 'sd15')
+  const semantic = normalizeSemanticEngine(uiBlocks.semanticEngine || 'sd15')
   const family = tabFamilyFromSemanticEngine(semantic)
   if (family) return family
 
@@ -1365,6 +1368,11 @@ const activeImageTab = computed(() => {
   if (!isModelTabRoute.value) return null
   return asImageTab(activeModelTab.value)
 })
+const activeImageRequestEngineId = computed(() => {
+  const tab = activeImageTab.value
+  if (!tab) return null
+  return resolveImageRequestEngineId(tab.type, Boolean(tab.params.useInitImage))
+})
 const activeLtxTab = computed(() => {
   if (!isModelTabRoute.value) return null
   return asLtxTab(activeModelTab.value)
@@ -1386,9 +1394,9 @@ const activeLtxMode = computed<LtxGenerationMode>(() => {
   return tab.params.mode
 })
 const activeImageSurface = computed(() => {
-  const tab = activeImageTab.value
-  if (!tab) return null
-  return engineCaps.get(tab.type)
+  const engineId = activeImageRequestEngineId.value
+  if (!engineId) return null
+  return engineCaps.get(engineId)
 })
 const canToggleInitImage = computed(() => {
   const tab = activeImageTab.value
@@ -1570,12 +1578,14 @@ const effectiveVae = computed(() => {
 const activeImageAssetContract = computed(() => {
   const tab = activeImageTab.value
   if (!tab) return null
+  const engineId = activeImageRequestEngineId.value
+  if (!engineId) return null
   const checkpoint = String(tab.params.checkpoint || '').trim()
   const modelInfo = checkpoint ? store.resolveModelInfo(checkpoint) : undefined
   if (checkpoint && modelInfo && typeof modelInfo.core_only !== 'boolean') {
     return null
   }
-  return engineCaps.getAssetContract(tab.type, {
+  return engineCaps.getAssetContract(engineId, {
     checkpointCoreOnly: typeof modelInfo?.core_only === 'boolean' ? modelInfo.core_only : false,
   })
 })
