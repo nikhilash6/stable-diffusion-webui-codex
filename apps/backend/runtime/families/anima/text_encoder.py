@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Anima Qwen3-0.6B text encoder runtime + offline tokenizers (Qwen + T5).
-Loads sha-selected Qwen3-0.6B weights through strict Qwen key-style normalization or GGUF keyspace resolution into the native Qwen3
+Loads sha-selected Qwen3-0.6B weights through strict Qwen keyspace resolution or GGUF keyspace resolution into the native Qwen3
 implementation and provides the
 family-owned prompt/tokenization contract used by runtime conditioning and API prompt counting. Also loads an offline T5 tokenizer used only
 for dual-tokenization (token ids + weights + attention mask).
@@ -54,6 +54,17 @@ logger = get_backend_logger("backend.runtime.anima.text_encoder")
 ANIMA_MAX_LENGTH_DEFAULT = 99999999
 _ESCAPED_RIGHT_PAREN = "\0\1"
 _ESCAPED_LEFT_PAREN = "\0\2"
+_QWEN3_06B_HIDDEN_SIZE = 1024
+_QWEN3_06B_REQUIRED_SHAPES: dict[str, tuple[int, ...]] = {
+    "model.layers.0.self_attn.q_proj.weight": (2048, 1024),
+    "model.layers.0.self_attn.k_proj.weight": (1024, 1024),
+    "model.layers.0.self_attn.v_proj.weight": (1024, 1024),
+    "model.layers.0.self_attn.o_proj.weight": (1024, 2048),
+    "model.layers.0.self_attn.q_norm.weight": (128,),
+    "model.layers.0.self_attn.k_norm.weight": (128,),
+    "model.layers.0.mlp.gate_proj.weight": (3072, 1024),
+    "model.norm.weight": (1024,),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -544,23 +555,14 @@ def _validate_qwen3_06b_header(*, header: Mapping[str, object], context: str) ->
     if embed is None or len(embed) != 2:
         raise RuntimeError(f"Qwen3-0.6B header missing model.embed_tokens.weight shape: {context}")
     vocab, hidden = int(embed[0]), int(embed[1])
-    if hidden != 1024:
-        raise RuntimeError(f"Qwen3-0.6B embed dim mismatch for {context}: got {hidden}, expected 1024.")
+    if hidden != _QWEN3_06B_HIDDEN_SIZE:
+        raise RuntimeError(
+            f"Qwen3-0.6B embed dim mismatch for {context}: got {hidden}, expected {_QWEN3_06B_HIDDEN_SIZE}."
+        )
     if vocab <= 0:
         raise RuntimeError(f"Qwen3-0.6B vocab_size invalid for {context}: {vocab}.")
 
-    # Spot-check a few keys so wrong checkpoints fail loudly with a useful message.
-    required = (
-        "model.layers.0.self_attn.q_proj.weight",
-        "model.layers.0.mlp.gate_proj.weight",
-        "model.norm.weight",
-    )
-    missing = [k for k in required if k not in normalized_header]
-    if missing:
-        raise RuntimeError(
-            "Qwen3-0.6B weights file does not look like a compatible Qwen text-encoder checkpoint. "
-            f"Missing keys: {missing} ({context})"
-        )
+    _validate_qwen3_06b_required_shapes(shape_for=_shape, context=context)
 
 
 def _shape_of_mapping(mapping: Mapping[str, object], key: str) -> tuple[int, ...] | None:
@@ -585,25 +587,13 @@ def _shape_of_mapping(mapping: Mapping[str, object], key: str) -> tuple[int, ...
         return None
 
 
-def _validate_qwen3_06b_state_dict(*, state_dict: Mapping[str, object], context: str) -> None:
-    embed_shape = _shape_of_mapping(state_dict, "model.embed_tokens.weight")
-    if embed_shape is None or len(embed_shape) != 2:
-        raise RuntimeError(f"Qwen3-0.6B state_dict missing model.embed_tokens.weight shape: {context}")
-    vocab_size, hidden_size = int(embed_shape[0]), int(embed_shape[1])
-    if hidden_size != 1024:
-        raise RuntimeError(
-            f"Qwen3-0.6B embed dim mismatch for {context}: got {hidden_size}, expected 1024."
-        )
-    if vocab_size <= 0:
-        raise RuntimeError(f"Qwen3-0.6B vocab_size invalid for {context}: {vocab_size}.")
-
-    required_shapes = {
-        "model.layers.0.self_attn.q_proj.weight": (1024, 1024),
-        "model.layers.0.mlp.gate_proj.weight": (3072, 1024),
-        "model.norm.weight": (1024,),
-    }
-    for key, expected_shape in required_shapes.items():
-        shape = _shape_of_mapping(state_dict, key)
+def _validate_qwen3_06b_required_shapes(
+    *,
+    shape_for: Callable[[str], tuple[int, ...] | None],
+    context: str,
+) -> None:
+    for key, expected_shape in _QWEN3_06B_REQUIRED_SHAPES.items():
+        shape = shape_for(key)
         if shape is None:
             raise RuntimeError(
                 "Qwen3-0.6B weights file does not look like a compatible Qwen text-encoder checkpoint. "
@@ -614,6 +604,24 @@ def _validate_qwen3_06b_state_dict(*, state_dict: Mapping[str, object], context:
                 f"Qwen3-0.6B shape mismatch for {key} at {context}: "
                 f"got {shape}, expected {expected_shape}."
             )
+
+
+def _validate_qwen3_06b_state_dict(*, state_dict: Mapping[str, object], context: str) -> None:
+    embed_shape = _shape_of_mapping(state_dict, "model.embed_tokens.weight")
+    if embed_shape is None or len(embed_shape) != 2:
+        raise RuntimeError(f"Qwen3-0.6B state_dict missing model.embed_tokens.weight shape: {context}")
+    vocab_size, hidden_size = int(embed_shape[0]), int(embed_shape[1])
+    if hidden_size != _QWEN3_06B_HIDDEN_SIZE:
+        raise RuntimeError(
+            f"Qwen3-0.6B embed dim mismatch for {context}: got {hidden_size}, expected {_QWEN3_06B_HIDDEN_SIZE}."
+        )
+    if vocab_size <= 0:
+        raise RuntimeError(f"Qwen3-0.6B vocab_size invalid for {context}: {vocab_size}.")
+
+    _validate_qwen3_06b_required_shapes(
+        shape_for=lambda key: _shape_of_mapping(state_dict, key),
+        context=context,
+    )
 
 
 def load_anima_qwen3_06b_text_encoder(

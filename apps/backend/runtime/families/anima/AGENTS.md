@@ -1,7 +1,7 @@
 # apps/backend/runtime/families/anima Overview
 <!-- tags: backend, runtime, families, anima, cosmos, predict2 -->
 Date: 2026-02-05
-Last Review: 2026-03-31
+Last Review: 2026-04-28
 Status: Draft
 
 ## Purpose
@@ -27,7 +27,7 @@ Status: Draft
 - `wan_vae.py` performs explicit header-key variant detection (`2.1` vs `2.2`) before weight load; Anima v1 currently ports `2.1` only and must fail loud on `2.2`.
 - `wan_vae.py` infers `dim` from `decoder.head.0.gamma.shape` and expects broadcastable `(dim, 1, 1, 1)` (WAN 2.1); errors distinguish missing vs invalid shape, and `encoder.conv1.weight.shape[0]` must match `dim` (fail loud on mismatch).
 - Do not copy `.refs/**` code into `apps/**`; extract intent and re-implement cleanly.
-- `loader.py` resolves raw `net.*` or already-canonical Anima transformer keys only through `runtime/state_dict/keymap_anima_transformer.py`; do not reintroduce parser-side prefix stripping or eager remapped core dicts. `text_encoder.py` splits ownership by asset format: `.safetensors` goes through strict Qwen key-style normalization (`runtime/state_dict/keymap_qwen_text_encoder.py`), while `.gguf` goes through `zimage.qwen3.resolve_qwen3_gguf_keyspace(...)`; both paths fail loud on unknown keys or wrong Qwen3-0.6B shapes.
+- `loader.py` resolves raw `net.*` or already-canonical Anima transformer keys only through `runtime/state_dict/keymap_anima_transformer.py`; do not reintroduce parser-side prefix stripping or eager remapped core dicts. `text_encoder.py` splits ownership by asset format: `.safetensors` goes through the strict Qwen keyspace resolver (`runtime/state_dict/keymap_qwen_text_encoder.py`), while `.gguf` goes through `zimage.qwen3.resolve_qwen3_gguf_keyspace(...)`; both paths fail loud on unknown keys or wrong Qwen3-0.6B shapes, including the native `q_proj=(2048,1024)` attention contract.
 - 2026-03-06: `text_encoder.py` Qwen3-0.6B header validation now consumes the resolved keyspace view directly for metadata checks; no normalized header copy is materialized in that validation path.
 - 2026-02-08: `wan_vae.py` now populates Wan21 per-channel latent stats on `WanVaeConfig` (`latents_mean`/`latents_std`) for decode/encode normalization parity with Comfy; constructor enforces `z_dim=16` fail-loud for Anima image-mode scope.
 - 2026-02-08: `wan_vae.py` now emits `shift_factor=None` (not numeric `0.0`) for Anima Wan21 parity; shared VAE no-shift policy remains strict and continues to reject explicit numeric shift values for Anima.
