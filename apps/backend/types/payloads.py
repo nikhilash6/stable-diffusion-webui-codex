@@ -42,7 +42,7 @@ class ShaKeys:
 class Txt2ImgKeys:
     """Keys for txt2img payload."""
     
-    # Generation params (all models) - reused by HIRES
+    # Generation params (all models)
     CORE: FrozenSet[str] = frozenset({
         "prompt",
         "width",
@@ -67,16 +67,22 @@ class Txt2ImgKeys:
         "distilled_cfg",
     })
     
-    # Hires-only (CORE is shared)
+    # Nested extras.hires request keys
     HIRES: FrozenSet[str] = frozenset({
         "enable",
         "denoise",
         "scale",
         "resize_x",
         "resize_y",
+        "steps",
         "upscaler",
         "tile",
         "swap_model",
+        "sampler",
+        "scheduler",
+        "prompt",
+        "negative_prompt",
+        "cfg",
         "refiner",
         "distilled_cfg",
     })
@@ -94,11 +100,6 @@ class Txt2ImgKeys:
     def ALL(self) -> FrozenSet[str]:
         return self.CORE | self.DIFFUSION | self.FLOW | self.DEVICE | self.MODEL | self.SMART | self.REVISION | self.EXTRAS
     
-    @property
-    def HIRES_ALL(self) -> FrozenSet[str]:
-        """Hires uses CORE + DIFFUSION + HIRES-specific."""
-        return self.CORE | self.DIFFUSION | self.HIRES
-
 
 @dataclass(frozen=True)
 class ExtrasKeys:

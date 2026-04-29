@@ -104,7 +104,7 @@ def _require_non_negative_int(value: Any, *, field: str) -> int:
     return parsed
 
 
-def _build_hires_config(data: Mapping[str, Any] | None, *, default_cfg: float, default_distilled: float, default_denoise: float) -> CodexHiresConfig:
+def _build_hires_config(data: Mapping[str, Any] | None, *, default_cfg: float, default_distilled: float) -> CodexHiresConfig:
     payload = data or {}
     enabled = bool(payload.get("enable", False))
     if not enabled:
@@ -132,6 +132,13 @@ def _build_hires_config(data: Mapping[str, Any] | None, *, default_cfg: float, d
     distilled_value = payload.get("distilled_cfg", default_distilled)
     sampler_name = payload.get("sampler_name")
     scheduler = payload.get("scheduler")
+    required_active_fields = ("scale", "denoise", "upscaler", "steps", "resize_x", "resize_y")
+    for required_field in required_active_fields:
+        if required_field not in payload or payload.get(required_field) is None:
+            raise ValueError(f"'hires.{required_field}' is required when hires is enabled.")
+    upscaler_value = payload["upscaler"]
+    if not isinstance(upscaler_value, str) or not upscaler_value.strip():
+        raise ValueError("'hires.upscaler' must be a non-empty string when hires is enabled.")
 
     raw_swap_model = payload.get("swap_model")
     if raw_swap_model is not None and not isinstance(raw_swap_model, Mapping):
@@ -144,13 +151,13 @@ def _build_hires_config(data: Mapping[str, Any] | None, *, default_cfg: float, d
 
     return CodexHiresConfig(
         enabled=enabled,
-        scale=float(payload.get("scale", 2.0)) if enabled else 1.0,
-        denoise=float(payload.get("denoise", default_denoise)) if enabled else 0.0,
-        upscaler=payload.get("upscaler") if enabled else None,
+        scale=float(payload["scale"]),
+        denoise=float(payload["denoise"]),
+        upscaler=upscaler_value.strip(),
         tile=tile_cfg,
-        second_pass_steps=int(payload.get("steps", 0)) if enabled else 0,
-        resize_x=int(payload.get("resize_x", 0)) if enabled else 0,
-        resize_y=int(payload.get("resize_y", 0)) if enabled else 0,
+        second_pass_steps=int(payload["steps"]),
+        resize_x=int(payload["resize_x"]),
+        resize_y=int(payload["resize_y"]),
         prompt=str(prompt_value),
         negative_prompt=str(negative_value),
         cfg=float(cfg_value),
@@ -359,7 +366,6 @@ def build_txt2img_processing(req: Txt2ImgRequest) -> CodexProcessingTxt2Img:
         req.hires if isinstance(req.hires, dict) else {},
         default_cfg=req.guidance_scale or 7.0,
         default_distilled=distilled_cfg,
-        default_denoise=0.5,
     )
     processing = CodexProcessingTxt2Img(
         prompt=req.prompt,
@@ -506,7 +512,6 @@ def build_img2img_processing(req: Img2ImgRequest) -> CodexProcessingImg2Img:
             req.hires,
             default_cfg=processing.guidance_scale,
             default_distilled=processing.distilled_guidance_scale,
-            default_denoise=processing.denoising_strength,
         )
         if hires_cfg.enabled:
             processing.enable_hires(hires_cfg)

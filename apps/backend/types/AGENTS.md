@@ -2,7 +2,7 @@
 
 # apps/backend/types Overview
 Date: 2026-01-03
-Last Review: 2026-03-31
+Last Review: 2026-04-29
 Status: Active
 
 ## Purpose
@@ -27,3 +27,4 @@ Status: Active
 - 2026-02-16: WAN22 video/model key ownership is outside `payloads.py`; model-specific keymaps now live in `apps/backend/runtime/state_dict/*`.
 - 2026-02-18: `payloads.ExtrasKeys.COMMON` now includes `guidance` so txt2img/img2img extras can carry strict guidance-policy overrides (`apg_*`, `guidance_rescale`, `cfg_trunc_ratio`, `renorm_cfg`) without contract drift.
 - 2026-03-31: `payloads.ExtrasKeys.COMMON` stays shared-only; img2img-only nested owners such as `img2img_extras.supir` must be admitted by the route-specific allowlist instead of broadening the common extras key set.
+- 2026-04-29: `payloads.Txt2ImgKeys.HIRES` is the complete nested `extras.hires` key owner; do not rebuild nested hires allowlists from top-level `CORE` / `DIFFUSION` groups.

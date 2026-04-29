@@ -1,7 +1,7 @@
 # apps/backend/interfaces/api/routers Overview
 <!-- tags: backend, api, fastapi, routers -->
 Date: 2026-01-08
-Last Review: 2026-04-28
+Last Review: 2026-04-29
 Status: Active
 
 ## Purpose
@@ -160,3 +160,4 @@ Status: Active
 - 2026-02-23: `tools.py` GGUF conversion API now accepts `precision_mode` (`FULL_BF16|FULL_FP16|FULL_FP32|FP16_PLUS_FP32|BF16_PLUS_FP32`) and rejects ambiguous payloads that combine `precision_mode` with legacy `float_group_overrides`.
 - 2026-02-27: `generation.py` now rejects unknown top-level `/api/img2img` payload keys (allowlist) to prevent silent contract drift (txt2img already enforced this).
 - 2026-04-06: `generation.py` owns the public omission/default seam for `img2img_per_step_blend_strength` / `img2img_per_step_blend_steps`: omit -> `1.0` / `0`, allow only with `img2img_mask` + `img2img_inpaint_mode='per_step_blend'`, and reject the fields fail-loud outside that masked path.
+- 2026-04-29: `generation.py` rejects unknown nested txt2img `extras.hires.*` keys before task creation and requires enabled `img2img_extras.hires` active fields (`denoise`, `scale`, `resize_x`, `resize_y`, `steps`, `upscaler`) before task registration.

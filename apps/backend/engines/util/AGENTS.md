@@ -1,7 +1,7 @@
 # apps/backend/engines/util Overview
 <!-- tags: backend, engines, util, adapters -->
 Date: 2025-10-28
-Last Review: 2026-03-25
+Last Review: 2026-04-29
 Status: Active
 
 ## Purpose
@@ -23,5 +23,6 @@ Status: Active
 - 2026-04-05: `adapters.build_img2img_processing(...)` now treats `mask` and `mask_round` as the only runtime img2img mask owners. Do not reintroduce `image_mask` / `round_image_mask` mirrors in processing setup or downstream hires/conditioning paths.
 - 2026-03-08: `schedulers.apply_sampler_scheduler(...)` now maps the bridge-supported sampler set (`euler`, `euler a`, `heun`, `lms`, `ddim`, `dpm++ 2m`, `dpm++ 2m sde`, `dpm++ 2m sde heun`, `dpm 2`, `dpm 2 ancestral`, `uni-pc`) and rejects unsupported native-only lanes such as `uni-pc bh2` and `dpm++ 2s ancestral` explicitly with bridge-capability errors.
 - 2026-03-09: `adapters._build_hires_config(...)` now preserves omitted hires sampler/scheduler overrides as `None` so inheritance is represented by omission instead of legacy `Use same*` sentinels or eager fallback to base sampling fields.
+- 2026-04-29: `adapters._build_hires_config(...)` requires enabled hires active fields (`denoise`, `scale`, `resize_x`, `resize_y`, `steps`, `upscaler`) to be present before constructing `CodexHiresConfig`; do not reintroduce active-field default-fill at the adapter boundary.
 - 2026-04-06: `build_img2img_processing(...)` now transfers `Img2ImgRequest.inpaint_mode` and the masked per-step scalars into `CodexProcessingImg2Img`; the adapter must not alias removed `mask_enforcement` names downstream.
 - 2026-03-31: `build_img2img_processing(...)` now owns the typed SUPIR handoff: it parses only nested `img2img_extras.supir` into `CodexProcessingImg2Img.supir` and must never mirror `supir` into `processing.override_settings`.

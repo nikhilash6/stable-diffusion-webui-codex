@@ -152,7 +152,7 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
     _TXT2IMG_ALLOWED_KEYS = set(TXT2IMG_KEYS.ALL) - set(TXT2IMG_KEYS.SMART)
     _IMAGE_REQUEST_SELECTOR_KEYS = {"checkpoint_core_only", "model_format", "vae_source"}
     _TXT2IMG_EXTRAS_KEYS = set(EXTRAS_KEYS.ALL) | _IMAGE_REQUEST_SELECTOR_KEYS
-    _TXT2IMG_HIRES_KEYS = set(TXT2IMG_KEYS.HIRES_ALL)
+    _TXT2IMG_HIRES_KEYS = set(TXT2IMG_KEYS.HIRES)
     _IMG2IMG_EXTRAS_KEYS = (
         (set(EXTRAS_KEYS.ALL) | {"supir"}) - {"refiner", "batch_size", "batch_count"}
     ) | _IMAGE_REQUEST_SELECTOR_KEYS
@@ -324,10 +324,24 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                 detail="'extras.hires.modules' has been removed because hires modules have no execution owner.",
             )
 
-    def _reject_removed_txt2img_hires_modules(payload: Mapping[str, Any]) -> None:
+    def _validate_txt2img_hires_request_payload(payload: Mapping[str, Any]) -> None:
         extras = payload.get("extras")
-        if isinstance(extras, Mapping):
-            _reject_removed_txt2img_hires_modules_from_hires(extras.get("hires"))
+        if extras is None:
+            return
+        if not isinstance(extras, Mapping):
+            raise HTTPException(status_code=400, detail="'extras' must be an object")
+        hires = extras.get("hires")
+        if hires is None:
+            return
+        if not isinstance(hires, Mapping):
+            raise HTTPException(status_code=400, detail="'extras.hires' must be an object")
+        _reject_removed_txt2img_hires_modules_from_hires(hires)
+        _reject_unknown_keys(hires, _TXT2IMG_HIRES_KEYS, "extras.hires")
+
+    def _require_nested_fields(payload: Mapping[str, Any], required_keys: Sequence[str], *, context: str) -> None:
+        for required_key in required_keys:
+            if required_key not in payload or payload.get(required_key) is None:
+                raise HTTPException(status_code=400, detail=f"Missing '{context}.{required_key}'")
 
     def _reject_legacy_wan_request_key_aliases(payload: Mapping[str, Any], *, context: str) -> None:
         aliases: dict[str, str] = {}
@@ -2283,12 +2297,10 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
             if not isinstance(hires, dict):
                 raise HTTPException(status_code=400, detail="'extras.hires' must be an object")
             _reject_removed_txt2img_hires_modules_from_hires(hires)
-            _reject_unknown_keys(hires, _TXT2IMG_HIRES_KEYS | {"enable"}, "extras.hires")
+            _reject_unknown_keys(hires, _TXT2IMG_HIRES_KEYS, "extras.hires")
             if _optional_bool_field(hires, "enable") is True:
                 required = ['denoise', 'scale', 'resize_x', 'resize_y', 'steps', 'upscaler']
-                for key in required:
-                    if key not in hires:
-                        raise HTTPException(status_code=400, detail=f"Missing 'extras.hires.{key}'")
+                _require_nested_fields(hires, required, context="extras.hires")
                 refiner_raw = hires.get('refiner')
                 refiner_cfg = (
                     _parse_refiner_payload(refiner_raw, field_name="extras.hires.refiner")
@@ -2376,7 +2388,6 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
     def _parse_img2img_nested_hires_config(
         hires: object,
         *,
-        default_denoise: float,
         default_cfg: float,
         default_distilled: float,
     ) -> Optional[Dict[str, Any]]:
@@ -2393,6 +2404,8 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         _reject_unknown_keys(hires, _IMG2IMG_HIRES_KEYS, "img2img_extras.hires")
         if _optional_bool_field(hires, "enable") is not True:
             return None
+        required = ("denoise", "scale", "resize_x", "resize_y", "steps", "upscaler")
+        _require_nested_fields(hires, required, context="img2img_extras.hires")
         try:
             tile_cfg = tile_config_from_payload(hires.get("tile"), context="img2img_extras.hires.tile")
         except ValueError as exc:
@@ -2402,20 +2415,12 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                 detail=public_http_error_detail(exc, fallback="Invalid 'img2img_extras.hires.tile' configuration"),
             ) from None
         return {
-            "denoise": (
-                _require_float_field(hires, "denoise", minimum=0.0, maximum=1.0)
-                if "denoise" in hires
-                else float(default_denoise)
-            ),
-            "scale": _require_float_field(hires, "scale") if "scale" in hires else 1.0,
-            "resize_x": _require_int_field(hires, "resize_x", minimum=0) if "resize_x" in hires else 0,
-            "resize_y": _require_int_field(hires, "resize_y", minimum=0) if "resize_y" in hires else 0,
-            "steps": _require_int_field(hires, "steps", minimum=0) if "steps" in hires else 0,
-            "upscaler": (
-                _require_str_field(hires, "upscaler", allow_empty=False, trim=True)
-                if "upscaler" in hires
-                else "Latent"
-            ),
+            "denoise": _require_float_field(hires, "denoise", minimum=0.0, maximum=1.0),
+            "scale": _require_float_field(hires, "scale"),
+            "resize_x": _require_int_field(hires, "resize_x", minimum=0),
+            "resize_y": _require_int_field(hires, "resize_y", minimum=0),
+            "steps": _require_int_field(hires, "steps", minimum=0),
+            "upscaler": _require_str_field(hires, "upscaler", allow_empty=False, trim=True),
             "tile": {
                 "tile": int(tile_cfg.tile),
                 "overlap": int(tile_cfg.overlap),
@@ -2437,7 +2442,6 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
     def _parse_img2img_nested_hires_from_extras(
         raw_extras: object,
         *,
-        default_denoise: float,
         default_cfg: float,
         default_distilled: float,
     ) -> Optional[Dict[str, Any]]:
@@ -2448,7 +2452,6 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         _reject_unknown_keys(raw_extras, _IMG2IMG_EXTRAS_KEYS, "img2img_extras")
         return _parse_img2img_nested_hires_config(
             raw_extras.get("hires"),
-            default_denoise=default_denoise,
             default_cfg=default_cfg,
             default_distilled=default_distilled,
         )
@@ -2457,7 +2460,6 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         _reject_removed_img2img_second_pass_keys(payload)
         hires_cfg = _parse_img2img_nested_hires_from_extras(
             payload.get("img2img_extras"),
-            default_denoise=0.0,
             default_cfg=1.0,
             default_distilled=3.5,
         )
@@ -4528,7 +4530,7 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
             raise HTTPException(status_code=400, detail="'template' must be an object")
         template = dict(template_raw)
         if mode == "txt2img":
-            _reject_removed_txt2img_hires_modules(template)
+            _validate_txt2img_hires_request_payload(template)
         _enforce_generation_settings_contract(template)
         _validate_route_engine_capability(
             template,
@@ -5053,7 +5055,6 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
             raw_supir_payload = raw_extras.get("supir")
             hires_cfg = _parse_img2img_nested_hires_config(
                 raw_extras.get("hires"),
-                default_denoise=denoise,
                 default_cfg=cfg_scale,
                 default_distilled=distilled_cfg_scale or 3.5,
             )
@@ -6928,7 +6929,7 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
     async def txt2img(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Payload must be JSON object")
-        _reject_removed_txt2img_hires_modules(payload)
+        _validate_txt2img_hires_request_payload(payload)
         _enforce_generation_settings_contract(payload)
         _validate_route_engine_capability(payload, route_mode=GenerationRouteMode.TXT2IMG)
 
