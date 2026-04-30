@@ -16,7 +16,6 @@ Symbols (top-level; keep in sync; no ghosts):
 - `to_d` (function): Sigma-space ODE derivative helper for denoised predictions.
 - `model_wrapper` (function): Wraps a model into a VP-space epsilon predictor with optional guidance modes.
 - `sample_unipc` (function): Minimal UniPC sampler implementation operating over a sigma schedule.
-- `sample_unipc_bh2` (function): UniPC BH2 placeholder (currently forwards to `sample_unipc`).
 - `RestartStepPlan` (dataclass): One executable restart step with explicit sigma bounds and optional renoise scale.
 - `build_restart_step_plan` (function): Pure restart planner that expands restart segments over an active sigma ladder.
 - `restart_sampler` (function): Restart sampling wrapper (supports restart segments + noise injection).
@@ -171,11 +170,6 @@ def sample_unipc(model, x, sigmas, extra_args=None, callback=None, disable=None)
         if callback is not None:
             callback({"x": x, "i": i, "sigma": sigmas[i], "sigma_hat": sigmas[i], "denoised": x - eps})
     return x
-
-
-def sample_unipc_bh2(model, x, sigmas, extra_args=None, callback=None, disable=None):
-    # Placeholder: reuse UniPC core; BH2 variant could adopt a higher-order update.
-    return sample_unipc(model, x, sigmas, extra_args=extra_args, callback=callback, disable=disable)
 
 
 @dataclass(frozen=True)
