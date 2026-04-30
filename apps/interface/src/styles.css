@@ -145,17 +145,8 @@
   button,
   [role='button'],
   .clickable,
-  summary,
-  label.switch-label {
+  summary {
     cursor: pointer;
-  }
-  .switch-label {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.45rem;
-  }
-  .switch-label input {
-    margin: 0;
   }
 }
 
@@ -811,11 +802,9 @@
   @import './styles/components/param-blocks.css';
   @import './styles/components/xyz-sweep-card.css';
   @import './styles/views/settings.css';
-  @import './styles/views/test.css';
   @import './styles/views/tools.css';
   @import './styles/views/wan.css';
   @import './styles/views/pnginfo.css';
-  @import './styles/components/wan22-settings.css';
 
   .app-footer {
     position: sticky;

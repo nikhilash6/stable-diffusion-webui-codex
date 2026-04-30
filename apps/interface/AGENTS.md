@@ -27,7 +27,6 @@ Status: Active
   - Detailed CSS contract truth lives in `.sangoi/reference/ui/frontend-css-contracts.md`; support docs here stay pointer-only.
 - 2025-12-29: `vite.config.ts` ignores backend-persisted `tabs.json`/`workflows.json` changes to prevent Vite full-reloads during dev toggles.
 - 2025-12-29: `tools/port-guard-dev.mjs` now checks IPv4+IPv6 bind targets (0.0.0.0/127.0.0.1/::/::1) to avoid localhost split-brain; when the base port is busy it probes `/api/version` to warn about an existing Codex instance (WSL/Windows) and writes repo-root `.webui-ui-<port>.pid` files for launcher/debugging truth.
-- 2025-11-03: SDXL view now exposes "Save Profile" backed by store persistence to mirror the Test harness.
 - 2025-11-14: API requests are built via `src/api/payloads.ts` (Zod schemas) — payload builders trim prompts and always attach the per-tab engine/model metadata (even for img2img).
 - 2025-12-03: Txt2Img prompt schema now rejects empty prompts at the frontend (`PromptSchema`), surfacing a validation error instead of silently sending `prompt=""` to the backend.
 - 2026-02-28: Frontend follows root testing policy: manual validation by default; automated/unit tests are not maintained unless explicitly requested by the repo owner.

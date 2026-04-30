@@ -59,11 +59,9 @@ export const STYLE_TOPOLOGY = Object.freeze([
   styleEntry('apps/interface/src/styles/components/param-blocks.css', 'component'),
   styleEntry('apps/interface/src/styles/components/xyz-sweep-card.css', 'component'),
   styleEntry('apps/interface/src/styles/views/settings.css', 'view'),
-  styleEntry('apps/interface/src/styles/views/test.css', 'view'),
   styleEntry('apps/interface/src/styles/views/tools.css', 'view'),
   styleEntry('apps/interface/src/styles/views/wan.css', 'view'),
   styleEntry('apps/interface/src/styles/views/pnginfo.css', 'view'),
-  styleEntry('apps/interface/src/styles/components/wan22-settings.css', 'component'),
   styleEntry('apps/interface/src/styles/EXAMPLE-dashboard-surface-base.css', 'reference-only', 'Reference sheet only; must never be imported by src/styles.css.'),
   styleEntry('apps/interface/src/styles/EXAMPLE-dashboard-surface-theme.css', 'reference-only', 'Reference sheet only; must never be imported by src/styles.css.'),
 ])
