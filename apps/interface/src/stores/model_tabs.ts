@@ -11,7 +11,7 @@ Owns the list of engine tabs, persists tab CRUD/reorder via `/api/ui/tabs`, norm
 default parameter shapes per tab type (image vs WAN/LTX video) using engine defaults and form-state schemas. Image-tab second-pass model state lives
 under typed `swapModel` owners (global `swapModel`, hires `hires.swapModel`), native SDXL img2img/inpaint SUPIR state lives under the single nested
 owner `supir`, and stale legacy `hires.checkpoint` / refiner-embedded `vae` snapshot
-fields are dropped during hydration instead of being preserved as rename glue. Hires upscaler values are stable ids
+fields plus selector-only top-level `swapModel` snapshots are dropped during hydration instead of being preserved as rename glue. Hires upscaler values are stable ids
 (`latent:*` / `spandrel:*`) for hires-fix wiring, and img2img UI keeps an explicit resize/upscaler layout state (`img2imgResizeMode`,
 `img2imgUpscaler`) decoupled from backend hires dispatch. Image automation, SUPIR mode, and IP-Adapter UI state now stay under canonical owners
 (`runAction`, `initSource`, `supir`, `ipAdapter`) instead of drifting into flat helper fields. The nested `supir` owner now also carries the public restore
@@ -924,21 +924,15 @@ function migrateImageParamsPatch(rawPatch: Record<string, unknown>): {
   }
   if (isPlainRecord(patch.swapModel)) {
     const rawSwapModel = patch.swapModel as Record<string, unknown>
-    const hasStageKeys = (
+    const hasSwapStageControlKeys = (
       Object.prototype.hasOwnProperty.call(rawSwapModel, 'enabled')
       || Object.prototype.hasOwnProperty.call(rawSwapModel, 'swapAtStep')
       || Object.prototype.hasOwnProperty.call(rawSwapModel, 'cfg')
       || Object.prototype.hasOwnProperty.call(rawSwapModel, 'seed')
     )
-    if (!hasStageKeys) {
-      const migratedModel = String(rawSwapModel.model || '').trim()
-      patch.swapModel = {
-        enabled: migratedModel.length > 0,
-        swapAtStep: 1,
-        cfg: clampFiniteNumber(rawPatch.cfgScale, 7, 0, Number.POSITIVE_INFINITY),
-        seed: -1,
-        model: migratedModel || undefined,
-      }
+    if (!hasSwapStageControlKeys) {
+      delete patch.swapModel
+      droppedUnknownKeys.push('swapModel')
     }
   }
   const fromVersion = parseParamsSchemaVersion(rawPatch.schemaVersion)

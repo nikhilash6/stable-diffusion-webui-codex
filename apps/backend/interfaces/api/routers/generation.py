@@ -16,7 +16,7 @@ SUPIR mode under `img2img_extras.supir` for truthful SDXL img2img/inpaint admiss
 when SUPIR mode is active.
 Txt2img model-stage ownership is explicit: top-level `extras.swap_model` is the first-pass mid-generation stage config, `extras.hires.swap_model`
 is the selector-only second-pass replacement seam, and `extras.refiner` / `extras.hires.refiner` remain SDXL-native refiner stages.
-Hires supports sampler/scheduler overrides for the hires pass (txt2img: `extras.hires.sampler` / `extras.hires.scheduler`; img2img: `img2img_extras.hires.sampler` / `img2img_extras.hires.scheduler`) and validates override compatibility at API parse-time.
+Hires supports sampler/scheduler overrides for the hires pass (txt2img: `extras.hires.sampler` / `extras.hires.scheduler`; img2img: `img2img_extras.hires.sampler` / `img2img_extras.hires.scheduler`), requires an explicit scheduler when the sampler is overridden, and validates override compatibility at API parse-time.
 Img2img masking uses Forge/A1111 “Only masked” semantics only (no whole-picture inpaint area), supports optional multi-region inpaint passes via
 `img2img_mask_region_split`, and is rejected at request time when the active engine capability surface does not support mask/inpaint semantics.
 The public masked-runtime field is now `img2img_inpaint_mode`; the router rejects removed `img2img_mask_enforcement`, validates exact-engine mode support,
@@ -2726,40 +2726,7 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Unknown engine key: {key}") from exc
 
-    _VIDEO_ENGINE_TASK_BY_ROUTE_MODE: dict[GenerationRouteMode, TaskType] = {
-        GenerationRouteMode.TXT2IMG: TaskType.TXT2IMG,
-        GenerationRouteMode.IMG2IMG: TaskType.IMG2IMG,
-        GenerationRouteMode.TXT2VID: TaskType.TXT2VID,
-        GenerationRouteMode.IMG2VID: TaskType.IMG2VID,
-        GenerationRouteMode.VID2VID: TaskType.VID2VID,
-    }
     _WAN_VIDEO_ENGINE_KEYS = {"wan22_5b", "wan22_14b", "wan22_14b_animate"}
-
-    def _supports_route_via_registered_engine(*, engine_key: str, route_mode: GenerationRouteMode) -> bool:
-        from apps.backend.core.exceptions import EngineNotFoundError
-        from apps.backend.core.registry import registry as _engine_registry
-
-        task = _VIDEO_ENGINE_TASK_BY_ROUTE_MODE.get(route_mode)
-        if task is None:
-            return False
-        try:
-            engine = _engine_registry.create(engine_key)
-        except EngineNotFoundError:
-            return False
-        except Exception as exc:
-            _router_log.exception("engine capability instantiation failed for '%s'", engine_key)
-            raise HTTPException(
-                status_code=500,
-                detail=public_http_error_detail(exc, fallback=f"Engine capability introspection failed for '{engine_key}'"),
-            ) from exc
-        try:
-            return bool(engine.capabilities().supports(task))
-        except Exception as exc:
-            _router_log.exception("engine capability lookup failed for '%s'", engine_key)
-            raise HTTPException(
-                status_code=500,
-                detail=public_http_error_detail(exc, fallback=f"Engine capability lookup failed for '{engine_key}'"),
-            ) from exc
 
     def _is_legacy_or_wan_video_route_engine(engine_key: str) -> bool:
         normalized = str(engine_key or "").strip().lower()
@@ -2788,11 +2755,12 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         try:
             semantic_engine = semantic_engine_for_engine_id(engine_key)
         except KeyError:
-            if _supports_route_via_registered_engine(engine_key=engine_key, route_mode=route_mode):
-                return
             raise HTTPException(
                 status_code=400,
-                detail=f"Engine '{engine_key}' does not support route '{route_label}'.",
+                detail=(
+                    f"Engine '{engine_key}' is not advertised by /api/engines/capabilities "
+                    f"for route '{route_label}'."
+                ),
             ) from None
         surface = ENGINE_SURFACES[semantic_engine]
         if not getattr(surface, capability_attr):

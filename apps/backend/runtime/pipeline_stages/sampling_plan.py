@@ -54,10 +54,10 @@ def resolve_sampler_scheduler_override(
     """Resolve sampler/scheduler selection for a derived sampling plan (e.g., hires pass).
 
     Semantics:
-    - If `sampler_override` is set, it becomes the sampler for the derived plan.
-      - If `scheduler_override` is NOT set, the scheduler defaults to the sampler's default scheduler.
-    - If only `scheduler_override` is set, it is validated against the base sampler.
     - If neither override is set, base sampler/scheduler are kept.
+    - If only `scheduler_override` is set, it is validated against the base sampler.
+    - If `sampler_override` is set, `scheduler_override` must also be set and the
+      explicit pair is validated together.
     """
 
     base_sampler_value = str(base_sampler or "").strip()
@@ -90,12 +90,12 @@ def resolve_sampler_scheduler_override(
 
     sampler_override_value = _normalize_override(sampler_override, kind="sampler")
     scheduler_override_value = _normalize_override(scheduler_override, kind="scheduler")
+    if sampler_override_value and not scheduler_override_value:
+        raise ValueError("scheduler_override is required when sampler_override is provided")
 
     sampler_name = sampler_override_value or base_sampler_value
     if scheduler_override_value:
         scheduler_name = scheduler_override_value
-    elif sampler_override_value:
-        scheduler_name = get_sampler_spec(sampler_name).default_scheduler
     else:
         scheduler_name = base_scheduler_value
 

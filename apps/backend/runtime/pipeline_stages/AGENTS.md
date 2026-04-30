@@ -1,6 +1,6 @@
 # apps/backend/runtime/pipeline_stages Overview
 Date: 2025-10-30
-Last Review: 2026-04-08
+Last Review: 2026-04-29
 Status: Active
 
 ## Purpose
@@ -67,6 +67,7 @@ Status: Active
 - 2026-03-06: `hires_fix.py` now dispatches hires prep by `sd_model.engine_id` (`sd*` via SD backend; `flux1`/`flux1_fill`/`flux1_chroma`/`zimage`/`anima` via flow-style latent prep; `flux1_kontext` via flow-style prep with `image_latents` continuation mode; `flux2` via the same upscale/crop prep, still returning `image_latents` continuation data for the dedicated FLUX.2 second pass). `HiresPreparation` keeps the typed shared contract (`latents`, optional `image_conditioning`, `continuation_mode`); unknown engines fail loud (no SD fallback).
 - 2026-03-02: `sampling_execute.execute_sampling(...)` now exposes explicit `allow_txt2img_conditioning_fallback` control (default `True`), so callers that intentionally clear `image_conditioning` (Kontext/image-latents continuation) can disable implicit txt2img `c_concat` injection without changing default behavior for legacy callsites.
 - 2026-03-08: `sampling_plan.py::resolve_sampler_scheduler_override(...)` rejects legacy `use same*` sentinel strings (`use same sampler`, `use same scheduler`, `use same`); inheritance is represented only by omission or empty overrides.
+- 2026-04-29: `sampling_plan.py::resolve_sampler_scheduler_override(...)` must not synthesize executable schedulers from sampler registry `default_scheduler` metadata. Hires sampler overrides require an explicit scheduler override; scheduler-only overrides still validate against the base sampler.
 - 2026-03-08: `video.py::configure_sampler(...)` now fails loud for `sampler='uni-pc bh2'` before bridge application, so video scheduler configuration reports unsupported bridge capabilities explicitly.
 - 2026-03-08: `sampling_execute.py` preview/post-step callback contracts now allow `total=None` so native samplers with open-ended progress (for example `dpm adaptive`) can report truthful unknown-total progress without fake callback totals.
 - 2026-03-11: `video.py` now owns the shared pre-export audio handoff contract via `AudioExportAsset`, replaces snapshot `audio_input` with `audio_source_kind` (`none|input|generated`), and records truthful `has_audio` export state in normalized video metadata instead of assuming audio is input-only.

@@ -1,7 +1,7 @@
 # apps/interface/src/stores Overview
 <!-- tags: frontend, stores, state -->
 Date: 2025-10-28
-Last Review: 2026-04-12
+Last Review: 2026-04-29
 Status: Active
 
 ## Purpose
@@ -19,6 +19,7 @@ Status: Active
 - 2025-12-03: Result `info` now includes prompt, negative prompt, resolved seed, and default save directory so the UI surfaces real generation inputs/outputs.
 - 2025-12-03: Stores track two refiner configs: a global `refiner` (for post-base pass) and `hires.refiner` nested under the hires options for a hires-coupled refiner stage.
 - 2026-03-25: `model_tabs.ts` now treats top-level `swapModel` as the first-pass stage owner (`enabled + swapAtStep + cfg + seed + model`) and keeps `hires.swapModel` selector-only. Do not drop top-level `swapModel` from image-param allowlists or hydration; a public state seam without a runtime owner is forbidden.
+- 2026-04-29: `model_tabs.ts` scrubs selector-only legacy top-level `swapModel` objects instead of promoting them into first-pass stage configs. Stage-shaped top-level `swapModel` requires a stage-control key (`enabled`, `swapAtStep`, `cfg`, or `seed`); `hires.swapModel` remains selector-only.
 - 2025-12-03: `xyz.ts` store runs frontend-driven XYZ sweeps (X/Y/Z axes) using the active image model tab as the baseline, with stop support and per-cell status.
 - 2025-12-03: XYZ store now enqueues payload snapshots, supports stop-after-current vs stop-now (calling `/api/tasks/{id}/cancel`), and preserves hires/refiner in each job payload.
 - 2025-12-04: `engine_capabilities.ts` hydrates `/engines/capabilities` (under `/api` via `API_BASE`) once and exposes a cached map keyed by semantic engine tag (sd15, sdxl, flux1, wan22, hunyuan_video, svd) so views/components can hide Hires/Refiner/video-specific UI when the backend declares a surface as unsupported.
