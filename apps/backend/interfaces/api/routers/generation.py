@@ -118,7 +118,6 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         Img2ImgRequest,
         Txt2VidRequest,
         Img2VidRequest,
-        Vid2VidRequest,
     )
     from apps.backend.interfaces.api.device_selection import (
         GenerationRouteMode,
@@ -267,22 +266,6 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
     _LTX2_IMG2VID_GENERIC_ALLOWED_KEYS = (_IMG2VID_GENERIC_ALLOWED_KEYS - _LTX2_GENERIC_BLOCKED_KEYS) | {
         _LTX2_EXECUTION_PROFILE_KEY
     }
-    _NETFLIX_VOID_VID2VID_CORE_KEYS = {
-        "vid2vid_prompt",
-        "vid2vid_video_path",
-        "vid2vid_mask_video_path",
-        "vid2vid_width",
-        "vid2vid_height",
-        "vid2vid_num_frames",
-        "vid2vid_fps",
-        "vid2vid_seed",
-    }
-    _VID2VID_INTERNAL_ALLOWED_KEYS = {"__vid2vid_uploaded_paths", "__vid2vid_uploaded_path"}
-    _NETFLIX_VOID_VID2VID_ALLOWED_KEYS = (
-        (_VIDEO_GENERIC_COMMON_ALLOWED_KEYS - set(WAN_VIDEO_REQUEST_KEYS.GGUF_RUNTIME))
-        | _NETFLIX_VOID_VID2VID_CORE_KEYS
-        | _VID2VID_INTERNAL_ALLOWED_KEYS
-    )
     _WAN_SINGLE_ALLOWED_KEYS = set(WAN_VIDEO_REQUEST_KEYS.WAN_SINGLE_ALLOWED)
     _WAN_HIGH_ALLOWED_KEYS = set(WAN_VIDEO_REQUEST_KEYS.WAN_HIGH_ALLOWED)
     _WAN_LOW_ALLOWED_KEYS = set(WAN_VIDEO_REQUEST_KEYS.WAN_LOW_ALLOWED)
@@ -4157,62 +4140,6 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
             default_cfg_scale=7.0,
         )
 
-    def _validate_netflix_void_fixed_choice(*, field_name: str, value: str, expected: str) -> str:
-        normalized = str(value or "").strip().lower()
-        if normalized != expected:
-            raise HTTPException(
-                status_code=400,
-                detail=f"'{field_name}' must be {expected!r} for engine 'netflix_void'; got {value!r}.",
-            )
-        return expected
-
-    def _parse_netflix_void_vid2vid_core_dto(payload: Dict[str, Any]) -> _VideoCoreDTO:
-        from apps.backend.runtime.families.netflix_void.config import (
-            NETFLIX_VOID_DEFAULT_FPS,
-            NETFLIX_VOID_DEFAULT_HEIGHT,
-            NETFLIX_VOID_DEFAULT_MAX_VIDEO_LENGTH,
-            NETFLIX_VOID_DEFAULT_PASS1_CFG,
-            NETFLIX_VOID_DEFAULT_PASS1_STEPS,
-            NETFLIX_VOID_DEFAULT_TEMPORAL_WINDOW,
-            NETFLIX_VOID_DEFAULT_WIDTH,
-        )
-
-        _reject_legacy_wan_request_key_aliases(payload, context="vid2vid")
-        _reject_unknown_keys(payload, _NETFLIX_VOID_VID2VID_ALLOWED_KEYS, "vid2vid")
-        parsed = _parse_video_core_dto(
-            payload,
-            task_prefix="vid2vid",
-            default_width=int(NETFLIX_VOID_DEFAULT_WIDTH),
-            default_height=int(NETFLIX_VOID_DEFAULT_HEIGHT),
-            default_steps=int(NETFLIX_VOID_DEFAULT_PASS1_STEPS),
-            default_fps=int(NETFLIX_VOID_DEFAULT_FPS),
-            default_frames=int(NETFLIX_VOID_DEFAULT_TEMPORAL_WINDOW),
-            default_sampler="ddim",
-            default_scheduler="ddim",
-            expected_unipc_solver_hint=None,
-            sampler_validator=lambda field_name, value: _validate_netflix_void_fixed_choice(
-                field_name=field_name,
-                value=value,
-                expected="ddim",
-            ),
-            scheduler_validator=lambda field_name, value: _validate_netflix_void_fixed_choice(
-                field_name=field_name,
-                value=value,
-                expected="ddim",
-            ),
-            default_seed=-1,
-            default_cfg_scale=float(NETFLIX_VOID_DEFAULT_PASS1_CFG),
-        )
-        if parsed.num_frames > int(NETFLIX_VOID_DEFAULT_MAX_VIDEO_LENGTH):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "'vid2vid_num_frames' exceeds the current netflix_void max video length "
-                    f"({int(NETFLIX_VOID_DEFAULT_MAX_VIDEO_LENGTH)}), got {parsed.num_frames}."
-                ),
-            )
-        return parsed
-
     def _copy_generic_video_asset_selector_fields(*, payload: Mapping[str, Any], extras: Dict[str, Any]) -> None:
         for key in ("model_sha", "checkpoint_core_only", "model_format", "vae_sha", "tenc_sha", "lora_sha"):
             if key in payload and payload.get(key) is not None:
@@ -6250,254 +6177,6 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                 detail="'img2vid_init_image' is required for img2vid requests.",
             )
 
-    def _resolve_vid2vid_input_path(raw: str, *, field: str) -> str:
-        """Resolve a user-supplied input path safely (root-scoped).
-
-        Policy: by default, only paths under the backend working directory are allowed.
-        Use upload (multipart) to avoid path permission issues.
-        """
-        v = str(raw or "").strip()
-        if not v:
-            raise RuntimeError(f"vid2vid {field} path is empty")
-        p = Path(os.path.expanduser(v))
-        if not p.is_absolute():
-            p = CODEX_ROOT / p
-        try:
-            resolved = p.resolve()
-        except Exception:
-            resolved = p
-        root = CODEX_ROOT.resolve()
-        try:
-            resolved.relative_to(root)
-        except ValueError:
-            raise RuntimeError(
-                f"vid2vid {field} must be under the repo root ({root}); "
-                "use upload instead for external files."
-            ) from None
-        if not resolved.is_file():
-            raise RuntimeError(f"vid2vid {field} not found: {resolved}")
-        return str(resolved)
-
-    def _resolve_vid2vid_input_dir(raw: str, *, field: str) -> str:
-        v = str(raw or "").strip()
-        if not v:
-            raise RuntimeError(f"vid2vid {field} path is empty")
-        p = Path(os.path.expanduser(v))
-        if not p.is_absolute():
-            p = CODEX_ROOT / p
-        try:
-            resolved = p.resolve()
-        except Exception:
-            resolved = p
-        root = CODEX_ROOT.resolve()
-        try:
-            resolved.relative_to(root)
-        except ValueError:
-            raise RuntimeError(
-                f"vid2vid {field} must be under the repo root ({root}); "
-                "use upload instead for external files."
-            ) from None
-        if not resolved.is_dir():
-            raise RuntimeError(f"vid2vid {field} not found: {resolved}")
-        return str(resolved)
-
-    async def _stage_vid2vid_upload(*, upload: UploadFile, field_name: str, token: str) -> str:
-        try:
-            upload_bytes = await upload.read()
-        except Exception as exc:
-            _router_log.warning("vid2vid %s upload read failed: %s", field_name, exc)
-            raise HTTPException(
-                status_code=400,
-                detail=public_http_error_detail(exc, fallback=f"failed to read {field_name} upload"),
-            ) from None
-        if not upload_bytes:
-            raise HTTPException(status_code=400, detail=f"empty {field_name} upload")
-
-        upload_root = (CODEX_ROOT / ".tmp" / "uploads" / "vid2vid").resolve()
-        upload_root.mkdir(parents=True, exist_ok=True)
-
-        suffix = Path(str(upload.filename or "")).suffix.lower()
-        if not suffix:
-            suffix = ".mp4"
-        staged_path = (upload_root / f"{token}-{field_name}{suffix}").resolve()
-        try:
-            staged_path.relative_to(upload_root)
-        except ValueError as exc:
-            raise HTTPException(status_code=500, detail="Internal upload staging path escaped the vid2vid upload root.") from exc
-
-        try:
-            staged_path.write_bytes(upload_bytes)
-        except Exception as exc:
-            _router_log.warning("vid2vid %s upload staging failed: %s", field_name, exc)
-            raise HTTPException(
-                status_code=500,
-                detail=public_http_error_detail(exc, fallback=f"failed to stage {field_name} upload"),
-            ) from None
-        return str(staged_path)
-
-    def _cleanup_staged_vid2vid_uploads(paths: Sequence[str]) -> None:
-        if not paths:
-            return
-        up_root = (CODEX_ROOT / ".tmp" / "uploads" / "vid2vid").resolve()
-        for item in paths:
-            raw_path = str(item or "").strip()
-            if not raw_path:
-                continue
-            path = Path(raw_path)
-            try:
-                resolved = path.resolve()
-            except Exception:
-                resolved = path
-            try:
-                resolved.relative_to(up_root)
-            except ValueError:
-                continue
-            try:
-                resolved.unlink()
-            except FileNotFoundError:
-                continue
-            except Exception as exc:
-                _router_log.warning("vid2vid route-level upload cleanup failed (%s): %s", str(resolved), exc, exc_info=False)
-
-    def _normalize_wan_stage_payload_strict(stage: object, *, field: str) -> object:
-        if not isinstance(stage, dict):
-            return stage
-        _reject_legacy_wan_stage_lora_keys(stage_key=field, stage_raw=stage)
-        out: dict[str, object] = dict(stage)
-        if not isinstance(out.get("prompt"), str):
-            raise HTTPException(status_code=400, detail=f"'{field}.prompt' is required and must be a string")
-        if out.get("negative_prompt") is not None and not isinstance(out.get("negative_prompt"), str):
-            raise HTTPException(status_code=400, detail=f"'{field}.negative_prompt' must be a string when provided")
-        prompt_value = str(out.get("prompt") or "").strip()
-        if not prompt_value:
-            raise HTTPException(status_code=400, detail=f"'{field}.prompt' must be a non-empty string")
-        raw_negative_prompt = out.get("negative_prompt")
-        normalized_negative_prompt = (
-            str(raw_negative_prompt).strip()
-            if isinstance(raw_negative_prompt, str)
-            else None
-        )
-        prompt_value, normalized_negative_prompt, prompt_stage_loras = _parse_wan_stage_prompt_loras(
-            stage_key=field,
-            prompt=prompt_value,
-            negative_prompt=normalized_negative_prompt,
-        )
-        out["prompt"] = prompt_value
-        out["negative_prompt"] = normalized_negative_prompt
-        if isinstance(out.get("model_dir"), str) and str(out.get("model_dir")).strip():
-            # model_dir may refer to a GGUF file or a diffusers directory; enforce repo-root scoping either way.
-            raw_model_dir = str(out.get("model_dir") or "")
-            try:
-                p = Path(_path_from_api(raw_model_dir)).expanduser()
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=f"'{field}.model_dir' is invalid: {exc}") from exc
-            try:
-                resolved = p.resolve()
-            except Exception:
-                resolved = p
-            root = CODEX_ROOT.resolve()
-            try:
-                resolved.relative_to(root)
-            except ValueError:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"'{field}.model_dir' must be under the repo root ({root}); "
-                        "use sha-only mode for WAN GGUF or upload for external files."
-                    ),
-                ) from None
-            if not (resolved.is_file() or resolved.is_dir()):
-                raise HTTPException(status_code=400, detail=f"'{field}.model_dir' not found: {resolved}")
-            out["model_dir"] = str(resolved)
-        from apps.backend.inventory.cache import resolve_asset_by_sha
-
-        explicit_stage_loras = _normalize_wan_stage_loras(
-            stage_raw=out,
-            stage_key=field,
-            resolve_asset_by_sha_fn=resolve_asset_by_sha,
-        )
-        out["loras"] = _merge_wan_stage_loras(prompt_stage_loras, explicit_stage_loras)
-        out.pop("lora_path", None)
-        out.pop("lora_sha", None)
-        out.pop("lora_weight", None)
-        return out
-
-    def prepare_vid2vid(payload: Dict[str, Any]) -> Tuple[Vid2VidRequest, str, Optional[str]]:
-        settings_revision = _require_int_field(payload, "settings_revision", minimum=0)
-        video_engine_key = _canonical_engine_key(payload.get("engine")) if payload.get("engine") is not None else ""
-        use_generic_video_route = not _is_legacy_or_wan_video_route_engine(video_engine_key)
-        if not use_generic_video_route:
-            raise HTTPException(
-                status_code=501,
-                detail="Legacy/WAN vid2vid route parsing is not part of the current capability-driven cutover.",
-            )
-        if video_engine_key != "netflix_void":
-            raise HTTPException(
-                status_code=400,
-                detail=f"Engine '{video_engine_key or '<empty>'}' is unsupported for the current generic vid2vid route.",
-            )
-
-        extras: Dict[str, Any] = {}
-        parsed = _parse_netflix_void_vid2vid_core_dto(payload)
-
-        blocked_selector_fields = ("vae_sha", "vae_source", "tenc_sha", "tenc1_sha", "tenc2_sha")
-        blocked_selector_present = [
-            field_name
-            for field_name in blocked_selector_fields
-            if field_name in payload and payload.get(field_name) not in (None, "", [], {})
-        ]
-        if blocked_selector_present:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Engine 'netflix_void' does not accept external VAE/text-encoder selectors. "
-                    f"Blocked field(s): {', '.join(sorted(blocked_selector_present))}."
-                ),
-            )
-
-        model_ref, _checkpoint_record = _resolve_generic_video_checkpoint_contract(
-            payload=payload,
-            extras=extras,
-            engine_key=video_engine_key,
-        )
-
-        video_path = _resolve_vid2vid_input_path(
-            str(payload.get("vid2vid_video_path") or ""),
-            field="video",
-        )
-        mask_video_path = _resolve_vid2vid_input_path(
-            str(payload.get("vid2vid_mask_video_path") or ""),
-            field="mask_video",
-        )
-
-        video_options, video_extras_updates = _parse_video_output_options(payload, route_label="vid2vid")
-        extras.update(video_extras_updates)
-
-        smart_offload, smart_fallback, smart_cache = _resolve_smart_flags()
-        request = Vid2VidRequest(
-            task=TaskType.VID2VID,
-            prompt=parsed.prompt,
-            negative_prompt="",
-            video_path=video_path,
-            mask_video_path=mask_video_path,
-            width=parsed.width,
-            height=parsed.height,
-            steps=parsed.steps,
-            fps=parsed.fps,
-            num_frames=parsed.num_frames,
-            sampler=parsed.sampler_name,
-            scheduler=parsed.scheduler_name,
-            seed=parsed.seed,
-            guidance_scale=parsed.guidance_scale,
-            video_options=video_options,
-            extras=extras,
-            smart_offload=smart_offload,
-            smart_fallback=smart_fallback,
-            smart_cache=smart_cache,
-            settings_revision=settings_revision,
-        )
-        return request, video_engine_key, model_ref
-
     def run_video_task(task_id: str, payload: Dict[str, Any], entry: TaskEntry, task_type: TaskType, *, device: str) -> None:
         from apps.backend.runtime.diagnostics.contract_trace import error_meta
         from apps.backend.runtime.diagnostics.contract_trace import emit_event as emit_contract_trace
@@ -6515,8 +6194,6 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                 req, engine_key, model_ref = prepare_txt2vid(payload)
             elif task_type == TaskType.IMG2VID:
                 req, engine_key, model_ref = prepare_img2vid(payload)
-            elif task_type == TaskType.VID2VID:
-                req, engine_key, model_ref = prepare_vid2vid(payload)
             else:
                 raise RuntimeError(f"Unsupported video task: {task_type}")
             options_snapshot = _opts_snapshot()
@@ -6850,46 +6527,13 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                             exc,
                             exc_info=False,
                         )
-                if task_type == TaskType.VID2VID:
-                    try:
-                        uploaded_paths: list[str] = []
-                        if payload.get("__vid2vid_uploaded_paths"):
-                            if isinstance(payload.get("__vid2vid_uploaded_paths"), list):
-                                uploaded_paths = [str(x) for x in payload.get("__vid2vid_uploaded_paths") or []]
-                        elif payload.get("__vid2vid_uploaded_path"):
-                            uploaded_paths = [str(payload.get("__vid2vid_uploaded_path"))]
 
-                        if uploaded_paths:
-                            up_root = (CODEX_ROOT / ".tmp" / "uploads" / "vid2vid").resolve()
-                            for item in uploaded_paths:
-                                up_path = Path(str(item))
-                                try:
-                                    resolved = up_path.resolve()
-                                except Exception:
-                                    resolved = up_path
-                                try:
-                                    resolved.relative_to(up_root)
-                                except ValueError:
-                                    continue
-                                try:
-                                    resolved.unlink()
-                                except Exception as exc:
-                                    _router_log.warning(
-                                        "vid2vid upload cleanup failed (task_id=%s path=%s): %s",
-                                        task_id,
-                                        str(resolved),
-                                        exc,
-                                        exc_info=False,
-                                    )
-                    except Exception as exc:
-                        _router_log.warning(
-                            "vid2vid upload cleanup crashed (task_id=%s): %s",
-                            task_id,
-                            exc,
-                            exc_info=False,
-                        )
-
-        label = "txt2vid" if task_type == TaskType.TXT2VID else ("img2vid" if task_type == TaskType.IMG2VID else "vid2vid")
+        if task_type == TaskType.TXT2VID:
+            label = "txt2vid"
+        elif task_type == TaskType.IMG2VID:
+            label = "img2vid"
+        else:
+            raise RuntimeError(f"Unsupported video task: {task_type}")
         thread = threading.Thread(target=worker, name=f"{label}-task-{task_id}", daemon=True)
         thread.start()
 
