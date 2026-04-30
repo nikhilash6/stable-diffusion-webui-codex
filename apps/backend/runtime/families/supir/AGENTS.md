@@ -2,7 +2,7 @@
 
 # apps/backend/runtime/families/supir Overview
 Date: 2026-02-02
-Last Review: 2026-04-02
+Last Review: 2026-04-30
 Status: In progress
 
 ## Purpose
@@ -17,12 +17,11 @@ Status: In progress
 - `samplers/` — SUPIR sampler IDs/specs and registry (Enum + dataclasses; no kwargs leakage).
 - `loader.py` — Validates the already-selected SDXL checkpoint record and resolves SUPIR variant weights under `supir_models`.
 - `runtime.py` — Canonical SUPIR mode execution owner called from `apps/backend/use_cases/img2img.py`.
-- `vae_cache.py` — Small in-process LRU cache for Stage-1 precompute (default OFF; explicit clear).
 
 ## Notes
 - **No LLaVA** support: prompts are optional; no image-to-text captioning path.
 - **No fast VAE encode/decode**: do not implement any “fast VAE” shortcuts.
-- Default OFF: VAE cache, VAE tiling, diffusion tiling (guardrails required when enabled).
+- Default OFF: VAE tiling and diffusion tiling (guardrails required when enabled).
 - Keep router/runtime imports **import-light**: torch-heavy work must be inside functions.
 - 2026-03-31: `/api/supir/models` is diagnostics-only; live SUPIR generation is owned by canonical SDXL `img2img.py`, not a standalone `/api/supir/enhance` route/task.
 - 2026-04-01: the public/native SUPIR restore surface is currently bounded to `restoreCfgSTmin`; do not expose or accept structure-only / LPF knobs again until `runtime.py` owns a truthful non-placeholder execution path for them.
