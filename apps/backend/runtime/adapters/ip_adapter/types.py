@@ -7,8 +7,8 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Typed IP-Adapter runtime contracts.
-Defines the validated request-owned source/config carriers plus prepared runtime asset, embedding, and apply-session bundles used by the
-shared IP-Adapter stage.
+Defines the validated request-owned source/config carriers plus prepared runtime asset and embedding bundles used by the shared
+IP-Adapter stage.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `IpAdapterLayout` (enum): Supported IP-Adapter runtime layouts for tranche 1.
@@ -16,7 +16,6 @@ Symbols (top-level; keep in sync; no ghosts):
 - `IpAdapterConfig` (dataclass): Typed processing/runtime owner for one IP-Adapter application.
 - `PreparedIpAdapterAssets` (dataclass): Loaded image-encoder/projector/KV asset bundle ready for embedding prep and patch apply.
 - `PreparedIpAdapterEmbeddings` (dataclass): Prepared conditional/unconditional IP-Adapter prompt tokens.
-- `AppliedIpAdapterSession` (dataclass): Active-session snapshot used to restore the baseline denoiser after sampling.
 """
 
 from __future__ import annotations
@@ -72,16 +71,7 @@ class PreparedIpAdapterEmbeddings:
     uncondition: torch.Tensor
 
 
-@dataclass(frozen=True)
-class AppliedIpAdapterSession:
-    previous_codex_objects: Any
-    patched_codex_objects: Any
-    assets: PreparedIpAdapterAssets
-    embeddings: PreparedIpAdapterEmbeddings
-
-
 __all__ = [
-    "AppliedIpAdapterSession",
     "IpAdapterConfig",
     "IpAdapterLayout",
     "IpAdapterSourceConfig",

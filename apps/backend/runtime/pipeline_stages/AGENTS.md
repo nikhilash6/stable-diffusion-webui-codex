@@ -1,6 +1,6 @@
 # apps/backend/runtime/pipeline_stages Overview
 Date: 2025-10-30
-Last Review: 2026-04-29
+Last Review: 2026-04-30
 Status: Active
 
 ## Purpose
@@ -15,6 +15,7 @@ Status: Active
 - `image_io.py` — PIL/tensor conversions + optional hires decode helper.
 - `hires_fix.py` — Hires-fix helpers (denoise→start_at_step mapping + init latents/conditioning prep via global upscalers).
 - `image_init.py` — Utilities for encoding img2img/img2vid init images into tensor+latent bundles.
+- `ip_adapter.py` — Thin sampling-stage wrapper for the request-scoped IP-Adapter apply/restore context manager.
 - `masked_img2img.py` — Masked img2img (“inpaint”) helpers: mask normalize/invert/blur + full-res crop plan + latent mask enforcement inputs.
 - `video.py` — Video plan builder, native LoRA/sampler configuration, shared WAN Diffusers stage-LoRA preflight/apply owner, interpolation helpers, metadata assembly, strict `build_ltx2_video_plan(...)`, and execution-only `build_ltx2_two_stage_geometry(...)` for the explicit LTX `two_stage` profile.
 - `__init__.py` — Package marker (intentionally no re-export facade; callers import modules directly).

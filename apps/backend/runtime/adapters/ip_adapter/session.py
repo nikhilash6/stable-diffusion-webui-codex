@@ -6,9 +6,9 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Request-scoped IP-Adapter apply/restore session management.
-Builds conditional image tokens, patches the active denoiser clone for the current sampling pass, and restores the baseline Codex objects
-in a `finally`-friendly context manager.
+Purpose: Request-scoped IP-Adapter apply/restore context management.
+Builds conditional image tokens, patches the active denoiser clone for the current sampling pass, yields no payload, and restores the
+baseline Codex objects in a `finally`-friendly context manager.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `apply_ip_adapter_for_sampling` (function): Context manager that patches the active sampling denoiser for one sampling pass and restores it afterwards.
@@ -29,14 +29,14 @@ from apps.backend.runtime.adapters.ip_adapter.assets import assert_ip_adapter_en
 from apps.backend.runtime.adapters.ip_adapter.layout import resolve_ip_adapter_transformer_coordinates
 from apps.backend.runtime.adapters.ip_adapter.modules import IpAdapterCrossAttentionPatch
 from apps.backend.runtime.adapters.ip_adapter.preprocess import prepare_ip_adapter_embeddings
-from apps.backend.runtime.adapters.ip_adapter.types import AppliedIpAdapterSession, IpAdapterConfig
+from apps.backend.runtime.adapters.ip_adapter.types import IpAdapterConfig
 from apps.backend.runtime.model_registry.capabilities import semantic_engine_for_engine_id
 
 logger = get_backend_logger("backend.runtime.adapters.ip_adapter.session")
 
 
 @contextlib.contextmanager
-def apply_ip_adapter_for_sampling(processing) -> Iterator[AppliedIpAdapterSession | None]:
+def apply_ip_adapter_for_sampling(processing) -> Iterator[None]:
     config = getattr(processing, "ip_adapter", None)
     if not isinstance(config, IpAdapterConfig) or not config.enabled:
         yield None
@@ -119,12 +119,6 @@ def apply_ip_adapter_for_sampling(processing) -> Iterator[AppliedIpAdapterSessio
     del condition_tokens
     del uncondition_tokens
     patched_codex_objects.denoiser = patched_denoiser
-    session = AppliedIpAdapterSession(
-        previous_codex_objects=previous_codex_objects,
-        patched_codex_objects=patched_codex_objects,
-        assets=assets,
-        embeddings=embeddings,
-    )
     logger.debug(
         "Applying IP-Adapter for engine=%s layout=%s slots=%d weight=%.3f start=%.3f end=%.3f",
         engine_id,
@@ -136,7 +130,7 @@ def apply_ip_adapter_for_sampling(processing) -> Iterator[AppliedIpAdapterSessio
     )
     engine.codex_objects = patched_codex_objects
     try:
-        yield session
+        yield
     finally:
         engine.codex_objects = previous_codex_objects
 

@@ -1,6 +1,6 @@
 # apps/backend/runtime/adapters/ip_adapter Overview
 Date: 2026-03-30
-Last Review: 2026-03-30
+Last Review: 2026-04-30
 Status: Active
 
 ## Purpose
@@ -13,7 +13,7 @@ Status: Active
 - `preprocess.py` — Builds conditional/unconditional image tokens from the selected reference image.
 - `modules.py` — Defines the projector/resampler modules and the shared attn2 replace patch implementation.
 - `session.py` — Applies IP-Adapter to the active denoiser clone for one sampling pass and restores the baseline objects afterward.
-- `types.py` — Typed config/asset/session carriers for the runtime seam.
+- `types.py` — Typed config, source, asset, and embedding carriers for the runtime seam.
 
 ## Notes
 - IP-Adapter slot order is not generic UNet discovery order. Keep the checkpoint slot contract in `layout.py`; do not bind slots straight from `UnetPatcher._iter_transformer_coordinates()`.
@@ -32,3 +32,4 @@ Status: Active
 - `preprocess.py` owns the conditioning math for generation and diagnostics. `probe.py` may collect receipts and choose `crop`, but it must consume the shared conditioning helper instead of restating the projector/zero-path algorithm.
 - The official encoder branch of `/api/tests/ip-adapter/probe` must compare `ClipVisionEncoder` against `CLIPVisionModelWithProjection` loaded from the canonical CLIP vision keyspace, not from a raw state dict with allowed full-CLIP extras like `logit_scale`.
 - If isolated encoder/projector/resampler/attn2 proofs all match the official reference and the visual bug remains, debug the live integration seam with `CODEX_IP_ADAPTER_DEBUG=1` or `CODEX_IP_ADAPTER_DEBUG_PATCH=1`: `session.py` owns the slot-map preview and `modules.py` owns the first live patch-call receipts (block, slot, sigma window, cond/uncond geometry, and tensor stats).
+- 2026-04-30: IP-Adapter context managers are side-effect-only and yield no session payload; do not reintroduce a session-carrier dataclass unless a real in-repo consumer is added in the same tranche.
