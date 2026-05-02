@@ -1,7 +1,7 @@
 # apps/backend/interfaces/api Overview
 <!-- tags: backend, api, fastapi, routers -->
 Date: 2026-01-08
-Last Review: 2026-03-31
+Last Review: 2026-05-02
 Status: Active
 
 ## Purpose
@@ -68,7 +68,7 @@ Status: Active
 - 2026-02-15: `public_errors.py` now keeps `EngineExecutionError` messages visible in task channels using stable `engine error: ...` formatting (idempotent on replay/snapshot re-serialization), so frontend task error panels can surface actionable runtime failures instead of opaque `internal error (error_id=...)`.
 - 2026-02-16: Generation task workers now also emit explicit API-console logs for typed `EngineExecutionError` (`task_id` + `mode` + `engine` + message) before public-error sanitization, so local runtime failures remain visible in backend logs without changing task/SSE payload contracts.
 - 2026-02-18: `run_api.py` phase-1 logging cleanup removed the `logging.basicConfig(...)` fallback in `ensure_initialized()` (fail-loud on logging bootstrap failure) and migrated startup/settings/port-guard/init console `print(...)` messages to structured logger calls.
-- 2026-02-18: `run_api.py` bootstrap env publication now also exports non-default LoRA loader toggles (`CODEX_LORA_MERGE_MODE`, `CODEX_LORA_REFRESH_SIGNATURE`) alongside `CODEX_LORA_APPLY_MODE`, preserving CLI/env/settings precedence without mutating process `os.environ`.
+- 2026-05-02: `run_api.py` LoRA apply-mode bootstrap publication now publishes resolved `CODEX_LORA_APPLY_MODE` when needed to override a conflicting process env while still avoiding implicit default pinning; LoRA math/signature bootstrap toggles remain published only for non-default values.
 - 2026-02-20: `json_store.py` is now fail-loud for persistence faults: `_load_json` returns `{}` only for missing files and raises on parse/read/type violations; `_save_json` raises on write/serialization failures (no best-effort swallow).
 - 2026-02-21: `run_api.py` startup settings normalization now parses checkbox values via shared strict bool parser and fails startup on invalid checkbox literals (no silent coercion of unknown strings to `False`).
 - 2026-02-21: UI persistence routes now fail loud on malformed `tabs.json`/`workflows.json`/`presets.json` payloads (no silent fallback to defaults or empty objects), and `/api/options` now rejects out-of-range numeric values instead of silently clamping (aligned with `/api/options/validate`).

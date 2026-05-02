@@ -12,7 +12,7 @@ Centralizes the meaning and parsing of the LoRA apply-mode used by patchers/runt
 Symbols (top-level; keep in sync; no ghosts):
 - `ENV_LORA_APPLY_MODE` (constant): Environment variable name controlling LoRA apply mode.
 - `LoraApplyMode` (enum): Supported apply modes (`merge`, `online`).
-- `DEFAULT_LORA_APPLY_MODE` (constant): Default apply mode when unset.
+- `DEFAULT_LORA_APPLY_MODE` (constant): Default apply mode (`online`) when unset.
 - `parse_lora_apply_mode` (function): Parses a string into `LoraApplyMode` (strict; raises on invalid).
 - `read_lora_apply_mode` (function): Reads apply mode from an env mapping (strict; raises on invalid).
 - `__all__` (constant): Explicit export list.
@@ -36,7 +36,7 @@ class LoraApplyMode(Enum):
     ONLINE = "online"
 
 
-DEFAULT_LORA_APPLY_MODE = LoraApplyMode.MERGE
+DEFAULT_LORA_APPLY_MODE = LoraApplyMode.ONLINE
 
 
 def parse_lora_apply_mode(raw: str) -> LoraApplyMode:

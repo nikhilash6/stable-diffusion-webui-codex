@@ -11,6 +11,7 @@ Provides typed env-backed wrappers (no Tk dependency) so UI/service code avoids 
 normalization rules, and so this module is unit-testable.
 Includes strict normalization for attention bootstrap keys (`CODEX_ATTENTION_BACKEND`, `CODEX_ATTENTION_SDPA_POLICY`) and
 task cancel default mode (`CODEX_TASK_CANCEL_DEFAULT_MODE`) alongside task buffer/safety knobs.
+GGUF/LoRA normalization resolves missing LoRA apply mode to `online` while preserving explicit `merge` values.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `SettingValidationError` (exception): Raised when a launcher setting value is invalid.
@@ -232,7 +233,7 @@ def normalize_gguf_lora_env(env: MutableMapping[str, str]) -> tuple[str, str, st
         default="off",
         choices=GGUF_DEQUANT_CACHE_CHOICES,
     ).get(env)
-    lora_apply = ChoiceSetting("CODEX_LORA_APPLY_MODE", default="merge", choices=LORA_APPLY_CHOICES).get(env)
+    lora_apply = ChoiceSetting("CODEX_LORA_APPLY_MODE", default="online", choices=LORA_APPLY_CHOICES).get(env)
     lora_math = ChoiceSetting("CODEX_LORA_ONLINE_MATH", default="weight_merge", choices=LORA_ONLINE_MATH_CHOICES).get(env)
     chunk_buffer_mode = ChoiceSetting(
         "CODEX_WAN22_IMG2VID_CHUNK_BUFFER_MODE",

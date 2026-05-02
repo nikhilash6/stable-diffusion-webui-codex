@@ -9,6 +9,7 @@ Required Notice: see NOTICE
 Purpose: Runtime settings tab for the Tk launcher.
 Edits bootstrap-critical main-device defaults and global runtime/task knobs that must exist before the API starts (main/mount/offload devices, GGUF/LoRA, task single-flight,
 task cancel default mode, task SSE buffer caps, upscaler safeweights). Offload device defaults to CPU on missing/invalid values to preserve explicit de-residency semantics.
+LoRA apply mode resolves missing launcher values to `online` while preserving explicit `merge` selections.
 Allocator defaults are managed through `PYTORCH_CUDA_ALLOC_CONF` and `CODEX_ENABLE_DEFAULT_PYTORCH_CUDA_ALLOC_CONF`.
 API-only manual env overlay ownership lives in `Manual Env Vars`, not in runtime selectors.
 
@@ -213,8 +214,8 @@ class RuntimeTab:
                             help_mode=HelpMode.DIALOG,
                             help_title="LoRA apply mode",
                             help_text=(
-                                "merge: rewrites weights once at apply-time (default).\n"
-                                "online: applies LoRA patches on-the-fly during forward."
+                                "online: applies LoRA patches on-the-fly during forward (default).\n"
+                                "merge: rewrites weights once at apply-time."
                             ),
                         ),
                         FormFieldDescriptor(
@@ -444,7 +445,7 @@ class RuntimeTab:
         attention_mode = backend_policy_to_attention_mode(attn_backend, attn_sdpa_policy)
         self._var_attention_mode.set(_ATTENTION_MODE_TO_LABEL.get(attention_mode, "SDPA - Auto"))
 
-        self._var_lora_apply_mode.set(_get("CODEX_LORA_APPLY_MODE", "merge"))
+        self._var_lora_apply_mode.set(_get("CODEX_LORA_APPLY_MODE", "online"))
         self._var_gguf_dequant_cache.set(_get("CODEX_GGUF_DEQUANT_CACHE", "off"))
         self._var_wan_chunk_buffer_mode.set(_get("CODEX_WAN22_IMG2VID_CHUNK_BUFFER_MODE", "hybrid"))
         self._var_lora_online_math.set(_get("CODEX_LORA_ONLINE_MATH", "weight_merge"))
@@ -728,7 +729,7 @@ class RuntimeTab:
         env["CODEX_GGUF_DEQUANT_CACHE"] = str(self._var_gguf_dequant_cache.get() or "").strip().lower() or "off"
         env.pop("CODEX_GGUF_DEQUANT_CACHE_RATIO", None)
         env.pop("CODEX_GGUF_DEQUANT_CACHE_LIMIT_MB", None)
-        env["CODEX_LORA_APPLY_MODE"] = str(self._var_lora_apply_mode.get() or "").strip().lower() or "merge"
+        env["CODEX_LORA_APPLY_MODE"] = str(self._var_lora_apply_mode.get() or "").strip().lower() or "online"
         env["CODEX_LORA_ONLINE_MATH"] = str(self._var_lora_online_math.get() or "").strip().lower() or "weight_merge"
         env["CODEX_WAN22_IMG2VID_CHUNK_BUFFER_MODE"] = (
             str(self._var_wan_chunk_buffer_mode.get() or "").strip().lower() or "hybrid"
@@ -740,7 +741,7 @@ class RuntimeTab:
             env["CODEX_GGUF_DEQUANT_CACHE"] = "off"
             env.pop("CODEX_GGUF_DEQUANT_CACHE_RATIO", None)
             env.pop("CODEX_GGUF_DEQUANT_CACHE_LIMIT_MB", None)
-            env["CODEX_LORA_APPLY_MODE"] = "merge"
+            env["CODEX_LORA_APPLY_MODE"] = "online"
             env["CODEX_LORA_ONLINE_MATH"] = "weight_merge"
             env["CODEX_WAN22_IMG2VID_CHUNK_BUFFER_MODE"] = "hybrid"
             gguf_cache, lora_apply, lora_math, chunk_buffer_mode = normalize_gguf_lora_env(env)

@@ -1,6 +1,6 @@
 # apps Overview
 Date: 2025-10-28
-Last Review: 2026-02-05
+Last Review: 2026-05-02
 Status: Active
 
 ## Purpose
@@ -26,7 +26,7 @@ Status: Active
 - 2026-02-28: Launcher runtime defaults persist in the launcher profile store (`.sangoi/launcher/profiles/*`); `run-webui.sh` also reads fallback device defaults from `apps/settings_values.json` (`codex_main_device` + component keys).
 - 2026-02-28: Launcher/API startup actively forwards `CODEX_*` bootstrap/runtime knobs and allocator keys (for example `CODEX_MAIN_DEVICE`, `CODEX_MOUNT_DEVICE`, `CODEX_OFFLOAD_DEVICE`, `PYTORCH_CUDA_ALLOC_CONF`) instead of stripping them.
 - 2026-02-28: Manual API env overlay (`manual_api_env_enabled`) is a GUI-launcher API-start feature; shell launcher paths (`run-webui.sh`) do not consume the launcher manual overlay text.
-- 2026-01-20: Launchers can set `CODEX_LORA_APPLY_MODE` (merge|online) to control whether native LoRA selections are merged into weights (default) or applied on-the-fly; backend CLI also supports `--lora-apply-mode`.
+- 2026-05-02: Unset launcher LoRA apply mode uses `CODEX_LORA_APPLY_MODE=online`; explicit `merge` remains valid when a run should rewrite weights once at apply-time. Backend CLI also supports `--lora-apply-mode`.
 - 2026-03-01: Launcher no longer exposes GGUF exec mode controls; GGUF runtime stays on forward dequantization by default and only LoRA online-math remains as an explicit (reserved/fail-loud) bootstrap flag.
 - 2026-01-21: Launchers can set `PYTORCH_CUDA_ALLOC_CONF` to tune the PyTorch CUDA caching allocator (e.g. reduce fragmentation via `max_split_size_mb`).
 - 2026-01-21: Launcher default for `PYTORCH_CUDA_ALLOC_CONF` is `max_split_size_mb:256,garbage_collection_threshold:0.8` (override via GUI or `./run-webui.sh --pytorch-cuda-alloc-conf ...`).

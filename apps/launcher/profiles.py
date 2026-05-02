@@ -11,6 +11,7 @@ Implements the profile store used by the TUI/GUI launchers to load/save settings
 expose a mapping-like interface for editing environment variables with per-area routing and migrations.
 Defines defaults for performance-related env keys (GGUF dequant-cache/LoRA knobs, CFG batching, profiling flags) and task/runtime safety knobs (single-flight,
 task cancel mode, task SSE buffer caps, safeweights), plus attention/bootstrap device policy keys (`CODEX_MAIN_DEVICE`, `CODEX_MOUNT_DEVICE`, `CODEX_OFFLOAD_DEVICE`) with CPU offload default, so runs are reproducible.
+LoRA apply-mode profile defaults resolve unset launcher config to `online` while preserving explicit `merge` values.
 Also stores API-only manual env overlay settings (`manual_api_env_enabled`, `manual_api_env_text`) plus launcher-owned frontend dev boot policy, and
 validates overlay text parsing for fail-loud startup.
 
@@ -108,7 +109,7 @@ def _default_area_env() -> Dict[str, Dict[str, str]]:
         "CODEX_ATTENTION_BACKEND": "pytorch",
         "CODEX_ATTENTION_SDPA_POLICY": "auto",
         "CODEX_WAN22_IMG2VID_CHUNK_BUFFER_MODE": os.getenv("CODEX_WAN22_IMG2VID_CHUNK_BUFFER_MODE", "hybrid"),
-        "CODEX_LORA_APPLY_MODE": "merge",
+        "CODEX_LORA_APPLY_MODE": "online",
         "CODEX_LORA_ONLINE_MATH": "weight_merge",
         ENABLE_DEFAULT_PYTORCH_CUDA_ALLOC_CONF_KEY: "1",
         CODEX_CUDA_MALLOC_KEY: "0",

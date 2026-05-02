@@ -1,6 +1,6 @@
 # apps/backend/infra/config Overview
 Date: 2026-02-18
-Last Review: 2026-03-05
+Last Review: 2026-05-02
 Status: Active
 
 ## Purpose
@@ -11,6 +11,7 @@ Status: Active
 - `args.py` — Runtime CLI/env parser and `RuntimeMemoryConfig` builder.
 - `bootstrap_env.py` — Bootstrap env overlay publication without mutating global `os.environ`.
 - `env_flags.py` — Canonical env flag parsers shared by runtime diagnostics/features.
+- `lora_apply_mode.py` — Strict enum/parser/reader for LoRA application mode; unset config resolves to `online`.
 - `lora_merge_mode.py` — Strict enum/parser/reader for LoRA merge math mode (`fast|precise`).
 - `lora_refresh_signature.py` — Strict enum/parser/reader for LoRA refresh signature mode (`structural|content_sha256`).
 - `paths.py` — Paths.json/settings discovery and model root provisioning helpers.

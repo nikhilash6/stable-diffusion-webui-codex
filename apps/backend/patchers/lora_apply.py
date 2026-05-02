@@ -9,7 +9,7 @@ Required Notice: see NOTICE
 Purpose: Native LoRA application pipeline (no legacy modules).
 Preflights selected LoRAs against the active denoiser and text-encoder targets (cheap SafeTensors header fast path plus materialized structural validation),
 converts compatible files into patch dictionaries and applies them to the engine's denoiser and text encoders via the `ModelPatcher` system before
-materializing LoRA application by refreshing LoRAs on the patchers (merge default; optional on-the-fly via `CODEX_LORA_APPLY_MODE=online`).
+refreshing LoRA state on the patchers (unset mode is `online`; explicit `merge` rewrites weights once at apply-time).
 Fails loud when selected LoRAs do not match runtime parameters or fail structural compatibility checks.
 Patch dictionary keys may be plain parameter names or `(parameter, offset)` tuples for slice patches (e.g. fused-QKV text encoders).
 

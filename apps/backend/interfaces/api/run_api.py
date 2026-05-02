@@ -9,7 +9,7 @@ Required Notice: see NOTICE
 
 Purpose: FastAPI entrypoint + uvicorn factory for the Codex WebUI backend.
 This module builds the `/api/*` surface by assembling router modules (generation/tasks/models/options/tools/ui persistence/upscale/supir/tests), and mounts the built UI as SPA static files only when explicit embedded app mode is enabled (uses lifespan handlers for startup hooks; no deprecated `on_event`).
-Bootstrap env overrides are published only when non-default to avoid pinning global defaults across test runs.
+Bootstrap env overrides are published only when needed: non-default values plus resolved values that must override conflicting process env.
 Bootstrap env publication includes LoRA loader policies (`CODEX_LORA_APPLY_MODE`, `CODEX_LORA_MERGE_MODE`, `CODEX_LORA_REFRESH_SIGNATURE`) from resolved runtime namespace values.
 Startup settings normalization preserves `codex_options_revision` while pruning unknown keys and failing loud on invalid reliability-critical values
 (including `codex_attention_backend`, checkbox settings, and non-finite numeric options).
@@ -23,6 +23,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_cli_arg_value` (function): Reads a CLI flag value from argv (supports `--flag value` and `--flag=value` forms).
 - `_parse_trace_max` (function): Parses `--trace-debug-max-per-func` / `--trace-call-debug-max-per-func` into a non-negative int (or `None`).
 - `_env_truthy` (function): Parses launcher/env boolean tokens (`1/true/yes/on`) from string values.
+- `_publish_lora_apply_mode_bootstrap` (function): Publishes resolved LoRA apply mode when bootstrap readers need an override.
 - `_emit_run_api_message` (function): Emits repo-owned bootstrap/API operational logs through the canonical backend wrapper.
 - `_report_run_api_exception` (function): Dumps a handled bootstrap/API exception and emits one concise wrapper-owned summary line.
 - `_trace_debug_logging_requested` (function): Resolves whether any trace-debug category requests DEBUG logging bootstrap.
@@ -52,7 +53,7 @@ import socket
 import sys
 from pathlib import Path
 from contextlib import closing, asynccontextmanager
-from typing import Any, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, List, Mapping, Optional, Sequence, Tuple
 import logging
 
 from fastapi import FastAPI
@@ -100,6 +101,38 @@ def _parse_trace_max(argv: Sequence[str]) -> Optional[int]:
 
 def _env_truthy(raw: object) -> bool:
     return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _publish_lora_apply_mode_bootstrap(
+    namespace: Any,
+    env: Mapping[str, str],
+    set_bootstrap_env: Callable[[str, object], None],
+) -> None:
+    """Publish resolved LoRA apply mode when runtime readers need an override."""
+
+    from apps.backend.infra.config.lora_apply_mode import (
+        DEFAULT_LORA_APPLY_MODE,
+        ENV_LORA_APPLY_MODE,
+        parse_lora_apply_mode,
+    )
+
+    mode = getattr(namespace, "lora_apply_mode", None)
+    if mode is None:
+        return
+    mode_value = str(mode).strip()
+    if not mode_value:
+        return
+
+    raw_env_value = env.get(ENV_LORA_APPLY_MODE)
+    env_conflicts = False
+    if raw_env_value is not None and str(raw_env_value).strip():
+        try:
+            env_conflicts = parse_lora_apply_mode(str(raw_env_value)).value != mode_value
+        except ValueError:
+            env_conflicts = True
+
+    if mode_value != DEFAULT_LORA_APPLY_MODE.value or env_conflicts:
+        set_bootstrap_env(ENV_LORA_APPLY_MODE, mode_value)
 
 
 def _emit_run_api_message(
@@ -874,15 +907,7 @@ def _bootstrap_runtime(argv: Sequence[str], env: Mapping[str, str], settings: Ma
             _set_bootstrap_env("CODEX_TRACE_LOAD_PATCH_DEBUG", "1")
         if getattr(ns, "trace_debug", False) or _env_truthy(env.get("CODEX_TRACE_INFERENCE_DEBUG")) or _env_truthy(env.get("CODEX_TRACE_LOAD_PATCH_DEBUG")):
             _set_bootstrap_env("CODEX_LOG_DEBUG", "1")
-        mode = getattr(ns, "lora_apply_mode", None)
-        if mode is not None:
-            # Only publish non-default values. Publishing defaults would pin global state
-            # and prevent per-test env overrides from taking effect.
-            from apps.backend.infra.config.lora_apply_mode import DEFAULT_LORA_APPLY_MODE
-
-            mode_value = str(mode).strip()
-            if mode_value and mode_value != DEFAULT_LORA_APPLY_MODE.value:
-                _set_bootstrap_env("CODEX_LORA_APPLY_MODE", mode_value)
+        _publish_lora_apply_mode_bootstrap(ns, env, _set_bootstrap_env)
         lora_merge_mode = getattr(ns, "lora_merge_mode", None)
         if lora_merge_mode is not None:
             from apps.backend.infra.config.lora_merge_mode import DEFAULT_LORA_MERGE_MODE
