@@ -6,20 +6,17 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Shared primitives for asset registries (dataclasses + directory helpers).
-Defines the base `AssetEntry` record plus small filesystem helpers used across registry modules.
+Purpose: Shared primitives for lightweight backend infra registries.
+Defines the base `AssetEntry` record used by the active registry modules.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `AssetEntry` (dataclass): Generic asset record (name/path/kind/tags/meta) used by registry inventory endpoints.
-- `_is_dir_with_any` (function): Returns True if a root directory contains any of the given subdirectories.
-- `_iter_dirs` (function): Iterates direct child directories of a root path.
+- `AssetEntry` (dataclass): Generic asset record (name/path/kind/tags/meta) used by active registry entries.
 """
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
-from typing import Any, Iterable, List
+from typing import Any, List
 
 
 @dataclass
@@ -31,24 +28,4 @@ class AssetEntry:
     meta: dict[str, Any] = field(default_factory=dict)
 
 
-def _is_dir_with_any(root: str, subdirs: Iterable[str]) -> bool:
-    try:
-        for sd in subdirs:
-            if os.path.isdir(os.path.join(root, sd)):
-                return True
-    except Exception:
-        return False
-    return False
-
-
-def _iter_dirs(root: str) -> Iterable[str]:
-    try:
-        for name in os.listdir(root):
-            full = os.path.join(root, name)
-            if os.path.isdir(full):
-                yield full
-    except Exception:
-        return []
-
-
-__all__ = ["AssetEntry", "_is_dir_with_any", "_iter_dirs"]
+__all__ = ["AssetEntry"]
