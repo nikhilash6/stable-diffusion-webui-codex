@@ -11,7 +11,6 @@ Keeps processing-level script callbacks and shared job metadata isolated from sa
 
 Symbols (top-level; keep in sync; no ghosts):
 - `run_process_scripts` (function): Run processing scripts (legacy-compatible) when present.
-- `activate_extra_networks` (function): Apply globally selected extra networks (LoRAs) to the current engine.
 - `set_shared_job` (function): Update shared job metadata for batch runs.
 - `collect_lora_selections` (function): Merge global selections with prompt-local LoRA descriptors, with prompt-local same-path weights winning.
 - `run_before_sampling_hooks` (function): Invoke before-sampling hooks (scripts + shared job metadata).
@@ -19,7 +18,6 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
-from apps.backend.runtime.logging import emit_backend_message
 
 from typing import Any, Iterable, Sequence
 
@@ -27,7 +25,6 @@ import torch
 
 from apps.backend.runtime.adapters.lora import selections as lora_selections
 from apps.backend.core.state import state as backend_state
-from apps.backend.patchers.lora_apply import apply_loras_to_engine
 from apps.backend.runtime.processing.datatypes import PromptContext
 
 
@@ -36,29 +33,6 @@ def run_process_scripts(processing: Any) -> None:
     script_runner = getattr(processing, "scripts", None)
     if script_runner is not None and hasattr(script_runner, "process"):
         script_runner.process(processing)
-
-
-def activate_extra_networks(processing: Any) -> None:
-    """Apply globally selected extra networks to the current engine.
-
-    Note: sampling-path LoRA ownership lives in `sampling_execute.execute_sampling(...)`.
-    This helper remains explicit/opt-in for non-sampling callsites only.
-    """
-    if getattr(processing, "disable_extra_networks", False):
-        return
-    try:
-        selections = lora_selections.get_selections()
-    except Exception:
-        selections = []
-    if not selections:
-        return
-    stats = apply_loras_to_engine(processing.sd_model, selections)
-    emit_backend_message(
-        "[native] Applied LoRA selections",
-        logger=__name__,
-        files=stats.files,
-        params_touched=stats.params_touched,
-    )
 
 
 def set_shared_job(processing: Any) -> None:

@@ -11,7 +11,7 @@ Status: Active
 - `prompt_context.py` — Prompt parsing + request-owned clip-skip handoff.
 - `sampling_plan.py` — Scheduler normalization, noise settings, plan building, sampler/RNG preparation.
 - `sampling_execute.py` — Sampler execution + live preview callback + latent dump diagnostics.
-- `scripts.py` — Script hooks + extra network (LoRA) activation helpers.
+- `scripts.py` — Script hooks, prompt-local LoRA selection merging, and shared job metadata helpers.
 - `image_io.py` — PIL/tensor conversions + optional hires decode helper.
 - `hires_fix.py` — Hires-fix helpers (denoise→start_at_step mapping + init latents/conditioning prep via global upscalers).
 - `image_init.py` — Utilities for encoding img2img/img2vid init images into tensor+latent bundles.

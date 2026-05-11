@@ -7,8 +7,8 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Processing model dataclasses (txt2img/img2img) used by engine runtimes and orchestration.
-Defines the stable “processing” parameter containers (hires, first-pass swap stages, refiner, IP-Adapter, SUPIR mode + common fields) and helpers
-that normalize list-like inputs so per-batch runs have consistent lengths.
+Defines the stable “processing” parameter containers (hires, first-pass swap stages, refiner, IP-Adapter, SUPIR mode, and shared runtime fields)
+and helpers that normalize list-like inputs so per-batch runs have consistent lengths.
 `CodexProcessingImg2Img` now carries masked runtime selection under `inpaint_mode`, including exact-engine SDXL accessory branches like Fooocus.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -388,7 +388,6 @@ class CodexProcessingBase:
     sampler_name: Optional[str] = None
     scheduler: Optional[str] = None
     user: str = "api"
-    disable_extra_networks: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
     extra_generation_params: Dict[str, Any] = field(default_factory=dict)
     override_settings: Dict[str, Any] = field(default_factory=dict)
