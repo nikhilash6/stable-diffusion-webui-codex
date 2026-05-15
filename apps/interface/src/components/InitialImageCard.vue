@@ -6,14 +6,14 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Initial image file picker for img2img-style workflows.
+Purpose: Shared image picker/preview primitive for frontend image-input surfaces.
 Provides a file input, preview, and remove action and emits the selected `File` back to the parent.
-In dropzone mode, top-right actions render inside the dotted zone (including `Remove`) to keep picker controls close to the preview.
-Exposes `dropzone-actions` and `preview-overlay` slots for caller-defined preview actions/overlays.
+In dropzone mode, top-right actions render inside the dotted zone (including `Remove`) in a dedicated top row so picker controls stay close to the preview without covering it.
+Exposes `dropzone-actions` and `preview-overlay` slots for caller-defined preview actions/overlays; `preview-overlay` now renders inside an image-bounds media wrapper so overlays align to the actual contained preview image.
 Supports optional pass-through WAN frame-guide config for zoom-overlay no-stretch projection metadata.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `InitialImageCard` (component): Initial image picker panel.
+- `InitialImageCard` (component): Shared image picker/preview primitive.
 - `zoomFrameGuide` (prop): Optional WAN frame-guide config forwarded to `ImageZoomOverlay`.
 - `previewClickAction` (prop): Controls preview click behavior (`zoom` or external emit hook).
 - `onZoomFrameGuideUpdate` (function): Forwards zoom-overlay guide edits to parent state.
@@ -56,8 +56,12 @@ Symbols (top-level; keep in sync; no ghosts):
               ]"
               @click.stop="onPreviewClick"
             >
-              <img :src="src" alt="Initial" />
-              <slot name="preview-overlay" />
+              <div class="init-preview__media">
+                <img :src="src" alt="Initial" />
+                <div class="init-preview__overlay">
+                  <slot name="preview-overlay" />
+                </div>
+              </div>
             </div>
             <p v-else class="caption">{{ placeholder }}</p>
           </div>
@@ -77,8 +81,12 @@ Symbols (top-level; keep in sync; no ghosts):
           ]"
           @click.stop="onPreviewClick"
         >
-          <img :src="src" alt="Initial" />
-          <slot name="preview-overlay" />
+          <div class="init-preview__media">
+            <img :src="src" alt="Initial" />
+            <div class="init-preview__overlay">
+              <slot name="preview-overlay" />
+            </div>
+          </div>
         </div>
         <p v-else class="caption">{{ placeholder }}</p>
       </template>

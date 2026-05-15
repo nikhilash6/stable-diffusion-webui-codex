@@ -22,6 +22,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import base64
 from contextlib import contextmanager
@@ -39,7 +40,7 @@ from apps.backend.runtime.live_preview import (
     preview_runtime_overrides,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_backend_logger(__name__)
 
 
 class LivePreviewImageFormat(str, Enum):
@@ -222,14 +223,21 @@ class LivePreviewService:
 
         return LivePreviewEncodedImage(format=fmt.value, data=base64.b64encode(buf.getvalue()).decode("ascii"))
 
-    def maybe_attach_to_progress_event(self, event: dict[str, Any], entry: Any, *, config: LivePreviewTaskConfig) -> None:
+    def maybe_attach_to_progress_event(
+        self,
+        event: dict[str, Any],
+        entry: Any,
+        *,
+        config: LivePreviewTaskConfig,
+        expected_owner_token: str | None = None,
+    ) -> None:
         if not config.sse_enabled:
             return
 
-        try:
-            preview_id = int(getattr(backend_state, "id_live_preview", 0) or 0)
-        except Exception:
-            preview_id = 0
+        preview_owner_token, preview_id, preview_image, preview_step = backend_state.live_preview_snapshot()
+        normalized_expected_owner_token = str(expected_owner_token or "").strip()
+        if normalized_expected_owner_token and str(preview_owner_token or "").strip() != normalized_expected_owner_token:
+            return
         if preview_id <= 0:
             return
 
@@ -238,7 +246,7 @@ class LivePreviewService:
             return
 
         encoded = self.encode_preview_image(
-            getattr(backend_state, "current_image", None),
+            preview_image,
             fmt=config.image_format,
             max_dim=int(config.max_dim),
         )
@@ -251,10 +259,6 @@ class LivePreviewService:
             pass
 
         event["preview_image"] = encoded.as_dict()
-        try:
-            preview_step = int(getattr(backend_state, "current_image_sampling_step", 0) or 0)
-        except Exception:
-            preview_step = 0
         if preview_step > 0:
             event["preview_step"] = preview_step
 

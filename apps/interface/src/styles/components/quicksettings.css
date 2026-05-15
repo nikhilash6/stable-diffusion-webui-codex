@@ -23,11 +23,29 @@
   }
 
   .quicksettings-advanced-collapse {
+    --qs-advanced-target-height: 0px;
     overflow: hidden;
     transform-origin: top;
     will-change: height, opacity;
     padding-left: calc(var(--control-h-md) + 0.8rem);
     position: relative;
+    height: var(--qs-advanced-target-height);
+    opacity: 1;
+    transition: height 280ms cubic-bezier(0.22, 1, 0.36, 1), opacity 180ms ease;
+  }
+
+  .quicksettings-advanced-collapse[data-ready='false'] {
+    transition: none;
+  }
+
+  .quicksettings-advanced-collapse[data-state='closed'] {
+    height: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .quicksettings-advanced-collapse[data-state='open'] {
+    height: var(--qs-advanced-target-height);
   }
 
   .quicksettings-advanced-collapse::before {
@@ -57,12 +75,13 @@
   .quicksettings .qs-group-checkpoint { flex: 2 1 18rem; min-width: 14rem; }
   .quicksettings .qs-group-vae { flex: 1.2 1 12rem; min-width: 10rem; }
   .quicksettings .qs-group-text-encoder,
-  .quicksettings .qs-group-flux1-tenc { flex: 2 1 18rem; min-width: 14rem; }
+  .quicksettings .qs-group-flux-tenc { flex: 2 1 18rem; min-width: 14rem; }
   .quicksettings .qs-group-wan-mode { flex: 0 0 auto; min-width: 160px; }
   .quicksettings .qs-group-wan-refresh { flex: 0 0 auto; }
   .quicksettings .qs-group-wan-lightx2v { flex: 0 0 auto; min-width: 100px; }
   .quicksettings .qs-group-wan-high,
-  .quicksettings .qs-group-wan-low { flex: 2 1 18rem; min-width: 14rem; }
+  .quicksettings .qs-group-wan-low,
+  .quicksettings .qs-group-wan-model { flex: 2 1 18rem; min-width: 14rem; }
   .quicksettings .qs-group-wan-text-encoder { flex: 2 1 18rem; min-width: 14rem; }
   .quicksettings .qs-group-wan-vae { flex: 1.2 1 12rem; min-width: 10rem; }
   .quicksettings .qs-group-zimage-turbo { flex: 0 0 auto; }
@@ -79,7 +98,7 @@
   }
   .quicksettings .qs-group-overrides { flex: 0 0 auto; }
   .quicksettings .qs-group-advanced-toggle { flex: 0 0 auto; }
-  .quicksettings .qs-group-perf-vram { flex: 0 0 auto; min-width: 80px; }
+  .quicksettings .qs-group-owner-note { flex: 1 1 100%; }
   .quicksettings .qs-group-perf-offload,
   .quicksettings .qs-group-perf-fallback,
   .quicksettings .qs-group-perf-cache,
@@ -91,6 +110,32 @@
     align-items: stretch; 
     gap: var(--space-sm); 
     height: var(--control-h-md);
+  }
+
+  .qs-toggle-group {
+    display: inline-flex;
+    align-items: stretch;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+  }
+
+  .qs-row-wrap {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    height: auto;
+  }
+
+  .qs-readonly-fieldset {
+    min-inline-size: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    display: flex;
+    flex: 1 1 0%;
+    flex-wrap: wrap;
+    gap: 0.5rem 0.8rem;
+    align-items: flex-end;
+    min-width: 0;
   }
   
   .qs-pair { 
@@ -141,9 +186,6 @@
   .quicksettings .qs-refresh-btn { padding-inline: 0.6rem; font-size: 0.75rem; }
   .quicksettings .qs-overrides-btn { padding: 0.3rem 0.5rem; font-size: 0.7rem; white-space: nowrap; }
   
-  .qs-actions { display: flex; align-items: center; gap: 0.4rem; }
-  .qs-paths-hint { flex-direction: column; }
-
   .qs-toggle-btn {
     height: 100%;
     padding: 0.3rem 0.65rem;
@@ -191,10 +233,6 @@
     filter: saturate(0.75);
     cursor: not-allowed;
   }
-
-  /* Hide legacy */
-  .quicksettings .qs-group-mode { display: none; }
-  .quicksettings .qs-group-perf-dtype { display: none; }
 
   .quicksettings.quicksettings-loading .select-md {
     animation: qs-select-pulse 0.85s ease-in-out infinite alternate;
@@ -254,6 +292,37 @@
     display: inline-flex;
     align-items: center;
     gap: 0.35rem;
+  }
+
+  .qs-add-path-progress-caption {
+    margin: 0;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .qs-add-path-progress-bar {
+    width: 100%;
+    height: 0.5rem;
+    border: 0;
+    border-radius: 999px;
+    overflow: hidden;
+    appearance: none;
+    background: color-mix(in srgb, var(--color-panel) 74%, black 26%);
+  }
+
+  .qs-add-path-progress-bar::-webkit-progress-bar {
+    background: color-mix(in srgb, var(--color-panel) 74%, black 26%);
+    border-radius: 999px;
+  }
+
+  .qs-add-path-progress-bar::-webkit-progress-value {
+    background: linear-gradient(90deg, hsla(195, 95%, 52%, 0.95), hsla(195, 95%, 68%, 0.95));
+    border-radius: 999px;
+  }
+
+  .qs-add-path-progress-bar::-moz-progress-bar {
+    background: linear-gradient(90deg, hsla(195, 95%, 52%, 0.95), hsla(195, 95%, 68%, 0.95));
+    border-radius: 999px;
   }
 
   .qs-add-path-list-section {
@@ -318,7 +387,7 @@
   }
 
   .qs-add-path-row:hover {
-    background: color-mix(in srgb, var(--color-panel) 72%, var(--color-accent) 28%);
+    background: color-mix(in srgb, var(--color-panel) 72%, var(--color-primary) 28%);
   }
 
   .qs-add-path-row.is-error {

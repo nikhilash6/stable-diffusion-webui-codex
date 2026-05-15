@@ -9,20 +9,21 @@ Required Notice: see NOTICE
 Purpose: Shared native 3D VAE runtime lane for temporal video autoencoders.
 Defines `AutoencoderCodex3D` with causal 3D convolutions, temporal cache-aware
 encode/decode chunk execution, explicit temporal down/upsampling, and strict
-diffusers->codex key remap helpers for WAN-like checkpoints without importing
-diffusers model classes. WAN22 keymap ownership for remap logic lives in
+diffusers->codex keyspace resolution helpers for WAN-like checkpoints without importing
+diffusers model classes. WAN22 keyspace ownership lives in
 `runtime/state_dict/keymap_wan22_vae.py`.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_CACHE_T` (constant): Temporal cache window used by causal-conv cache plumbing in chunked encode/decode passes.
 - `AutoencoderCodex3D` (class): Native causal-3D KL VAE with codex keyspace (`encoder.downsamples.*`, `decoder.upsamples.*`, `conv1/conv2`).
 - `sanitize_codex3d_vae_config` (function): Normalizes alias config fields into `AutoencoderCodex3D` constructor arguments.
-- `remap_codex3d_vae_state_dict` (function): Normalizes wrapper prefixes and remaps diffusers WAN3D VAE keyspace to codex keyspace (strict/fail-loud).
+- `resolve_codex3d_vae_keyspace` (function): Normalizes wrapper prefixes and resolves diffusers WAN3D VAE keys into codex lookup space (strict/fail-loud).
 - `is_codex3d_vae_instance` (function): Returns True when a model instance belongs to the native codex 3D VAE lane.
 - `__all__` (constant): Explicit export list.
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from collections.abc import Mapping, MutableMapping, Sequence
@@ -37,7 +38,7 @@ from torch import nn
 
 from apps.backend.infra.config.env_flags import env_flag
 from apps.backend.runtime.common.vae_ldm import DiagonalGaussianDistribution
-from apps.backend.runtime.state_dict.keymap_wan22_vae import remap_wan22_vae_3d_state_dict
+from apps.backend.runtime.state_dict.keymap_wan22_vae import resolve_wan22_vae_3d_keyspace
 
 _CACHE_T = 2
 
@@ -65,10 +66,13 @@ def _cuda_mem_snapshot_str(device: torch.device) -> str:
         return "cuda_mem=unavailable"
 
 
-def remap_codex3d_vae_state_dict(
+def resolve_codex3d_vae_keyspace(
     state_dict: MutableMapping[str, Any],
 ) -> tuple[str, MutableMapping[str, Any]]:
-    return remap_wan22_vae_3d_state_dict(state_dict)
+    resolved = resolve_wan22_vae_3d_keyspace(state_dict)
+    style = resolved.style
+    style_label = style.value if hasattr(style, "value") else str(style)
+    return style_label, resolved.view
 
 
 class Codex3DCausalConv(nn.Conv3d):
@@ -545,7 +549,7 @@ class Codex3DDecoder(nn.Module):
         _ = first_chunk
         if feat_cache is not None and feat_idx is None:
             raise RuntimeError("AutoencoderCodex3D decoder cache requires feat_idx.")
-        trace_logger = logging.getLogger("backend.runtime.wan22.vae_codex3d")
+        trace_logger = get_backend_logger("backend.runtime.wan22.vae_codex3d")
         trace_enabled = _vae_trace_verbose_enabled() and trace_logger.isEnabledFor(logging.DEBUG)
         middle_count = int(len(self.middle))
         upsample_count = int(len(self.upsamples))
@@ -846,7 +850,7 @@ class AutoencoderCodex3D(nn.Module, ConfigMixin):
                 "AutoencoderCodex3D decode expects 4D or 5D latents ([B,C,H,W] or [B,C,T,H,W]), "
                 f"got shape={tuple(z.shape)}."
             )
-        trace_logger = logging.getLogger("backend.runtime.wan22.vae_codex3d")
+        trace_logger = get_backend_logger("backend.runtime.wan22.vae_codex3d")
         trace_enabled = _vae_trace_verbose_enabled() and trace_logger.isEnabledFor(logging.DEBUG)
         _, _, num_frame, _, _ = z.shape
         conv2_cache: torch.Tensor | None = None
@@ -1022,6 +1026,6 @@ def is_codex3d_vae_instance(model: object) -> bool:
 __all__ = [
     "AutoencoderCodex3D",
     "is_codex3d_vae_instance",
-    "remap_codex3d_vae_state_dict",
+    "resolve_codex3d_vae_keyspace",
     "sanitize_codex3d_vae_config",
 ]

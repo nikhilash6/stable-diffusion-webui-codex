@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: SD-family hires-fix helpers (second pass init preparation).
-Prepares the hi-res pass init latents and image-conditioning, routing either:
+Prepares the hi-res pass init latents and request-driven image-conditioning, routing either:
 - latent interpolation upscalers (`latent:*`), or
 - external SR models via the global upscalers runtime (`spandrel:*`).
 When `resize_x/resize_y` change the aspect ratio, the hires-fix stage uses a “fill then crop” plan to avoid stretching.
@@ -26,7 +26,6 @@ from apps.backend.runtime.pipeline_stages.hires_fix import HiresFillCropPlan
 from apps.backend.runtime.processing.conditioners import (
     decode_latent_batch,
     encode_image_batch,
-    encode_inpaint_latent_pair,
     img2img_conditioning,
     txt2img_conditioning,
 )
@@ -90,17 +89,7 @@ def prepare_hires_latents_and_conditioning(
 
         if internal_w == tw and internal_h == th and crop_left == 0 and crop_top == 0:
             latents = upscaled_latents
-            if getattr(sd_model, "is_inpaint", False):
-                tensor = decode_latent_batch(sd_model, latents, stage="hires.prepare.latent.inpaint_decode")
-                image_conditioning = img2img_conditioning(
-                    sd_model,
-                    tensor,
-                    latents,
-                    image_mask=image_mask,
-                    round_mask=round_mask,
-                )
-            else:
-                image_conditioning = txt2img_conditioning(sd_model, latents, int(tw), int(th))
+            image_conditioning = txt2img_conditioning(sd_model, latents, int(tw), int(th))
             return latents, image_conditioning
 
         decoded = decode_latent_batch(
@@ -109,26 +98,14 @@ def prepare_hires_latents_and_conditioning(
             stage="hires.prepare.latent.crop_decode",
         ).to(dtype=torch.float32)
         cropped = decoded[:, :, crop_top : crop_top + th, crop_left : crop_left + tw]
-        if getattr(sd_model, "is_inpaint", False):
-            latents, conditioning_latent, _conditioning_mask = encode_inpaint_latent_pair(
-                sd_model,
-                cropped,
-                image_mask=image_mask,
-                round_mask=round_mask,
-                stage_prefix="hires.prepare.latent.crop",
-            )
-            del _conditioning_mask
-            image_conditioning = img2img_conditioning(
-                sd_model,
-                cropped,
-                latents,
-                image_mask=image_mask,
-                round_mask=round_mask,
-                precomputed_conditioning_latent=conditioning_latent,
-            )
-        else:
-            latents = encode_image_batch(sd_model, cropped, stage="hires.prepare.latent.crop_encode")
-            image_conditioning = txt2img_conditioning(sd_model, latents, int(tw), int(th))
+        latents = encode_image_batch(sd_model, cropped, stage="hires.prepare.latent.crop_encode")
+        image_conditioning = img2img_conditioning(
+            sd_model,
+            cropped,
+            latents,
+            image_mask=image_mask,
+            round_mask=round_mask,
+        )
 
         return latents, image_conditioning
 
@@ -159,32 +136,14 @@ def prepare_hires_latents_and_conditioning(
 
         # Convert back to [-1..1] for VAE encode and image-conditioning.
         tensor = upscaled_01.mul(2.0).sub(1.0)
-        if getattr(sd_model, "is_inpaint", False):
-            latents, conditioning_latent, _conditioning_mask = encode_inpaint_latent_pair(
-                sd_model,
-                tensor,
-                image_mask=image_mask,
-                round_mask=round_mask,
-                stage_prefix="hires.prepare.spandrel",
-            )
-            del _conditioning_mask
-            image_conditioning = img2img_conditioning(
-                sd_model,
-                tensor,
-                latents,
-                image_mask=image_mask,
-                round_mask=round_mask,
-                precomputed_conditioning_latent=conditioning_latent,
-            )
-        else:
-            latents = encode_image_batch(sd_model, tensor, stage="hires.prepare.spandrel.encode_upscaled")
-            image_conditioning = img2img_conditioning(
-                sd_model,
-                tensor,
-                latents,
-                image_mask=image_mask,
-                round_mask=round_mask,
-            )
+        latents = encode_image_batch(sd_model, tensor, stage="hires.prepare.spandrel.encode_upscaled")
+        image_conditioning = img2img_conditioning(
+            sd_model,
+            tensor,
+            latents,
+            image_mask=image_mask,
+            round_mask=round_mask,
+        )
         return latents, image_conditioning
 
     raise ValueError(f"Unsupported hires upscaler id: {uid!r}")

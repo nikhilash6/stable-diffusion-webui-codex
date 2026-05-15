@@ -19,6 +19,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from dataclasses import dataclass, field
@@ -29,7 +30,7 @@ from .engine_interface import BaseInferenceEngine
 from .exceptions import EngineNotFoundError, EngineRegistrationError
 
 
-logger = logging.getLogger(__name__)
+logger = get_backend_logger(__name__)
 
 EngineT = TypeVar("EngineT", bound=BaseInferenceEngine)
 

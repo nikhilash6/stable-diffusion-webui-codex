@@ -15,7 +15,7 @@ Symbols (top-level; keep in sync; no ghosts):
 -->
 
 <template>
-  <div class="prompt-editor">
+  <div>
     <EditorContent :editor="editor" />
   </div>
 </template>

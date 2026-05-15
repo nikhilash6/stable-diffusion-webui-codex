@@ -21,14 +21,11 @@ Symbols (top-level; keep in sync; no ghosts):
 
 from __future__ import annotations
 
-
-import logging
 from dataclasses import dataclass
 from pathlib import Path
 
 from apps.backend.runtime.model_registry.flow_shift import FlowShiftSpec
-
-_LOGGER = logging.getLogger(__name__)
+from apps.backend.runtime.logging import emit_backend_message
 
 
 @dataclass(frozen=True)
@@ -184,12 +181,13 @@ def resolve_flow_shift_for_sampling(
                 repo_dir_display = str(Path(repo_dir).resolve().relative_to(repo_root))
         except Exception:  # noqa: BLE001 - best-effort diagnostics
             pass
-        _LOGGER.info(
-            "sigmas: using flow_shift from scheduler_config.json=%s (repo_dir=%s source=%s mode=%s)",
-            cfg_path_display,
-            repo_dir_display,
-            source,
-            getattr(spec_obj.mode, "value", spec_obj.mode),
+        emit_backend_message(
+            "sigmas: using flow_shift from scheduler_config.json",
+            logger=__name__,
+            config=cfg_path_display,
+            repo_dir=repo_dir_display,
+            source=source,
+            mode=getattr(spec_obj.mode, "value", spec_obj.mode),
         )
 
     return FlowShiftResolution(effective_shift=effective_shift, spec=spec_obj, repo_dir=repo_dir, source=source)

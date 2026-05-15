@@ -22,10 +22,11 @@ Symbols (top-level; keep in sync; no ghosts):
 - `Qwen3Model` (class): Core Qwen3 transformer stack (embeddings + blocks + forward).
 - `Qwen3_4B` (class): Convenience wrapper for the 4B variant (loads config, provides encode-style forward usage, strict load contract in `load_sd`).
 - `Qwen3_06B` (class): Convenience wrapper for the 0.6B variant (Anima text encoder; 1024-dim, 28 layers, strict load contract in `load_sd`).
-- `remap_gguf_keys` (function): Remaps GGUF state dict keys to this implementation’s expected parameter names.
+- `resolve_qwen3_gguf_keyspace` (function): Resolves GGUF tensor keys into this implementation’s lookup keyspace without materializing a renamed state dict.
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import emit_backend_message, get_backend_logger
 
 # Architecture notes (Qwen3-4B):
 # - hidden_size: 2560
@@ -38,8 +39,9 @@ from __future__ import annotations
 # - SwiGLU activation
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Optional, Tuple, List
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -49,7 +51,7 @@ from apps.backend.runtime.attention import attention_function_pre_shaped
 from apps.backend.runtime.memory.config import AttentionBackend
 from apps.backend.runtime.misc.autocast import autocast_disabled
 
-logger = logging.getLogger("backend.runtime.zimage.qwen3")
+logger = get_backend_logger("backend.runtime.zimage.qwen3")
 
 
 # =============================================================================
@@ -335,8 +337,8 @@ class Qwen3Model(nn.Module):
         device: torch.device,
         attention_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        # NOTE: We intentionally use a *finite* sentinel value (instead of `-inf`) to match ComfyUI's Qwen3 attention
-        # masking behavior. If Z-Image output quality regresses, revisit this choice and re-check upstream semantics.
+        # NOTE: We intentionally use a *finite* sentinel value (instead of `-inf`) so the combined
+        # causal+padding mask stays numerically stable and avoids NaN-producing `0 * -inf` paths.
         mask_value = torch.finfo(dtype).min / 4
         causal_mask = torch.zeros((1, 1, seq_len, seq_len), dtype=dtype, device=device)
         causal_mask = causal_mask.masked_fill(
@@ -466,8 +468,8 @@ class Qwen3_4B(nn.Module):
             intermediate = self.model.norm(intermediate)
         return hidden_states, intermediate
     
-    def load_sd(self, state_dict: dict) -> Tuple[List[str], List[str]]:
-        """Load state dict with key remapping for GGUF compatibility.
+    def load_sd(self, state_dict: Mapping[str, object]) -> Tuple[List[str], List[str]]:
+        """Load state dict with keyspace resolution for GGUF compatibility.
         
         Returns:
             Tuple of (missing_keys, unexpected_keys)
@@ -551,7 +553,7 @@ class Qwen3_06B(nn.Module):
             intermediate = self.model.norm(intermediate)
         return hidden_states, intermediate
 
-    def load_sd(self, state_dict: dict) -> Tuple[List[str], List[str]]:
+    def load_sd(self, state_dict: Mapping[str, object]) -> Tuple[List[str], List[str]]:
         missing, unexpected = self.load_state_dict(state_dict, strict=False)
         if missing or unexpected:
             raise RuntimeError(
@@ -566,24 +568,34 @@ class Qwen3_06B(nn.Module):
 # GGUF Key Mapping
 # =============================================================================
 
-def remap_gguf_keys(gguf_state_dict: dict, num_layers: int = 36) -> dict:
-    """Remap llama.cpp-style GGUF tensor keys to this Qwen3 implementation’s expected parameter keys.
+def resolve_qwen3_gguf_keyspace(
+    gguf_state_dict: Mapping[str, object],
+    num_layers: int = 36,
+) -> Mapping[str, object]:
+    """Resolve llama.cpp-style GGUF tensor keys into this Qwen3 implementation’s lookup keyspace.
 
     This is strict by default: if the input looks like llama.cpp GGUF keys (`token_embd.weight`, `blk.N.*`), all keys must be understood.
     """
 
     from apps.backend.runtime.state_dict.keymap_llama_gguf import (
         QWEN3_LLAMA_GGUF_LAYER_SUFFIX_TO_HF_PREFIX,
-        remap_llama_gguf_text_model_state_dict,
+        resolve_llama_gguf_text_model_keyspace,
     )
 
-    style, view = remap_llama_gguf_text_model_state_dict(
+    resolved = resolve_llama_gguf_text_model_keyspace(
         gguf_state_dict,
         num_layers=num_layers,
         layer_suffix_to_hf_prefix=QWEN3_LLAMA_GGUF_LAYER_SUFFIX_TO_HF_PREFIX,
     )
-    logger.debug("Qwen3 remap: detected style=%s", style.value)
-    return dict(view)
+    style = resolved.style
+    style_label = style.value if hasattr(style, "value") else str(style)
+    emit_backend_message(
+        "Qwen3 keyspace: detected style",
+        logger=logger.name,
+        level=logging.DEBUG,
+        style=style_label,
+    )
+    return resolved.view
 
 
 __all__ = [
@@ -591,5 +603,5 @@ __all__ = [
     "Qwen3_4B",
     "Qwen3_06B",
     "Qwen3Model",
-    "remap_gguf_keys",
+    "resolve_qwen3_gguf_keyspace",
 ]

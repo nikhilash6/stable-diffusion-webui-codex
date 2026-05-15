@@ -66,7 +66,15 @@
     color: hsla(210, 22%, 90%, 0.95);
   }
 
-  .cdx-hover-tooltip:is(:hover, :focus-within) .cdx-hover-tooltip__panel {
+  .cdx-hover-tooltip__line-lead {
+    margin-right: 0.25rem;
+    font-weight: 700;
+    text-decoration: underline;
+    text-underline-offset: 0.14em;
+    color: hsla(210, 84%, 92%, 1);
+  }
+
+  .cdx-hover-tooltip:is(:hover, :focus-visible, :has(:focus-visible)) .cdx-hover-tooltip__panel {
     opacity: 1;
     transform: scale(1);
   }

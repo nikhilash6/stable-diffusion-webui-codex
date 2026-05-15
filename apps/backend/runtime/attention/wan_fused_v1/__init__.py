@@ -32,6 +32,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import importlib
 import logging
@@ -48,7 +49,7 @@ import torch
 from apps.backend.runtime.ops.operations import get_weight_and_bias
 from apps.backend.runtime.ops.operations_gguf import dequantize_tensor
 
-logger = logging.getLogger("backend.runtime.attention.wan_fused_v1")
+logger = get_backend_logger("backend.runtime.attention.wan_fused_v1")
 
 
 _MODE_ENV_KEY = "CODEX_WAN22_FUSED_ATTN_V1_MODE"

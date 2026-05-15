@@ -1,25 +1,17 @@
-<!-- tags: backend, codex, gguf, io -->
+<!-- tags: backend, gguf, io -->
 # apps/backend/quantization/gguf Overview
-Date: 2025-12-15
-Last Review: 2026-02-18
 Status: Active
 
 ## Purpose
-- GGUF format IO and schema helpers (reader/writer/constants/quant-shape helpers) used by:
-  - WebUI tools that convert checkpoints to GGUF.
-  - Runtime loaders that need to parse GGUF tensor blobs and metadata.
+- Base GGUF schema and IO helpers used by converters and runtime loaders.
 
-## Key Files
-- `constants.py` — GGUF file constants, enums, key namespace (`Keys`, `GGUFValueType`, `GGMLQuantizationType`, etc.).
-- `codexpack.py` — CodexPack GGUF contract helpers (schema keys + strict manifest parsing/validation).
-- `quant_shapes.py` — Quantized tensor shape conversion helpers.
-- `reader.py` — `GGUFReader` (memmap-based GGUF parsing).
-- `writer.py` — `GGUFWriter` (GGUF v3 writer, tensor info + KV store).
+## Key files
+- `constants.py` — GGUF constants, enums, and metadata keys.
+- `reader.py` — memmap-based `GGUFReader`.
+- `writer.py` — GGUF writer implementation.
+- `quant_shapes.py` — logical-shape ↔ byte-shape helpers for quantized tensors.
 
-## Notes
-- Keep this subpackage dependency-light: NumPy-only + stdlib.
-- Quantization math lives in `apps/backend/quantization/kernels/*` (not here).
-- 2026-01-02: Added standardized file header docstrings to GGUF helper modules (doc-only change; part of rollout).
-- 2026-01-20: Removed unreferenced legacy helpers (`lazy.py`, `metadata.py`, `tensor_mapping.py`, `utility.py`, `vocab.py`); converter metadata injection lives in `apps/backend/runtime/tools/gguf_converter_metadata.py`.
-- 2026-01-29: CodexPack manifest validation now recognizes `fallback_fp16_keys` (list of keys dequantized offline to FP16 when Q4_K tile alignment is not satisfied).
-- 2026-02-18: `writer.py` dry-run filename emission now uses centralized `apps.backend.infra.stdio.write_stdout(...)` and raises `SystemExit(0)` explicitly instead of `print(...)` + `exit()`, preserving user-visible dry-run output order while removing raw primitive callsites from writer code.
+## Expectations
+- Keep this package dependency-light: NumPy + stdlib only.
+- Preserve reader/writer behavior for base `.gguf` files.
+- Keep quantization math in `apps/backend/quantization/kernels/*`, not here.

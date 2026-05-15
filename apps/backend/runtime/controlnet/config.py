@@ -21,6 +21,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, Sequence
@@ -30,7 +31,7 @@ import torch
 
 from apps.backend.runtime.memory import memory_management
 
-logger = logging.getLogger("backend.runtime.controlnet.config")
+logger = get_backend_logger("backend.runtime.controlnet.config")
 
 
 @dataclass(frozen=True, slots=True)

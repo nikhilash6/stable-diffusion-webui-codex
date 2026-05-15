@@ -16,6 +16,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `GGUFReader` (class): Main reader; loads GGUF structure and provides access to fields/tensors (contains nested IO/alignment helpers).
 """
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 import os
@@ -51,7 +52,7 @@ from .constants import (
     GGUFValueType,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_backend_logger(__name__)
 
 READER_SUPPORTED_VERSIONS = [2, GGUF_VERSION]
 

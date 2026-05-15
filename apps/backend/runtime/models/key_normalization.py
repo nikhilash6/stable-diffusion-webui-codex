@@ -6,25 +6,26 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: State-dict key normalization helpers for loader assembly.
-Provides UNet diffusers→LDM key remapping and shared prefix stripping for transformer state dicts.
+Purpose: State-dict keyspace resolution helpers for loader assembly.
+Provides UNet diffusers→LDM keyspace lookup assembly and shared prefix stripping for transformer state dicts.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `_strip_unet_prefixes_mapping` (function): Builds a remap of UNet keys by stripping known prefixes in a checkpoint mapping.
+- `_strip_unet_prefixes_mapping` (function): Builds a UNet key lookup by stripping known prefixes in a checkpoint mapping.
 - `_normalize_depth_list` (function): Normalizes “depth list” inputs (pad/trim) to a fixed length used by model configs.
 - `_build_diffusers_to_ldm_map` (function): Builds a diffusers→LDM key mapping for UNet state dict conversion based on config.
-- `_normalize_unet_state_dict` (function): Normalizes/rewrites UNet state dict keys to the expected internal layout.
+- `_normalize_unet_state_dict` (function): Resolves a UNet keyspace lookup view for the expected internal layout.
 - `_strip_transformer_prefixes` (function): Strips common wrapper prefixes from transformer state dict keys.
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from typing import Any, Dict, Mapping
 
-from apps.backend.runtime.state_dict.views import RemapKeysView
+from apps.backend.runtime.state_dict.views import KeyspaceLookupView
 
-UNET_LOG = logging.getLogger("apps.backend.runtime.models.loader.unet")
+UNET_LOG = get_backend_logger("apps.backend.runtime.models.loader.unet")
 
 _UNET_PREFIXES: tuple[str, ...] = (
     "model.diffusion_model.",
@@ -249,7 +250,7 @@ def _normalize_unet_state_dict(state_dict: Mapping[str, Any], config: Mapping[st
     stripped_map = _strip_unet_prefixes_mapping(state_dict)
 
     diff_to_ldm = _build_diffusers_to_ldm_map(config)
-    remap: Dict[str, Any] = {}
+    key_lookup: Dict[str, Any] = {}
     leftovers: list[str] = []
     for key in stripped_map.keys():
         if key.startswith((
@@ -262,28 +263,28 @@ def _normalize_unet_state_dict(state_dict: Mapping[str, Any], config: Mapping[st
             "add_embedding.",
         )):
             source_key = stripped_map[key]
-            previous = remap.get(key)
+            previous = key_lookup.get(key)
             if previous is not None and previous != source_key:
                 raise RuntimeError(
                     "UNet state dict normalisation collision: destination key "
                     f"{key!r} maps to multiple source keys ({previous!r}, {source_key!r})."
                 )
-            remap[key] = source_key
+            key_lookup[key] = source_key
             continue
         target = diff_to_ldm.get(key)
         if target is not None:
             source_key = stripped_map[key]
-            previous = remap.get(target)
+            previous = key_lookup.get(target)
             if previous is not None and previous != source_key:
                 raise RuntimeError(
                     "UNet state dict normalisation collision: destination key "
                     f"{target!r} maps to multiple source keys ({previous!r}, {source_key!r})."
                 )
-            remap[target] = source_key
+            key_lookup[target] = source_key
         else:
             leftovers.append(key)
 
-    missing = [k for k in _ESSENTIAL_UNET_KEYS if k not in remap]
+    missing = [k for k in _ESSENTIAL_UNET_KEYS if k not in key_lookup]
     if missing:
         sample = list(sorted(leftovers))[:10]
         raise RuntimeError(
@@ -294,7 +295,7 @@ def _normalize_unet_state_dict(state_dict: Mapping[str, Any], config: Mapping[st
     if leftovers:
         UNET_LOG.debug("UNet leftover keys (diffusers layout) count=%d sample=%s", len(leftovers), leftovers[:5])
 
-    return RemapKeysView(state_dict, remap)
+    return KeyspaceLookupView(state_dict, key_lookup)
 
 
 def _strip_transformer_prefixes(state_dict: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -317,4 +318,4 @@ def _strip_transformer_prefixes(state_dict: Mapping[str, Any]) -> Mapping[str, A
                 f"{new_key!r} maps to multiple source keys ({previous!r}, {key!r})."
             )
         mapping[new_key] = key
-    return RemapKeysView(state_dict, mapping)
+    return KeyspaceLookupView(state_dict, mapping)

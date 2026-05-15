@@ -12,7 +12,7 @@ Contains the Codex-native DiT runtime and strict loader seams used by the Anima 
 Symbols (top-level; keep in sync; no ghosts):
 - `AnimaConfig` (dataclass): Anima runtime config (Cosmos Predict2 + LLMAdapter).
 - `AnimaDiT` (class): Core Anima diffusion model (DiT + adapter) used by the sampler adapter.
-- `load_anima_dit_from_state_dict` (function): Strict loader helper for a `net.*`-stripped state dict.
+- `load_anima_dit_from_state_dict` (function): Strict loader helper for raw `net.*` or already-canonical Anima transformer state dicts.
 """
 
 from __future__ import annotations
@@ -26,4 +26,3 @@ __all__ = [
     "AnimaDiT",
     "load_anima_dit_from_state_dict",
 ]
-

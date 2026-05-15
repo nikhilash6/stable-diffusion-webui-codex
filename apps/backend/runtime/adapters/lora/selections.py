@@ -7,11 +7,11 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Process-wide LoRA selection state for runtime workflows.
-Stores the currently selected LoRAs (path + weight) so API endpoints and workflow builders can apply them during generation without
-depending on legacy/compat selection surfaces.
+Stores the currently selected LoRAs (path + text-encoder weight + optional UNet weight) so API endpoints and workflow builders can
+apply them during generation without depending on legacy/compat selection surfaces.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `LoraSelection` (dataclass): Selected LoRA record (path/weight/online flag).
+- `LoraSelection` (dataclass): Selected LoRA record (path/text-encoder weight/optional UNet weight/online flag).
 - `set_selections` (function): Replaces the global selection list (tolerates dict-like inputs from API plumbing).
 - `get_selections` (function): Returns a copy of the current selection list.
 """
@@ -27,6 +27,7 @@ from typing import Any, Iterable, List
 class LoraSelection:
     path: str
     weight: float = 1.0
+    unet_weight: float | None = None
     online: bool = False
 
 
@@ -44,10 +45,14 @@ def set_selections(selections: Iterable[Any]) -> None:
             path = str(s.get("path") or "")
             if not path:
                 continue
+            raw_unet_weight = s.get("unet_weight", None)
             out.append(
                 LoraSelection(
                     path=path,
                     weight=float(s.get("weight", 1.0)),
+                    unet_weight=(
+                        None if raw_unet_weight in (None, "") else float(raw_unet_weight)
+                    ),
                     online=bool(s.get("online", False)),
                 )
             )
@@ -55,10 +60,14 @@ def set_selections(selections: Iterable[Any]) -> None:
         path = str(getattr(s, "path", "") or "")
         if not path:
             continue
+        raw_unet_weight = getattr(s, "unet_weight", None)
         out.append(
             LoraSelection(
                 path=path,
                 weight=float(getattr(s, "weight", 1.0)),
+                unet_weight=(
+                    None if raw_unet_weight in (None, "") else float(raw_unet_weight)
+                ),
                 online=bool(getattr(s, "online", False)),
             )
         )
@@ -74,4 +83,3 @@ def get_selections() -> List[LoraSelection]:
 
 
 __all__ = ["LoraSelection", "get_selections", "set_selections"]
-

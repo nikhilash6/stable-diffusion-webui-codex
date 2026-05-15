@@ -1,7 +1,7 @@
 <!-- tags: frontend, interface-src, overview -->
 # apps/interface/src Overview
 Date: 2025-10-28
-Last Review: 2026-02-28
+Last Review: 2026-04-08
 Status: Active
 
 ## Purpose
@@ -24,7 +24,7 @@ Status: Active
 - Follow the frontend guidelines in `.sangoi/frontend/guidelines/` when adding new modules.
 - Keep API types and schemas synchronized with `.sangoi/backend/interfaces/`.
 - 2026-02-28: Source area follows root testing policy: manual validation by default; automated/unit tests are not maintained unless explicitly requested by the repo owner.
-- 2025-12-04: Legacy `/txt2vid` and `/img2vid` SPA routes were removed; WAN22 video workflows now enter exclusively via model tabs (`/models/:tabId` with `type === 'wan'`) and backend video endpoints remain available for those tabs only.
+- 2025-12-04: Legacy `/txt2vid` and `/img2vid` SPA routes were removed; current video workflows now enter exclusively via model tabs (`/models/:tabId` with `type === 'wan22_14b' | 'wan22_5b' | 'ltx2'`), and the frontend routes every live video family through `VideoTabRouteView.vue -> VideoModelTab.vue`.
 - 2025-12-17: Added a shared `stores/workflows.ts` and guided-gen UI primitives (`styles/components/guided-gen.css`) to support WAN guided generation and reactive snapshots under `/workflows`.
 - 2025-12-23: Added shared slider primitives under `components/ui/` (SliderField + NumberStepperInput) with matching styles under `styles/components/`.
 - 2025-12-29: `App.vue` derives `--sticky-offset` from the `.main-header` height (via `ResizeObserver`) so `RunCard` can stay sticky below the header.
@@ -37,8 +37,15 @@ Status: Active
 - 2026-02-06: Added hard-fatal bootstrap orchestration (`stores/bootstrap.ts`) with root App loader/fatal retry gating; App now blocks partial UI until required startup dependencies load.
 - 2026-02-21: `App.vue` bootstrap/fatal screen styles were moved from local `<style scoped>` into shared stylesheet `styles/components/bootstrap-screen.css` (imported via `styles.css`).
 - 2026-02-08: SDXL swap-model UX now uses explicit step-pointer semantics across src (`swapAtStep` in stores/UI, serialized as `switch_at_step` in API payloads) to avoid confusion with literal SDXL refiner “step count”.
-- 2026-02-08: `ImageModelTab.vue` now composes `components/Img2ImgInpaintParamsCard.vue` for detailed init-image/inpaint controls; shared normalization moved to `utils/image_params.ts`.
+- 2026-04-08: `ImageModelTab.vue` now composes `components/InitialImageBlock.vue` for the live img2img/inpaint initial-image surface; shared init-image cleanup/normalization still lives in `utils/image_params.ts`, and the public owner split with the video init-image card is gone.
+- 2026-04-08: Shared `DIR|IMG` source ownership now lives in `components/ImageSourceBlock.vue`; `InitialImageBlock.vue` and `IpAdapterCard.vue` compose that owner, keep previews on the constrained thumbnail path, and repeated file/dimension reads now route through `utils/image_io.ts` instead of per-view helpers.
+- 2026-04-08: `QuickSettingsBar.vue` now composes `components/quicksettings/QuickSettingsAssetBlock.vue` as the single non-WAN asset-selector owner for default/Chroma/Flux/Z-Image/LTX tabs; `QuickSettingsWan.vue` remains the dedicated WAN branch.
+- 2026-04-08: Shared advanced-guidance row ownership now lives in `components/AdvancedGuidanceFields.vue`; `BasicParametersCard.vue` and `RefinerSettingsCard.vue` compose that owner, while `utils/guidance_advanced.ts` keeps the shared capability/toggle helpers and the nested `guidanceAdvanced` state shape stays parent-owned.
+- 2026-04-08: Shared task-stream/resume/history ownership now lives in `composables/useTaskRunLifecycle.ts`; `useGeneration.ts`, `useVideoGeneration.ts`, and `useLtxVideoGeneration.ts` keep payload/result/history domain semantics local and only delegate the lifecycle shell.
+- 2026-04-08: Shared Results-header workflow snapshot ownership now lives in `composables/useWorkflowSnapshotActions.ts`; image/WAN/LTX views now reuse one owner for `Save snapshot` / `Copy params` / save-vs-update notices while keeping mode-specific info/history actions local and keeping WAN's save-vs-copy snapshot-source split explicit without reviving parallel workflow identity fields.
+- 2026-04-08: Shared history-details modal chrome for image/WAN now lives in `components/modals/RunHistoryDetailsModal.vue`; image/WAN still own section data plus apply/load/copy behavior, `GenerationResultsPanel.vue` remains the shared Results owner, and LTX intentionally stays on direct-load history with no details modal.
 - 2026-02-08: Hires controls now follow the Basic Parameters row organization, are hidden in img2img mode by policy, and txt2img hires prompt overrides now fallback to base prompts when blank.
 - 2026-02-17: Top navigation removed `models`/`xyz`, added `/gallery` placeholder route/tab, and moved XYZ workflow into an embeddable card used inside image-tab Generation Parameters (with `/xyz` kept as compatibility wrapper).
 - 2026-03-02: `App.vue` top navigation no longer renders the `settings` link and now excludes `chroma` model tabs from the dynamic nav list; routes/contracts remain intact.
+- 2026-03-05: FLUX.2 image tabs now follow the backend Klein 4B / base-4B slice end-to-end: `utils/engine_taxonomy.ts` resolves `engine="flux2"`, quicksettings render one `Qwen3-4B` selector, and stale img2img/Kontext state is normalized away from persisted tabs.
 - 2026-02-17: Footer branding now links to the repository/commit and `@lucas_sangoi` profile; Run progress UI is standardized via shared `components/results/RunProgressStatus.vue` across generation surfaces.

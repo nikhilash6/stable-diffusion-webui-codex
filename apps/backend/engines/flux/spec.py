@@ -23,6 +23,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from dataclasses import dataclass
@@ -42,7 +43,7 @@ from apps.backend.runtime.text_processing.classic_engine import ClassicTextProce
 from apps.backend.runtime.text_processing.t5_engine import T5TextProcessingEngine
 from apps.backend.infra.config.args import dynamic_args
 
-logger = logging.getLogger("backend.engines.flux.spec")
+logger = get_backend_logger("backend.engines.flux.spec")
 
 
 @dataclass(frozen=True)

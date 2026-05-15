@@ -7,8 +7,8 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Services tab for the Tk launcher.
-Shows API/UI status and provides controls for start/restart/stop/kill, backed by `CodexServiceHandle`.
-Runtime env previews are service-scoped so API-only manual env overlays do not leak into UI service resolution.
+Shows API/UI status, launcher-owned next-start preferences, and lifecycle actions backed by `CodexServiceHandle`.
+Consumes controller-owned committed-vs-live service truth so service URLs and next-start policy stay honest when the launcher has unsaved changes.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `ServicesTab` (class): Services tab view/controller for the launcher GUI.
@@ -17,16 +17,13 @@ Symbols (top-level; keep in sync; no ghosts):
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
-import os
-from pathlib import Path
 import time
 import tkinter as tk
 from tkinter import messagebox, ttk
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict
 import webbrowser
 
-from apps.backend.infra.config.repo_root import get_repo_root
+from apps.launcher.profiles import LAUNCHER_MODE_PROFILE_DEV_SERVICE
 from apps.launcher.services import ServiceStatus
 
 from ..controller import LauncherController
@@ -54,15 +51,20 @@ class ServicesTab:
         *,
         run_in_thread: Callable[[str, Callable[[], None]], None],
         set_status: Callable[[str], None],
+        mark_changed: Callable[[], None],
     ) -> None:
         self._controller = controller
         self._run_in_thread = run_in_thread
         self._set_status = set_status
+        self._mark_changed = mark_changed
 
         self.frame: ttk.Frame | None = None
-        self._external_terminal_var = tk.BooleanVar(value=bool(controller.store.meta.external_terminal))
+        self._external_terminal_var = tk.BooleanVar(value=controller.working_external_terminal())
+        self._frontend_dev_typecheck_var = tk.BooleanVar(value=controller.working_frontend_dev_typecheck())
         self._cards: Dict[str, _ServiceCard] = {}
-        self._last_manual_env_preview_error: str | None = None
+        self._boot_note_var = tk.StringVar(
+            value="Service starts use last saved settings. Save Settings before Start/Restart to apply changes."
+        )
 
     def build(self, notebook: ttk.Notebook) -> ttk.Frame:
         frame = ttk.Frame(notebook)
@@ -70,29 +72,58 @@ class ServicesTab:
 
         header = ttk.LabelFrame(frame, text="  Services  ", padding=14)
         header.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
-        header.columnconfigure(1, weight=1)
+        header.columnconfigure(0, weight=1)
+        header.columnconfigure(1, weight=0)
 
+        prefs = ttk.Frame(header)
+        prefs.grid(row=0, column=0, sticky="w")
+        prefs.columnconfigure(0, weight=1)
+
+        pref_row = 0
         if self._controller.external_terminal_supported:
             ttk.Checkbutton(
-                header,
+                prefs,
                 text="Launch in external terminal (Windows)",
                 variable=self._external_terminal_var,
                 command=self._on_toggle_external_terminal,
-            ).grid(row=0, column=0, sticky="w")
+                style="Toggle.TCheckbutton",
+            ).grid(row=pref_row, column=0, sticky="w")
+            pref_row += 1
         else:
-            ttk.Label(header, text="External terminal: Windows only", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
+            ttk.Label(prefs, text="External terminal: Windows only", style="Muted.TLabel").grid(
+                row=pref_row, column=0, sticky="w"
+            )
             self._external_terminal_var.set(False)
+            pref_row += 1
+
+        if str(getattr(self._controller.store.meta, "app_mode_profile", "") or "") == LAUNCHER_MODE_PROFILE_DEV_SERVICE:
+            ttk.Checkbutton(
+                prefs,
+                text="Run frontend typecheck before Vite startup",
+                variable=self._frontend_dev_typecheck_var,
+                command=self._on_frontend_dev_typecheck_changed,
+                style="Toggle.TCheckbutton",
+            ).grid(row=pref_row, column=0, sticky="w", pady=(4 if pref_row else 0, 0))
+            pref_row += 1
+
+        ttk.Label(prefs, textvariable=self._boot_note_var, style="Muted.TLabel", justify="left").grid(
+            row=pref_row,
+            column=0,
+            sticky="w",
+            pady=(8, 0),
+        )
 
         btns = ttk.Frame(header)
-        btns.grid(row=0, column=1, sticky="e")
+        btns.grid(row=0, column=1, sticky="ne", padx=(16, 0))
         ttk.Button(btns, text="Start All", command=self._start_all).pack(side="left", padx=(0, 8))
         ttk.Button(btns, text="Stop All", command=self._stop_all).pack(side="left")
 
         row = 1
-        for svc_name in ("API", "UI"):
+        for svc_name in self._controller.service_names:
             card_frame = ttk.LabelFrame(frame, text=f"  {svc_name}  ", padding=16, style="Service.Card.TLabelframe")
             card_frame.grid(row=row, column=0, sticky="ew", padx=8, pady=(0, 10))
             card_frame.columnconfigure(1, weight=1)
+            card_frame.columnconfigure(2, weight=1)
 
             status_var = tk.StringVar(value="STOPPED")
             info_var = tk.StringVar(value="")
@@ -108,13 +139,12 @@ class ServicesTab:
             endpoint_lbl.grid(row=1, column=1, columnspan=2, sticky="w", pady=(6, 0))
 
             btn_row = ttk.Frame(card_frame)
-            btn_row.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(12, 0))
+            btn_row.grid(row=2, column=0, columnspan=3, sticky="w", pady=(12, 0))
 
             start_btn = ttk.Button(btn_row, text="Start", width=12, command=lambda n=svc_name: self._start(n))
             restart_btn = ttk.Button(btn_row, text="Restart", width=12, command=lambda n=svc_name: self._restart(n))
             stop_btn = ttk.Button(btn_row, text="Stop", width=12, command=lambda n=svc_name: self._stop(n))
             kill_btn = ttk.Button(btn_row, text="Kill", width=12, command=lambda n=svc_name: self._kill(n))
-            open_btn = ttk.Button(btn_row, text="Open", width=10, command=lambda n=svc_name: self._open_service(n, target="root"))
             open_docs_btn: ttk.Button | None = None
             if svc_name == "API":
                 open_docs_btn = ttk.Button(
@@ -123,14 +153,14 @@ class ServicesTab:
                     width=10,
                     command=lambda n=svc_name: self._open_service(n, target="docs"),
                 )
+            open_btn = ttk.Button(btn_row, text="Open", width=10, command=lambda n=svc_name: self._open_service(n, target="root"))
 
-            start_btn.pack(side="left", padx=(0, 8))
-            restart_btn.pack(side="left", padx=(0, 8))
-            stop_btn.pack(side="left", padx=(0, 8))
-            kill_btn.pack(side="left")
-            open_btn.pack(side="right")
-            if open_docs_btn is not None:
-                open_docs_btn.pack(side="right", padx=(0, 8))
+            for index, button in enumerate(
+                [start_btn, restart_btn, stop_btn, kill_btn, *( [open_docs_btn] if open_docs_btn is not None else []), open_btn]
+            ):
+                if button is None:
+                    continue
+                button.grid(row=0, column=index, sticky="w", padx=(0 if index == 0 else 8, 0))
 
             self._cards[svc_name] = _ServiceCard(
                 status_var=status_var,
@@ -151,7 +181,8 @@ class ServicesTab:
         return frame
 
     def reload(self) -> None:
-        self._external_terminal_var.set(bool(self._controller.store.meta.external_terminal))
+        self._external_terminal_var.set(self._controller.working_external_terminal())
+        self._frontend_dev_typecheck_var.set(self._controller.working_frontend_dev_typecheck())
 
     def refresh(self) -> None:
         now = time.time()
@@ -173,7 +204,7 @@ class ServicesTab:
             if last_exit is not None and status != ServiceStatus.RUNNING:
                 info_bits.append(f"Last exit {last_exit}")
             card.info_var.set(" | ".join(info_bits))
-            root_url, _docs_url = self._resolve_service_urls(svc_name)
+            root_url, _docs_url = self._controller.service_urls(svc_name)
             card.endpoint_var.set(root_url)
 
             if status == ServiceStatus.RUNNING:
@@ -191,9 +222,6 @@ class ServicesTab:
                 self._set_widget_enabled(card.open_docs_btn, enabled=(status == ServiceStatus.RUNNING))
             self._set_widget_enabled(card.open_btn, enabled=(status == ServiceStatus.RUNNING))
 
-    def _external_terminal(self) -> bool:
-        return bool(self._external_terminal_var.get()) and self._controller.external_terminal_supported
-
     @staticmethod
     def _set_widget_enabled(widget: ttk.Widget, *, enabled: bool) -> None:
         target_state = "normal" if enabled else "disabled"
@@ -202,122 +230,11 @@ class ServicesTab:
             return
         widget.configure(state=target_state)
 
-    def _service_runtime_env(self, service_name: str) -> Dict[str, str]:
-        service = self._controller.services[service_name]
-        env: Dict[str, str] = dict(os.environ)
-        env.update(service.spec.base_env)
-        try:
-            env.update(self._controller.build_env_for_service(service_name))
-            if str(service_name).strip().upper() == "API":
-                self._last_manual_env_preview_error = None
-        except ValueError as exc:
-            if str(service_name).strip().upper() != "API":
-                raise
-            # Preview/open path must remain resilient while editing invalid manual env text.
-            # API start/restart still fail loud in controller.start_service/restart_service.
-            env.update(self._controller.build_env())
-            error_message = str(exc)
-            if error_message != self._last_manual_env_preview_error:
-                self._controller.log_buffer.log(
-                    "launcher",
-                    "Manual Env Vars invalid for API preview/open; ignoring overlay until fixed: "
-                    f"{error_message}",
-                    stream="event",
-                )
-                self._last_manual_env_preview_error = error_message
-        return env
-
-    @staticmethod
-    def _pid_is_alive(pid: int) -> bool:
-        if pid <= 0:
-            return False
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        except OSError:
-            return False
-        return True
-
-    @staticmethod
-    def _parse_port(raw_value: object, *, default: int) -> int:
-        try:
-            parsed = int(str(raw_value or "").strip())
-        except (TypeError, ValueError):
-            return int(default)
-        if parsed < 1 or parsed > 65535:
-            return int(default)
-        return int(parsed)
-
-    @staticmethod
-    def _parse_int(raw_value: object, *, default: int) -> int:
-        try:
-            return int(str(raw_value or "").strip())
-        except (TypeError, ValueError):
-            return int(default)
-
-    @staticmethod
-    def _resolve_ui_effective_port(*, base_port: int, interface_cwd: Path) -> int:
-        repo_root = get_repo_root()
-        expected_cwd = str(interface_cwd.resolve())
-        for candidate in (int(base_port), int(base_port) + 10000, int(base_port) + 20000):
-            pid_file = repo_root / f".webui-ui-{candidate}.pid"
-            if not pid_file.is_file():
-                continue
-            try:
-                payload = json.loads(pid_file.read_text(encoding="utf-8"))
-            except (OSError, ValueError, json.JSONDecodeError):
-                continue
-            if str(payload.get("service", "")).strip().lower() != "ui":
-                continue
-            if ServicesTab._parse_port(payload.get("port"), default=-1) != candidate:
-                continue
-            raw_cwd = str(payload.get("cwd", "")).strip()
-            if raw_cwd:
-                try:
-                    if str(Path(raw_cwd).resolve()) != expected_cwd:
-                        continue
-                except (TypeError, ValueError, OSError):
-                    continue
-            pid = ServicesTab._parse_int(payload.get("pid"), default=-1)
-            if not ServicesTab._pid_is_alive(pid):
-                continue
-            return int(candidate)
-        return int(base_port)
-
-    def _resolve_service_urls(self, service_name: str) -> Tuple[str, str | None]:
-        def _browser_host(raw_host: str) -> str:
-            host = str(raw_host or "localhost").strip() or "localhost"
-            if host in {"0.0.0.0", "::", "[::]"}:
-                return "localhost"
-            return host
-
-        env = self._service_runtime_env(service_name)
-        service = self._controller.services[service_name]
-        if service_name == "API":
-            host = _browser_host(str(env.get("API_HOST", "localhost")))
-            api_port = self._parse_port(
-                env.get("API_PORT_OVERRIDE", service.spec.base_env.get("API_PORT_OVERRIDE", "7850")),
-                default=7850,
-            )
-            port = str(api_port)
-            root_url = f"http://{host}:{port}"
-            return root_url, f"{root_url}/docs"
-
-        host = _browser_host(str(env.get("SERVER_HOST", "localhost")))
-        base_port = self._parse_port(env.get("WEB_PORT", service.spec.base_env.get("WEB_PORT", "7860")), default=7860)
-        effective_port = self._resolve_ui_effective_port(base_port=base_port, interface_cwd=Path(service.spec.cwd))
-        port = str(effective_port)
-        root_url = f"http://{host}:{port}"
-        return root_url, None
-
     def dispose(self) -> None:
         return
 
     def _open_service(self, service_name: str, *, target: str) -> None:
-        root_url, docs_url = self._resolve_service_urls(service_name)
+        root_url, docs_url = self._controller.service_urls(service_name)
         target_url = root_url
         if target == "docs":
             if docs_url is None:
@@ -335,31 +252,28 @@ class ServicesTab:
         self._set_status(f"Opened {target_url}")
 
     def _on_toggle_external_terminal(self) -> None:
-        enabled = bool(self._external_terminal_var.get())
-        try:
-            self._controller.persist_external_terminal(enabled)
-        except Exception as exc:
-            messagebox.showerror("Launcher Error", f"Failed to persist external terminal setting:\n\n{exc}")
-            self._external_terminal_var.set(bool(self._controller.store.meta.external_terminal))
+        self._controller.update_external_terminal(bool(self._external_terminal_var.get()))
+        self._mark_changed()
+
+    def _on_frontend_dev_typecheck_changed(self) -> None:
+        self._controller.update_frontend_dev_typecheck(bool(self._frontend_dev_typecheck_var.get()))
+        self._mark_changed()
 
     def _start_all(self) -> None:
-        self._set_status("Starting services…")
-        external = self._external_terminal()
-        self._run_in_thread("Start All", lambda: self._controller.start_all(external_terminal=external))
+        self._set_status("Starting services from last saved settings…")
+        self._run_in_thread("Start All", self._controller.start_all)
 
     def _stop_all(self) -> None:
         self._set_status("Stopping services…")
         self._run_in_thread("Stop All", lambda: self._controller.stop_all(wait=5.0))
 
     def _start(self, name: str) -> None:
-        self._set_status(f"{name} starting…")
-        external = self._external_terminal()
-        self._run_in_thread(f"Start {name}", lambda: self._controller.start_service(name, external_terminal=external))
+        self._set_status(f"{name} starting from last saved settings…")
+        self._run_in_thread(f"Start {name}", lambda: self._controller.start_service(name))
 
     def _restart(self, name: str) -> None:
-        self._set_status(f"{name} restarting…")
-        external = self._external_terminal()
-        self._run_in_thread(f"Restart {name}", lambda: self._controller.restart_service(name, external_terminal=external))
+        self._set_status(f"{name} restarting from last saved settings…")
+        self._run_in_thread(f"Restart {name}", lambda: self._controller.restart_service(name))
 
     def _stop(self, name: str) -> None:
         self._set_status(f"{name} stopping…")

@@ -1,0 +1,17 @@
+@layer components {
+  .cdx-segmented-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.22rem;
+    padding: 0.18rem;
+    border: 0.0625rem solid var(--color-border);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--color-panel) 84%, transparent);
+  }
+
+  .cdx-segmented-control__button {
+    min-width: 3.75rem;
+    justify-content: center;
+    border-radius: 999px;
+  }
+}

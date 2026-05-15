@@ -15,11 +15,12 @@ Symbols (top-level; keep in sync; no ghosts):
 - `setStickyOffset` (function): Computes and sets CSS `--sticky-offset` based on the header height.
 - `requestStickyOffsetRecalc` (function): Schedules a sticky-offset recalculation via `requestAnimationFrame`.
 - `retryBootstrap` (function): Retries hard-fatal app bootstrap initialization.
+- `retryDeferredBootstrap` (function): Retries non-fatal deferred bootstrap initialization.
 - `enabledTabs` (const): Computed list of enabled non-chroma model tabs used to render the nav.
 -->
 
 <template>
-  <section v-if="bootstrap.status === 'fatal'" class="bootstrap-screen">
+  <section v-if="bootstrap.criticalStatus === 'fatal'" class="bootstrap-screen">
     <div class="panel bootstrap-panel bootstrap-panel--fatal">
       <div class="panel-header">Fatal bootstrap error</div>
       <div class="panel-body">
@@ -35,7 +36,7 @@ Symbols (top-level; keep in sync; no ghosts):
     </div>
   </section>
 
-  <section v-else-if="bootstrap.status !== 'ready'" class="bootstrap-screen">
+  <section v-else-if="bootstrap.criticalStatus !== 'ready'" class="bootstrap-screen">
     <div class="panel bootstrap-panel">
       <div class="panel-header">Initializing WebUI</div>
       <div class="panel-body">
@@ -51,6 +52,30 @@ Symbols (top-level; keep in sync; no ghosts):
           <QuickSettingsBar />
         </div>
       </header>
+      <section
+        v-if="bootstrap.deferredStatus === 'loading'"
+        class="bootstrap-inline-status"
+        role="status"
+        aria-live="polite"
+      >
+        <p class="bootstrap-inline-status-title">Finalizing startup in background…</p>
+        <p class="bootstrap-inline-status-detail">Model tabs are loading; core UI is already ready.</p>
+      </section>
+      <section
+        v-else-if="bootstrap.deferredStatus === 'error'"
+        class="bootstrap-inline-status bootstrap-inline-status--error"
+        role="status"
+        aria-live="polite"
+      >
+        <p class="bootstrap-inline-status-title">Background startup failed.</p>
+        <p class="bootstrap-inline-status-detail">
+          <strong>Context:</strong> {{ bootstrap.deferredContext || 'Deferred bootstrap' }}
+        </p>
+        <pre class="bootstrap-error">{{ bootstrap.deferredMessage || 'Unknown error' }}</pre>
+        <div class="bootstrap-inline-actions">
+          <button class="btn btn-primary" type="button" @click="retryDeferredBootstrap">Retry background init</button>
+        </div>
+      </section>
       <nav class="tabs-nav">
         <!-- Home workspace (agnostic) -->
         <RouterLink class="tab-link" to="/">home</RouterLink>
@@ -114,6 +139,10 @@ async function retryBootstrap(): Promise<void> {
   }
 }
 
+async function retryDeferredBootstrap(): Promise<void> {
+  await bootstrap.retryDeferred()
+}
+
 watch(
   headerRef,
   (next, prev) => {
@@ -125,7 +154,7 @@ watch(
 )
 
 watch(
-  () => bootstrap.status,
+  () => bootstrap.criticalStatus,
   (status) => {
     if (status !== 'ready') return
     requestStickyOffsetRecalc()

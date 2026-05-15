@@ -24,7 +24,7 @@ from typing import Callable, Dict, List
 from apps.launcher.log_buffer import CodexLogRecord, format_log_record
 
 from ..controller import LauncherController
-from ..styles import Palette
+from ..styles import Palette, resolve_fonts
 
 
 class LogsTab:
@@ -81,7 +81,7 @@ class LogsTab:
             bg=self._palette.bg2,
             fg=self._palette.fg0,
             insertbackground=self._palette.fg0,
-            font=("Consolas", 10),
+            font=resolve_fonts(frame).mono,
         )
         text.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
         text.tag_config("search_match", background=self._palette.accent, foreground=self._palette.bg0)

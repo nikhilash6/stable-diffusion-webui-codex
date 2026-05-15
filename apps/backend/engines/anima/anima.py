@@ -8,19 +8,18 @@ Required Notice: see NOTICE
 
 Purpose: Anima engine facade for txt2img/img2img.
 Defines the `AnimaEngine` class and integrates with the common `CodexDiffusionEngine` lifecycle.
-Implements Anima conditioning using dual tokenization (Qwen embeddings + T5 ids/weights) and exposes canonical engine hooks used by shared pipelines.
+Implements Anima conditioning using dual tokenization (Qwen embeddings + T5 ids/weights/attention-mask) and exposes canonical engine hooks used by shared pipelines.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_ANIMA_FACTORY` (constant): Factory used to assemble the Anima runtime and `CodexObjects`.
 - `_AnimaPromptList` (class): Prompt wrapper carrying shared prompt metadata flags for Anima conditioning.
 - `_canonical_device_label` (function): Normalize device identity labels for strict runtime consistency checks.
-- `_resolve_t5_max_length` (function): Resolve fail-loud max-length policy for Anima T5 tokenization.
 - `AnimaEngine` (class): Engine facade registered under engine id `anima`.
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
-import os
 import logging
 from typing import Any, Iterable, Mapping
 
@@ -37,13 +36,17 @@ from apps.backend.runtime.model_registry.specs import ModelFamily
 from apps.backend.runtime.memory import memory_management
 from apps.backend.runtime.memory.config import DeviceRole
 from apps.backend.runtime.models.loader import DiffusionModelBundle
-from apps.backend.runtime.families.anima.text_encoder import tokenize_t5_with_weights
+from apps.backend.runtime.families.anima.text_encoder import (
+    resolve_anima_qwen_max_length,
+    resolve_anima_t5_max_length,
+    tokenize_t5_with_weights,
+)
 
 from .factory import CodexAnimaFactory
 from .spec import ANIMA_SPEC, AnimaEngineRuntime
 
 
-logger = logging.getLogger("backend.engines.anima")
+logger = get_backend_logger("backend.engines.anima")
 _ANIMA_FACTORY = CodexAnimaFactory(spec=ANIMA_SPEC)
 
 
@@ -79,17 +82,6 @@ def _canonical_device_label(value: object, *, field_name: str) -> str:
     if device.type == "cuda" and device.index is None:
         return "cuda:0"
     return str(device)
-
-
-def _resolve_t5_max_length() -> int:
-    raw = str(os.getenv("CODEX_ANIMA_T5_MAX_LENGTH", "4096") or "4096").strip()
-    try:
-        value = int(raw)
-    except ValueError as exc:
-        raise ValueError(f"CODEX_ANIMA_T5_MAX_LENGTH must be an integer > 0, got: {raw!r}") from exc
-    if value <= 0:
-        raise ValueError(f"CODEX_ANIMA_T5_MAX_LENGTH must be > 0, got: {value}")
-    return value
 
 
 class AnimaEngine(CodexDiffusionEngine):
@@ -185,19 +177,22 @@ class AnimaEngine(CodexDiffusionEngine):
         is_negative = bool(getattr(prompt, "is_negative_prompt", False))
         smart_flag = getattr(prompt, "smart_cache", None)
         use_cache = bool(smart_flag) if smart_flag is not None else self.smart_cache_enabled
-        qwen_max_length = int(getattr(runtime.text.qwen3_text, "max_length", 512) or 512)
-        t5_max_length = _resolve_t5_max_length()
+        qwen_default = resolve_anima_qwen_max_length()
+        qwen_max_length = int(getattr(runtime.text.qwen3_text, "max_length", qwen_default) or qwen_default)
+        t5_max_length = resolve_anima_t5_max_length()
         cache_key = (texts, is_negative, qwen_max_length, t5_max_length)
 
         cached = self._get_cached_cond(cache_key, bucket_name="anima.conditioning", enabled=use_cache)
-        if isinstance(cached, dict):
+        if isinstance(cached, dict) and all(
+            key in cached for key in ("crossattn", "t5xxl_ids", "t5xxl_weights", "t5xxl_attention_mask")
+        ):
             target_device = memory_management.manager.get_device(DeviceRole.TEXT_ENCODER)
             core_dtype = memory_management.manager.dtype_for_role(DeviceRole.CORE)
             return {
                 "crossattn": cached["crossattn"].to(device=target_device, dtype=core_dtype),
-                "vector": cached["vector"].to(device=target_device, dtype=core_dtype),
                 "t5xxl_ids": cached["t5xxl_ids"].to(device=target_device, dtype=torch.long),
                 "t5xxl_weights": cached["t5xxl_weights"].to(device=target_device, dtype=core_dtype),
+                "t5xxl_attention_mask": cached["t5xxl_attention_mask"].to(device=target_device, dtype=torch.long),
             }
 
         with stage_scoped_model_load(
@@ -214,39 +209,34 @@ class AnimaEngine(CodexDiffusionEngine):
 
             core_dtype = memory_management.manager.dtype_for_role(DeviceRole.CORE)
             crossattn = crossattn.to(dtype=core_dtype)
-            vector = crossattn.mean(dim=1)
-            if vector.ndim != 2:
-                raise RuntimeError(
-                    f"Anima pooled vector has invalid shape: expected 2D (B,C), got {tuple(vector.shape)}"
-                )
 
-            t5xxl_ids, t5xxl_weights = tokenize_t5_with_weights(
+            t5_batch = tokenize_t5_with_weights(
                 tokenizer=runtime.text.t5_tokenizer,
                 texts=list(texts),
                 max_length=t5_max_length,
             )
-            if t5xxl_ids.ndim != 2 or t5xxl_weights.ndim != 2:
+            if t5_batch.input_ids.ndim != 2 or t5_batch.weights.ndim != 2 or t5_batch.attention_mask.ndim != 2:
                 raise RuntimeError(
                     "Anima T5 tokenization produced invalid tensor ranks: "
-                    f"ids_ndim={t5xxl_ids.ndim} weights_ndim={t5xxl_weights.ndim}"
+                    f"ids_ndim={t5_batch.input_ids.ndim} weights_ndim={t5_batch.weights.ndim} mask_ndim={t5_batch.attention_mask.ndim}"
                 )
-            if t5xxl_ids.shape != t5xxl_weights.shape:
+            if t5_batch.input_ids.shape != t5_batch.weights.shape or t5_batch.input_ids.shape != t5_batch.attention_mask.shape:
                 raise RuntimeError(
-                    "Anima T5 tokenization ids/weights shape mismatch: "
-                    f"ids={tuple(t5xxl_ids.shape)} weights={tuple(t5xxl_weights.shape)}"
+                    "Anima T5 tokenization ids/weights/mask shape mismatch: "
+                    f"ids={tuple(t5_batch.input_ids.shape)} weights={tuple(t5_batch.weights.shape)} mask={tuple(t5_batch.attention_mask.shape)}"
                 )
-            if int(t5xxl_ids.shape[0]) != int(crossattn.shape[0]):
+            if int(t5_batch.input_ids.shape[0]) != int(crossattn.shape[0]):
                 raise RuntimeError(
                     "Anima conditioning batch mismatch between Qwen embeddings and T5 tokenization: "
-                    f"crossattn.B={int(crossattn.shape[0])} t5.B={int(t5xxl_ids.shape[0])}"
+                    f"crossattn.B={int(crossattn.shape[0])} t5.B={int(t5_batch.input_ids.shape[0])}"
                 )
 
             target_device = memory_management.manager.get_device(DeviceRole.TEXT_ENCODER)
             cond = {
                 "crossattn": crossattn.to(device=target_device, dtype=core_dtype),
-                "vector": vector.to(device=target_device, dtype=core_dtype),
-                "t5xxl_ids": t5xxl_ids.to(device=target_device, dtype=torch.long),
-                "t5xxl_weights": t5xxl_weights.to(device=target_device, dtype=core_dtype),
+                "t5xxl_ids": t5_batch.input_ids.to(device=target_device, dtype=torch.long),
+                "t5xxl_weights": t5_batch.weights.to(device=target_device, dtype=core_dtype),
+                "t5xxl_attention_mask": t5_batch.attention_mask.to(device=target_device, dtype=torch.long),
             }
 
             if use_cache:
@@ -262,19 +252,20 @@ class AnimaEngine(CodexDiffusionEngine):
         if not (isinstance(qwen_tokens, list) and qwen_tokens and isinstance(qwen_tokens[0], list)):
             raise RuntimeError("Anima Qwen tokenizer returned invalid tokenization output for prompt length calculation.")
         qwen_len = len(qwen_tokens[0])
-        qwen_max = int(getattr(runtime.text.qwen3_text, "max_length", qwen_len) or qwen_len)
+        qwen_default = resolve_anima_qwen_max_length()
+        qwen_max = int(getattr(runtime.text.qwen3_text, "max_length", qwen_default) or qwen_default)
 
-        t5_max = _resolve_t5_max_length()
-        t5_ids, _t5_weights = tokenize_t5_with_weights(
+        t5_max = resolve_anima_t5_max_length()
+        t5_batch = tokenize_t5_with_weights(
             tokenizer=runtime.text.t5_tokenizer,
             texts=[prompt_text],
             max_length=t5_max,
         )
-        if t5_ids.ndim != 2:
+        if t5_batch.input_ids.ndim != 2:
             raise RuntimeError(
-                f"Anima T5 tokenizer returned invalid ids tensor rank for prompt length calculation: ndim={t5_ids.ndim}"
+                f"Anima T5 tokenizer returned invalid ids tensor rank for prompt length calculation: ndim={t5_batch.input_ids.ndim}"
             )
-        t5_len = int(t5_ids.shape[1])
+        t5_len = int(t5_batch.attention_mask[0].sum().item()) if t5_batch.attention_mask.numel() > 0 else 0
 
         current = max(qwen_len, t5_len)
         maximum = max(current, qwen_max, t5_max)

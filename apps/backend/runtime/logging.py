@@ -6,19 +6,24 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Centralized backend logging setup (env-driven level, optional rich/tqdm integration).
+Purpose: Centralized backend logging setup and wrapper API (env-driven level, optional rich/tqdm integration).
 Configures root logging once per interpreter, supports console/file handlers, and can wrap stream handlers to cooperate with tqdm progress
 bars. Level filtering can also be controlled per-level via `CODEX_LOG_*` env vars.
-Includes structured multiline rendering for dense telemetry events and a custom Rich key/value highlighter for readable console diagnostics.
+Includes structured multiline rendering for dense telemetry events, a plain-message wrapper for repo-owned operational logs, and the
+canonical uvicorn logging-config builder consumed by the API bootstrap seam.
 
 Symbols (top-level; keep in sync; no ghosts):
+- `BackendLoggerProxy` (class): Canonical repo-owned logger proxy that routes method-style calls through the wrapper family.
 - `TqdmAwareHandler` (class): Proxy handler that cooperates with tqdm-managed progress bars.
 - `_is_stream_handler` (function): Detects stream handlers including wrapped `TqdmAwareHandler`.
 - `_parse_level` (function): Parses level names (including TRACE=5) and returns a logging level.
+- `configure_backend_root_for_call_trace` (function): Applies the sanctioned backend-root logger mutations required by call tracing.
 - `format_log_message` (function): Builds a consistent event-style log message with optional key/value context.
 - `CodexLogHighlighter` (class): Regex-based Rich highlighter for structured `key=value` diagnostics.
 - `get_backend_logger` (function): Returns a normalized backend logger (`backend.*`) from module or relative names.
+- `emit_backend_message` (function): Canonical repo-owned human-readable operational-log emitter (supports stdlib-style message interpolation).
 - `emit_backend_event` (function): Canonical global backend event emitter (single source of truth for event emission path).
+- `build_backend_uvicorn_log_config` (function): Canonical server-log config builder for the uvicorn integration seam.
 - `LevelFilter` (class): Env-driven log-level filter (CODEX_LOG_DEBUG/INFO/WARNING/ERROR).
 - `setup_logging` (function): Idempotent root logger setup using env vars (level/format/file, optional Rich handler).
 """
@@ -30,7 +35,7 @@ import os
 import re
 import sys
 import datetime
-from typing import Optional
+from typing import Any, Optional, Sequence
 
 try:  # Optional; fall back to plain logs when missing
     from colorama import init as _colorama_init  # type: ignore
@@ -61,6 +66,7 @@ _SAFE_LOG_TOKEN = re.compile(r"^[A-Za-z0-9._:/,-]+$")
 _STRUCTURED_MEMORY_PREFIXES = ("memory_before_", "memory_after_", "memory_current_")
 _STRUCTURED_FIELD_CHUNK_SIZE = 4
 _STRUCTURED_INLINE_MAX_FIELDS = 6
+_DEFAULT_DATEFMT = "%m/%d/%y %H:%M:%S"
 
 
 if RegexHighlighter is not None:  # pragma: no cover - optional dependency
@@ -83,6 +89,58 @@ else:
     CodexLogHighlighter = None  # type: ignore[assignment,misc]
 
 
+class BackendLoggerProxy:
+    """Thin repo-owned logger facade that keeps callsites on the canonical wrapper seam."""
+
+    __slots__ = ("_logger",)
+
+    def __init__(self, logger: logging.Logger) -> None:
+        self._logger = logger
+
+    @property
+    def name(self) -> str:
+        return self._logger.name
+
+    def isEnabledFor(self, level: str | int) -> bool:
+        return self._logger.isEnabledFor(_coerce_level_value(level))
+
+    def log(
+        self,
+        level: str | int,
+        message: str,
+        /,
+        *message_args: object,
+        exc_info: Any = None,
+        **fields: object,
+    ) -> None:
+        _emit_backend_message_to_logger(
+            self._logger,
+            message,
+            *message_args,
+            level=level,
+            exc_info=exc_info,
+            **fields,
+        )
+
+    def debug(self, message: str, /, *message_args: object, exc_info: Any = None, **fields: object) -> None:
+        self.log(logging.DEBUG, message, *message_args, exc_info=exc_info, **fields)
+
+    def info(self, message: str, /, *message_args: object, exc_info: Any = None, **fields: object) -> None:
+        self.log(logging.INFO, message, *message_args, exc_info=exc_info, **fields)
+
+    def warning(self, message: str, /, *message_args: object, exc_info: Any = None, **fields: object) -> None:
+        self.log(logging.WARNING, message, *message_args, exc_info=exc_info, **fields)
+
+    def error(self, message: str, /, *message_args: object, exc_info: Any = None, **fields: object) -> None:
+        self.log(logging.ERROR, message, *message_args, exc_info=exc_info, **fields)
+
+    def critical(self, message: str, /, *message_args: object, exc_info: Any = None, **fields: object) -> None:
+        self.log(logging.CRITICAL, message, *message_args, exc_info=exc_info, **fields)
+
+    def exception(self, message: str, /, *message_args: object, exc_info: Any = True, **fields: object) -> None:
+        self.error(message, *message_args, exc_info=exc_info, **fields)
+
+
 class TqdmAwareHandler(logging.Handler):
     """Proxy handler that cooperates with tqdm-managed progress bars."""
 
@@ -97,10 +155,12 @@ class TqdmAwareHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:  # pragma: no cover - UI integration
         if tqdm is not None and getattr(tqdm, "_instances", None):
             try:
-                message = record.getMessage()
-                timestamp = datetime.datetime.fromtimestamp(record.created).strftime("%m/%d/%y %H:%M:%S")
-                rendered = f"[{timestamp}] {record.levelname:<8s} {message}"
-                tqdm.write(rendered)
+                rendered = self.format(record)
+                if RichHandler is not None and isinstance(self.inner, RichHandler):
+                    timestamp = datetime.datetime.fromtimestamp(record.created).strftime("%m/%d/%y %H:%M:%S")
+                    rendered = f"[{timestamp}] {record.levelname:<8s} {rendered}"
+                target_stream = getattr(self.inner, "stream", sys.stderr)
+                tqdm.write(rendered, file=target_stream)
                 return
             except Exception:
                 # Fall back to the wrapped handler on unexpected errors
@@ -133,6 +193,104 @@ def _parse_level(value: Optional[str]) -> int:
     return resolved
 
 
+def _coerce_level_value(level: str | int | None) -> int:
+    if isinstance(level, int):
+        return level
+    return _parse_level(level)
+
+
+def _env_true(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _should_force_plain() -> bool:
+    env = os.environ.get("SD_WEBUI_NO_RICH") or os.environ.get("CODEX_LOG_NO_RICH")
+    if not env:
+        return False
+    return env.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _include_logger_name() -> bool:
+    return _env_true("CODEX_LOG_INCLUDE_LOGGER_NAME", "0")
+
+
+def _default_log_format(*, include_logger_name: bool) -> str:
+    if include_logger_name:
+        return "[%(asctime)s] %(levelname)-8s %(name)s | %(message)s"
+    return "[%(asctime)s] %(levelname)-8s %(message)s"
+
+
+def _resolve_log_format(*, include_logger_name: bool) -> str:
+    return os.environ.get("CODEX_LOG_FORMAT", _default_log_format(include_logger_name=include_logger_name))
+
+
+def _render_log_token(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return value if _SAFE_LOG_TOKEN.fullmatch(value) else repr(value)
+    return repr(value)
+
+
+def _render_log_fields(**fields: object) -> list[tuple[str, str]]:
+    rendered_fields: list[tuple[str, str]] = []
+    for key, value in fields.items():
+        if value is None:
+            continue
+        safe_key = key if _SAFE_LOG_TOKEN.fullmatch(key) else repr(key)
+        rendered_fields.append((safe_key, _render_log_token(value)))
+    return rendered_fields
+
+
+def _normalize_backend_logger_name(name: Optional[str]) -> str:
+    if name is None:
+        return "backend"
+    if not isinstance(name, str):
+        raise TypeError(
+            "Backend logger selector must be None or a string name. "
+            f"Got {type(name).__name__}."
+        )
+
+    normalized = name.strip()
+    if not normalized:
+        return "backend"
+    normalized = normalized.strip(".")
+    if not normalized:
+        return "backend"
+
+    if normalized in {"backend", "apps.backend"}:
+        normalized = "backend"
+    elif normalized.startswith("apps.backend."):
+        normalized = "backend." + normalized[len("apps.backend.") :]
+    elif not normalized.startswith("backend."):
+        normalized = "backend." + normalized
+    normalized = normalized.rstrip(".")
+    normalized = ".".join(part for part in normalized.split(".") if part)
+    return normalized or "backend"
+
+
+def _resolve_backend_raw_logger(name: Optional[str] = None) -> logging.Logger:
+    return logging.getLogger(_normalize_backend_logger_name(name))
+
+
+def configure_backend_root_for_call_trace() -> None:
+    """Apply the sanctioned backend-root logger mutations required by call tracing."""
+
+    backend_root = _resolve_backend_raw_logger("backend")
+    backend_root.setLevel(min(backend_root.level, logging.DEBUG))
+    backend_root.propagate = False
+
+
+def _resolved_level_name(level: str | int | None) -> str:
+    if isinstance(level, int):
+        return logging.getLevelName(level)
+    if level is None:
+        return logging.getLevelName(_parse_level(None))
+    return logging.getLevelName(_parse_level(str(level)))
+
+
 def format_log_message(event: str, /, **fields: object) -> str:
     """Build a consistent event-style log message.
 
@@ -141,20 +299,7 @@ def format_log_message(event: str, /, **fields: object) -> str:
     - with fields: `event | key=value key2='text value'`
     """
 
-    rendered_fields: list[tuple[str, str]] = []
-    for key, value in fields.items():
-        if value is None:
-            continue
-        safe_key = key if _SAFE_LOG_TOKEN.fullmatch(key) else repr(key)
-        if isinstance(value, bool):
-            rendered = "true" if value else "false"
-        elif isinstance(value, (int, float)):
-            rendered = str(value)
-        elif isinstance(value, str):
-            rendered = value if _SAFE_LOG_TOKEN.fullmatch(value) else repr(value)
-        else:
-            rendered = repr(value)
-        rendered_fields.append((safe_key, rendered))
+    rendered_fields = _render_log_fields(**fields)
 
     safe_event = event if _SAFE_LOG_TOKEN.fullmatch(event) else repr(event)
     if not rendered_fields:
@@ -204,7 +349,32 @@ def format_log_message(event: str, /, **fields: object) -> str:
     return "\n".join(lines)
 
 
-def get_backend_logger(name: Optional[str] = None) -> logging.Logger:
+def _format_backend_message(message: str, /, **fields: object) -> str:
+    rendered_fields = _render_log_fields(**fields)
+    if not rendered_fields:
+        return message
+    inline = " ".join(f"{key}={value}" for key, value in rendered_fields)
+    return f"{message} | {inline}"
+
+
+def _emit_backend_message_to_logger(
+    target: logging.Logger,
+    message: str,
+    /,
+    *message_args: object,
+    level: str | int,
+    exc_info: Any = None,
+    **fields: object,
+) -> None:
+    resolved_level = _coerce_level_value(level)
+    if not fields:
+        target.log(resolved_level, message, *message_args, exc_info=exc_info)
+        return
+    rendered_message = message % message_args if message_args else message
+    target.log(resolved_level, _format_backend_message(rendered_message, **fields), exc_info=exc_info)
+
+
+def get_backend_logger(name: Optional[str] = None) -> BackendLoggerProxy:
     """Return a backend logger with normalized namespace.
 
     Accepted forms:
@@ -215,28 +385,28 @@ def get_backend_logger(name: Optional[str] = None) -> logging.Logger:
     - empty/None           -> `backend`
     """
 
-    if name is None:
-        return logging.getLogger("backend")
+    return BackendLoggerProxy(_resolve_backend_raw_logger(name))
 
-    normalized = name.strip()
-    if not normalized:
-        return logging.getLogger("backend")
-    normalized = normalized.strip(".")
-    if not normalized:
-        return logging.getLogger("backend")
 
-    if normalized in {"backend", "apps.backend"}:
-        normalized = "backend"
-    elif normalized.startswith("apps.backend."):
-        normalized = "backend." + normalized[len("apps.backend.") :]
-    elif not normalized.startswith("backend."):
-        normalized = "backend." + normalized
-    normalized = normalized.rstrip(".")
-    normalized = ".".join(part for part in normalized.split(".") if part)
-    if not normalized:
-        normalized = "backend"
+def emit_backend_message(
+    message: str,
+    /,
+    *message_args: object,
+    logger: Optional[str] = None,
+    level: str | int = logging.INFO,
+    exc_info: Any = None,
+    **fields: object,
+) -> None:
+    """Emit a repo-owned human-readable operational log through the canonical path."""
 
-    return logging.getLogger(normalized)
+    _emit_backend_message_to_logger(
+        _resolve_backend_raw_logger(logger),
+        message,
+        *message_args,
+        level=level,
+        exc_info=exc_info,
+        **fields,
+    )
 
 
 def emit_backend_event(
@@ -244,7 +414,7 @@ def emit_backend_event(
     /,
     *,
     logger: Optional[str] = None,
-    level: int = logging.INFO,
+    level: str | int = logging.INFO,
     **fields: object,
 ) -> None:
     """Emit a backend event through the single canonical emission path.
@@ -252,8 +422,66 @@ def emit_backend_event(
     This function is the global source of truth for backend event emission.
     """
 
-    target = get_backend_logger(logger)
-    target.log(level, format_log_message(event, **fields))
+    _resolve_backend_raw_logger(logger).log(_coerce_level_value(level), format_log_message(event, **fields))
+
+
+def build_backend_uvicorn_log_config(
+    *,
+    suppress_access_prefixes: Sequence[str] | None = None,
+    access_filter_factory: str | None = None,
+    level: str | int = "INFO",
+) -> dict[str, Any]:
+    """Return the canonical uvicorn logging config for backend bootstrap use."""
+
+    include_logger_name = _include_logger_name()
+    resolved_level_name = _resolved_level_name(level)
+    filters: dict[str, Any] = {}
+    access_handler_filters: list[str] = []
+    if suppress_access_prefixes and access_filter_factory:
+        filters["codex_access_noise"] = {
+            "()": access_filter_factory,
+            "suppress_path_prefixes": list(suppress_access_prefixes),
+        }
+        access_handler_filters.append("codex_access_noise")
+
+    access_handler: dict[str, Any] = {
+        "formatter": "access",
+        "class": "logging.StreamHandler",
+        "stream": "ext://sys.stderr",
+    }
+    if access_handler_filters:
+        access_handler["filters"] = access_handler_filters
+
+    config: dict[str, Any] = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "filters": filters,
+        "formatters": {
+            "default": {
+                "format": _resolve_log_format(include_logger_name=include_logger_name),
+                "datefmt": _DEFAULT_DATEFMT,
+            },
+            "access": {
+                "()": "uvicorn.logging.AccessFormatter",
+                "format": "[%(asctime)s] %(levelname)-8s %(client_addr)s - %(request_line)s %(status_code)s",
+                "datefmt": _DEFAULT_DATEFMT,
+            },
+        },
+        "handlers": {
+            "default": {
+                "formatter": "default",
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stderr",
+            },
+            "access": access_handler,
+        },
+        "loggers": {
+            "uvicorn": {"handlers": ["default"], "level": resolved_level_name, "propagate": False},
+            "uvicorn.error": {"handlers": ["default"], "level": resolved_level_name, "propagate": False},
+            "uvicorn.access": {"handlers": ["access"], "level": resolved_level_name, "propagate": False},
+        },
+    }
+    return config
 
 
 class LevelFilter(logging.Filter):
@@ -307,35 +535,14 @@ def setup_logging(level: Optional[str] = None, *, install_tqdm_bridge: bool = Tr
     )
     resolved_level = _parse_level(level_name)
 
-    include_logger_name = (
-        os.environ.get("CODEX_LOG_INCLUDE_LOGGER_NAME", "0").strip().lower()
-        in {"1", "true", "yes", "on"}
-    )
+    include_logger_name = _include_logger_name()
 
     # Concise format: [MM/DD/YY HH:MM:SS] LEVEL     message
-    default_fmt = (
-        "[%(asctime)s] %(levelname)-8s %(name)s | %(message)s"
-        if include_logger_name
-        else "[%(asctime)s] %(levelname)-8s %(message)s"
-    )
-    fmt = os.environ.get(
-        "CODEX_LOG_FORMAT",
-        default_fmt,
-    )
-    datefmt = "%m/%d/%y %H:%M:%S"
+    fmt = _resolve_log_format(include_logger_name=include_logger_name)
+    datefmt = _DEFAULT_DATEFMT
 
     root = logging.getLogger()
     root.setLevel(resolved_level)
-
-    # Avoid duplicate handlers if upstream configured something already
-    def _should_force_plain() -> bool:
-        env = os.environ.get("SD_WEBUI_NO_RICH") or os.environ.get("CODEX_LOG_NO_RICH")
-        if not env:
-            return False
-        return env.strip().lower() in {"1", "true", "yes", "on"}
-
-    def _env_true(name: str, default: str = "0") -> bool:
-        return os.environ.get(name, default).strip().lower() in {"1", "true", "yes", "on"}
 
     def _build_stream_handler() -> logging.Handler:
         level_filter = LevelFilter()
@@ -361,6 +568,7 @@ def setup_logging(level: Optional[str] = None, *, install_tqdm_bridge: bool = Tr
                 soft_wrap=True,
                 highlight=False,
                 emoji=False,
+                stderr=True,
                 theme=console_theme,
             )
             rich_highlighter = CodexLogHighlighter() if CodexLogHighlighter is not None else None

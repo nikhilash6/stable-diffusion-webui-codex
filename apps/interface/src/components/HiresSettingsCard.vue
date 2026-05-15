@@ -8,7 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: Hires (second pass) settings panel.
 Renders hires controls in a Basic Parameters-like row organization (sampler/scheduler/steps, scale/width/height,
-upscaler/cfg/denoise, tile controls with desktop row-alignment hooks and right-anchored presets, model selector, prompt overrides), plus optional second-pass swap-model settings.
+upscaler/cfg/denoise, tile controls with desktop row-alignment hooks and right-anchored presets, `swapModel` selector, prompt overrides), backend recommendation-aware sampler/scheduler selector grouping, plus an optional native second-pass refiner block.
 Upscaler values are stable ids (`latent:*` / `spandrel:*`), not legacy display labels. Uses the shared `WanSubHeader`
 title pattern with full-row click toggle parity to match the BASIC PARAMETERS card header style.
 
@@ -16,6 +16,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `HiresSettingsCard` (component): Hires settings block for supported image tabs.
 - `toggle` (function): Toggles the hires enabled state.
 - `swapResize` (function): Swaps hires width/height overrides.
+- `recommendedSamplers` / `recommendedSchedulers` (const): Optional recommendation arrays forwarded into selector components.
 - `hideNegativePromptByCfg` (const): Hides the hires negative prompt field when effective hires CFG is `<= 1`.
 - `onMinTileChange` (function): Normalizes/clamps min-tile updates before emitting.
 -->
@@ -43,6 +44,7 @@ Symbols (top-level; keep in sync; no ghosts):
         <SamplerSelector
           class="gc-col"
           :samplers="samplers"
+          :recommended-names="recommendedSamplers"
           :modelValue="samplerValue"
           label="Sampler"
           :allow-empty="false"
@@ -52,6 +54,7 @@ Symbols (top-level; keep in sync; no ghosts):
         <SchedulerSelector
           class="gc-col"
           :schedulers="schedulers"
+          :recommended-names="recommendedSchedulers"
           :modelValue="schedulerValue"
           label="Scheduler"
           :allow-empty="false"
@@ -239,13 +242,13 @@ Symbols (top-level; keep in sync; no ghosts):
         Tile settings apply to Spandrel (pixel SR) upscalers only.
       </p>
 
-      <div class="gc-row">
+      <div v-if="showSwapModel" class="gc-row">
         <div class="gc-col field hr-field--full">
-          <label class="label-muted">Checkpoint Swap</label>
-          <select class="select-md" :value="checkpointValue" :disabled="disabled || !enabled" @change="onCheckpointChange">
+          <label class="label-muted">Second-Pass Model</label>
+          <select class="select-md" :value="swapModelValue" :disabled="disabled || !enabled" @change="onSwapModelChange">
             <option value="">Keep current model</option>
-            <option v-if="showCurrentCheckpointOption" :value="checkpointValue">{{ checkpointValue }}</option>
-            <option v-for="entry in normalizedModelChoices" :key="entry" :value="entry">{{ entry }}</option>
+            <option v-if="showCurrentSwapModelOption" :value="swapModelValue">{{ swapModelValue }}</option>
+            <option v-for="entry in normalizedSwapModelChoices" :key="entry" :value="entry">{{ entry }}</option>
           </select>
         </div>
       </div>
@@ -279,8 +282,9 @@ Symbols (top-level; keep in sync; no ghosts):
     </div>
     <div v-if="enabled && showRefiner" class="hr-refiner">
       <RefinerSettingsCard
-        label="Second-Pass Swap Model"
+        label="Second-Pass Refiner"
         :dense="true"
+        :max-steps="refinerStepLimit"
         :model-choices="refinerModelChoices"
         :guidance-advanced="guidanceAdvanced"
         :guidance-support="guidanceSupport"
@@ -290,7 +294,7 @@ Symbols (top-level; keep in sync; no ghosts):
         v-model:model="refinerModel"
         @update:guidanceAdvanced="(patch) => emit('update:guidanceAdvanced', patch)"
       />
-      <p class="hr-hint">Swap uses step-pointer semantics in the second pass (switch model at the selected step).</p>
+      <p class="hr-hint">Refiner switch uses step-pointer semantics in the second pass.</p>
     </div>
   </div>
 </template>
@@ -319,13 +323,16 @@ const props = defineProps<{
   cfgLabel?: string
   resizeX?: number
   resizeY?: number
-  checkpoint?: string
-  modelChoices?: string[]
+  swapModel?: string
+  swapModelChoices?: string[]
+  showSwapModel?: boolean
   prompt?: string
   negativePrompt?: string
   supportsNegative?: boolean
   samplers?: SamplerInfo[]
   schedulers?: SchedulerInfo[]
+  recommendedSamplers?: string[] | null
+  recommendedSchedulers?: string[] | null
   sampler?: string
   scheduler?: string
   upscaler: string
@@ -341,6 +348,7 @@ const props = defineProps<{
   refinerCfg?: number
   refinerModel?: string
   refinerModelChoices?: string[]
+  refinerMaxSteps?: number
   guidanceAdvanced?: GuidanceAdvancedParams
   guidanceSupport?: GuidanceAdvancedCapabilities | null
 }>()
@@ -353,7 +361,7 @@ const emit = defineEmits<{
   (e: 'update:cfg', value: number): void
   (e: 'update:resizeX', value: number): void
   (e: 'update:resizeY', value: number): void
-  (e: 'update:checkpoint', value: string): void
+  (e: 'update:swapModel', value: string): void
   (e: 'update:prompt', value: string): void
   (e: 'update:negativePrompt', value: string): void
   (e: 'update:sampler', value: string): void
@@ -375,6 +383,8 @@ const tilePresets = [128, 256, 512, 768] as const
 
 const samplers = computed(() => Array.isArray(props.samplers) ? props.samplers : [])
 const schedulers = computed(() => Array.isArray(props.schedulers) ? props.schedulers : [])
+const recommendedSamplers = computed(() => (Array.isArray(props.recommendedSamplers) ? props.recommendedSamplers : null))
+const recommendedSchedulers = computed(() => (Array.isArray(props.recommendedSchedulers) ? props.recommendedSchedulers : null))
 const samplerValue = computed(() => String(props.sampler || '').trim())
 const schedulerValue = computed(() => String(props.scheduler || '').trim())
 const cfgLabel = computed(() => String(props.cfgLabel || 'CFG'))
@@ -389,15 +399,16 @@ const resizeYValue = computed(() => {
   if (!Number.isFinite(value)) return 0
   return Math.max(0, Math.trunc(value))
 })
-const checkpointValue = computed(() => String(props.checkpoint || '').trim())
-const normalizedModelChoices = computed(() => {
-  const choices = Array.isArray(props.modelChoices) ? props.modelChoices : []
+const showSwapModel = computed(() => Boolean(props.showSwapModel ?? true))
+const swapModelValue = computed(() => String(props.swapModel || '').trim())
+const normalizedSwapModelChoices = computed(() => {
+  const choices = Array.isArray(props.swapModelChoices) ? props.swapModelChoices : []
   return Array.from(new Set(choices.map((entry) => String(entry || '').trim()).filter((entry) => entry.length > 0)))
 })
-const showCurrentCheckpointOption = computed(() => {
-  const current = checkpointValue.value
+const showCurrentSwapModelOption = computed(() => {
+  const current = swapModelValue.value
   if (!current) return false
-  return !normalizedModelChoices.value.includes(current)
+  return !normalizedSwapModelChoices.value.includes(current)
 })
 const promptValue = computed(() => String(props.prompt ?? ''))
 const negativePromptValue = computed(() => String(props.negativePrompt ?? ''))
@@ -456,6 +467,11 @@ const refinerSwapAtStep = computed({
   },
   set: (value: number) => emit('update:refinerSwapAtStep', value),
 })
+const refinerStepLimit = computed(() => {
+  const value = Number(props.refinerMaxSteps)
+  if (!Number.isFinite(value) || value < 1) return 150
+  return Math.trunc(value)
+})
 const refinerCfg = computed({
   get: () => Number.isFinite(props.refinerCfg) ? Number(props.refinerCfg) : 7,
   set: (value: number) => emit('update:refinerCfg', value),
@@ -476,8 +492,8 @@ function onUpscalerChange(event: Event): void {
   emit('update:upscaler', (event.target as HTMLSelectElement).value)
 }
 
-function onCheckpointChange(event: Event): void {
-  emit('update:checkpoint', (event.target as HTMLSelectElement).value)
+function onSwapModelChange(event: Event): void {
+  emit('update:swapModel', (event.target as HTMLSelectElement).value)
 }
 
 function onPromptInput(event: Event): void {

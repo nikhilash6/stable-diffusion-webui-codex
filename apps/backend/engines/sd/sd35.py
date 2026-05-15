@@ -16,6 +16,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from types import SimpleNamespace
@@ -39,7 +40,7 @@ from apps.backend.runtime.memory import memory_management
 from apps.backend.runtime.model_registry.specs import ModelFamily
 from apps.backend.runtime.models.loader import DiffusionModelBundle
 
-logger = logging.getLogger("backend.engines.sd.sd35")
+logger = get_backend_logger("backend.engines.sd.sd35")
 
 
 def _opts():

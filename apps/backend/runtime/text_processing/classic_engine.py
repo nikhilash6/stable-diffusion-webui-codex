@@ -26,6 +26,7 @@ import math
 import torch
 import os
 import threading
+from apps.backend.runtime.logging import get_backend_logger
 
 from collections import namedtuple
 from collections.abc import Iterator, MutableMapping
@@ -37,7 +38,7 @@ from apps.backend.infra.config.args import dynamic_args
 
 
 PromptChunkFix = namedtuple('PromptChunkFix', ['offset', 'embedding'])
-logger = logging.getLogger("backend.text_processing.classic")
+logger = get_backend_logger("backend.text_processing.classic")
 
 _last_extra_generation_params_local = threading.local()
 

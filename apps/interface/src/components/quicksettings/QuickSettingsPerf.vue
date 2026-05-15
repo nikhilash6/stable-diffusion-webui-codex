@@ -16,7 +16,7 @@ Symbols (top-level; keep in sync; no ghosts):
 
 <template>
   <!-- Smart Offload -->
-  <div class="quicksettings-group qs-group-perf qs-group-perf-offload">
+  <div class="quicksettings-group qs-group-perf-offload">
     <div class="qs-row">
       <button
         :class="['btn', 'qs-toggle-btn', { 'qs-toggle-btn--on': smartOffload, 'qs-toggle-btn--off': !smartOffload }]"
@@ -31,7 +31,7 @@ Symbols (top-level; keep in sync; no ghosts):
   </div>
 
   <!-- Smart Fallback -->
-  <div class="quicksettings-group qs-group-perf qs-group-perf-fallback">
+  <div class="quicksettings-group qs-group-perf-fallback">
     <div class="qs-row">
       <button
         :class="['btn', 'qs-toggle-btn', { 'qs-toggle-btn--on': smartFallback, 'qs-toggle-btn--off': !smartFallback }]"
@@ -46,7 +46,7 @@ Symbols (top-level; keep in sync; no ghosts):
   </div>
 
   <!-- Smart Cache -->
-  <div class="quicksettings-group qs-group-perf qs-group-perf-cache">
+  <div class="quicksettings-group qs-group-perf-cache">
     <div class="qs-row">
       <button
         :class="['btn', 'qs-toggle-btn', { 'qs-toggle-btn--on': smartCache, 'qs-toggle-btn--off': !smartCache }]"
@@ -61,7 +61,7 @@ Symbols (top-level; keep in sync; no ghosts):
   </div>
 
   <!-- Core Streaming -->
-  <div class="quicksettings-group qs-group-perf qs-group-perf-streaming">
+  <div class="quicksettings-group qs-group-perf-streaming">
     <div class="qs-row">
       <button
         :class="['btn', 'qs-toggle-btn', { 'qs-toggle-btn--on': coreStreaming, 'qs-toggle-btn--off': !coreStreaming }]"
@@ -76,7 +76,7 @@ Symbols (top-level; keep in sync; no ghosts):
   </div>
 
   <!-- Obliterate VRAM -->
-  <div class="quicksettings-group qs-group-perf qs-group-perf-obliterate">
+  <div class="quicksettings-group qs-group-perf-obliterate">
     <div class="qs-row">
       <button
         class="btn qs-toggle-btn qs-toggle-btn--off"

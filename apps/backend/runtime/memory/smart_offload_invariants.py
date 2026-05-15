@@ -23,6 +23,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from typing import Any, Iterable
@@ -33,7 +34,7 @@ from . import memory_management
 from apps.backend.runtime.memory.smart_offload import smart_offload_enabled
 
 
-_LOGGER = logging.getLogger(__name__)
+_LOGGER = get_backend_logger(__name__)
 
 
 def _as_device(value: object | None) -> torch.device | None:

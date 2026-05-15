@@ -28,7 +28,13 @@ Symbols (top-level; keep in sync; no ghosts):
     :class="[
       'panel-status',
       'run-progress-status',
-      `run-progress-status--${resolvedVariant}`,
+      {
+        'run-progress-status--progress': resolvedVariant === 'progress',
+        'run-progress-status--error': resolvedVariant === 'error',
+        'run-progress-status--warning': resolvedVariant === 'warning',
+        'run-progress-status--info': resolvedVariant === 'info',
+        'run-progress-status--success': resolvedVariant === 'success',
+      },
     ]"
     :data-variant="resolvedVariant"
     :role="ariaRole"
@@ -98,7 +104,7 @@ Symbols (top-level; keep in sync; no ghosts):
     </div>
 
     <div v-if="isProgressVariant && showProgressBar" class="run-progress-status__bars">
-      <div v-if="normalizedTotalPercent !== null" class="run-progress-status__bar-group run-progress-status__bar-group--total">
+      <div v-if="normalizedTotalPercent !== null" class="run-progress-status__bar-group">
         <div class="run-progress-status__bar-caption">
           <span>Total<span v-if="totalPhaseLabel"> · {{ totalPhaseLabel }}</span></span>
           <span>{{ normalizedTotalPercent.toFixed(1) }}%</span>
@@ -116,7 +122,7 @@ Symbols (top-level; keep in sync; no ghosts):
         </div>
       </div>
 
-      <div v-if="normalizedPercent !== null" class="run-progress-status__bar-group run-progress-status__bar-group--steps">
+      <div v-if="normalizedPercent !== null" class="run-progress-status__bar-group">
         <div class="run-progress-status__bar-caption">
           <span>Steps</span>
           <span>{{ normalizedPercent.toFixed(1) }}%</span>

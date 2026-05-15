@@ -7,7 +7,8 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Text encoder weight-file discovery policy used by backend inventories.
-Defines text encoder locations from per-family `apps/paths.json` keys (`*_tenc`, including Anima) and yields weight file paths in stable order.
+Defines text encoder locations from per-family `apps/paths.json` keys (`*_tenc`, including Flux.2, LTX2, and Anima) and yields weight
+file paths in stable order while excluding non-text-encoder GGUF sidecars such as `mmproj`.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `TEXT_ENCODER_EXTS` (constant): Recognized text encoder weight file extensions.
@@ -35,7 +36,8 @@ def _files_in_dir(dir_path: str, *, exts: Sequence[str]) -> list[str]:
     try:
         for name in sorted(os.listdir(dir_path), key=lambda s: s.lower()):
             full = os.path.join(dir_path, name)
-            if os.path.isfile(full) and name.lower().endswith(tuple(exts)):
+            lower_name = name.lower()
+            if os.path.isfile(full) and lower_name.endswith(tuple(exts)) and "mmproj" not in lower_name:
                 out.append(full)
     except Exception:
         return []
@@ -46,11 +48,11 @@ def list_text_encoder_roots(models_root: str | None = None) -> list[str]:
     roots: list[str] = []
 
     # Per-family roots from apps/paths.json.
-    for key in ("sd15_tenc", "sdxl_tenc", "flux1_tenc", "anima_tenc", "wan22_tenc", "zimage_tenc"):
+    for key in ("sd15_tenc", "sdxl_tenc", "flux1_tenc", "flux2_tenc", "ltx2_tenc", "anima_tenc", "wan22_tenc", "zimage_tenc"):
         for p in get_paths_for(key):
             if os.path.isdir(p):
                 roots.append(p)
-            elif os.path.isfile(p) and p.lower().endswith(TEXT_ENCODER_EXTS):
+            elif os.path.isfile(p) and p.lower().endswith(TEXT_ENCODER_EXTS) and "mmproj" not in os.path.basename(p).lower():
                 roots.append(p)
 
     return dedupe_keep_order(roots)
@@ -60,7 +62,7 @@ def iter_text_encoder_files(models_root: str | None = None, *, roots: Sequence[s
     use_roots = list(roots) if roots is not None else list_text_encoder_roots(models_root=models_root)
     out: list[str] = []
     for root in use_roots:
-        if os.path.isfile(root) and root.lower().endswith(TEXT_ENCODER_EXTS):
+        if os.path.isfile(root) and root.lower().endswith(TEXT_ENCODER_EXTS) and "mmproj" not in os.path.basename(root).lower():
             out.append(root)
         elif os.path.isdir(root):
             out.extend(_files_in_dir(root, exts=TEXT_ENCODER_EXTS))

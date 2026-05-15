@@ -19,6 +19,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from typing import Mapping, Optional, Sequence
@@ -34,7 +35,7 @@ from apps.backend.runtime.controlnet.config import (
 )
 from .base import ControlModuleBase
 
-logger = logging.getLogger("backend.patchers.controlnet.apply")
+logger = get_backend_logger("backend.patchers.controlnet.apply")
 
 
 def apply_controlnet_advanced(

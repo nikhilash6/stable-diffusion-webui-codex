@@ -7,41 +7,96 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Anima Qwen3-0.6B text encoder runtime + offline tokenizers (Qwen + T5).
-Loads sha-selected Qwen3-0.6B weights through strict Qwen key-style normalization into the native Qwen3 implementation and provides a small text-processing wrapper
-that produces embeddings for conditioning. Also loads an offline T5 tokenizer used only for dual-tokenization (token ids + weights).
+Loads sha-selected Qwen3-0.6B weights through strict Qwen keyspace resolution or GGUF keyspace resolution into the native Qwen3
+implementation and provides the
+family-owned prompt/tokenization contract used by runtime conditioning and API prompt counting. Also loads an offline T5 tokenizer used only
+for dual-tokenization (token ids + weights + attention mask).
 
 No runtime downloads are allowed: tokenizers must be resolved from vendored `apps/backend/huggingface/**` assets or explicit paths.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `AnimaQwenTextEncoder` (class): Qwen3-0.6B encoder wrapper (native model + tokenizer).
 - `AnimaQwenTextProcessingEngine` (class): Thin adapter exposing `__call__`, `tokenize`, and `tokenize_with_weights`.
-- `load_anima_qwen3_06b_text_encoder` (function): Strict loader for Qwen3-0.6B weights (safetensors; sha-selected).
+- `AnimaT5TokenBatch` (dataclass): T5 tokenization batch (`input_ids`, `weights`, `attention_mask`) for Anima conditioning.
+- `load_anima_qwen_tokenizer` (function): Offline slow `Qwen2Tokenizer` loader for Anima prompt/token parity.
+- `load_anima_qwen3_06b_text_encoder` (function): Strict loader for Qwen3-0.6B weights (safetensors or GGUF; sha-selected).
 - `load_anima_t5_tokenizer` (function): Offline T5 tokenizer loader (used for Anima dual-tokenization ids/weights).
+- `resolve_anima_qwen_max_length` (function): Resolve fail-loud max-length policy for Anima Qwen tokenization.
+- `resolve_anima_t5_max_length` (function): Resolve fail-loud max-length policy for Anima T5 tokenization.
 - `tokenize_qwen_with_weights` (function): Qwen tokenization helper with optional `return_word_ids` metadata parity.
-- `tokenize_t5_with_weights` (function): Offline T5 tokenization producing ids+weights tensors for Anima conditioning.
+- `tokenize_t5_with_weights` (function): Offline T5 tokenization producing ids+weights+mask tensors for Anima conditioning.
+- `count_anima_prompt_tokens` (function): Count Anima prompt tokens with the same family-owned runtime tokenization rules.
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import emit_backend_message, get_backend_logger
 
 import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional, cast
 
 import torch
 import torch.nn as nn
 
 from apps.backend.infra.config.repo_root import get_repo_root
-from apps.backend.runtime.checkpoint.io import load_torch_file
+from apps.backend.runtime.checkpoint.io import load_gguf_state_dict, load_torch_file
 from apps.backend.runtime.checkpoint.safetensors_header import read_safetensors_header
 from apps.backend.runtime.memory import memory_management
+from apps.backend.runtime.memory.config import DeviceRole
 from apps.backend.runtime.models.state_dict import safe_load_state_dict
 from apps.backend.runtime.ops.operations import using_codex_operations
-from apps.backend.runtime.state_dict.keymap_qwen_text_encoder import remap_qwen_text_encoder_state_dict
-from apps.backend.runtime.text_processing.parsing import parse_prompt_attention
+from apps.backend.runtime.state_dict.keymap_qwen_text_encoder import resolve_qwen_text_encoder_keyspace
 
-logger = logging.getLogger("backend.runtime.anima.text_encoder")
+logger = get_backend_logger("backend.runtime.anima.text_encoder")
+
+ANIMA_MAX_LENGTH_DEFAULT = 99999999
+_ESCAPED_RIGHT_PAREN = "\0\1"
+_ESCAPED_LEFT_PAREN = "\0\2"
+_QWEN3_06B_HIDDEN_SIZE = 1024
+_QWEN3_06B_REQUIRED_SHAPES: dict[str, tuple[int, ...]] = {
+    "model.layers.0.self_attn.q_proj.weight": (2048, 1024),
+    "model.layers.0.self_attn.k_proj.weight": (1024, 1024),
+    "model.layers.0.self_attn.v_proj.weight": (1024, 1024),
+    "model.layers.0.self_attn.o_proj.weight": (1024, 2048),
+    "model.layers.0.self_attn.q_norm.weight": (128,),
+    "model.layers.0.self_attn.k_norm.weight": (128,),
+    "model.layers.0.mlp.gate_proj.weight": (3072, 1024),
+    "model.norm.weight": (1024,),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class AnimaT5TokenBatch:
+    input_ids: torch.Tensor
+    weights: torch.Tensor
+    attention_mask: torch.Tensor
+
+
+def _resolve_positive_length_env(*, env_var: str, default: int) -> int:
+    raw = str(os.getenv(env_var, str(default)) or str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{env_var} must be an integer > 0, got: {raw!r}") from exc
+    if value <= 0:
+        raise ValueError(f"{env_var} must be > 0, got: {value}")
+    return value
+
+
+def resolve_anima_qwen_max_length() -> int:
+    return _resolve_positive_length_env(
+        env_var="CODEX_ANIMA_QWEN_MAX_LENGTH",
+        default=ANIMA_MAX_LENGTH_DEFAULT,
+    )
+
+
+def resolve_anima_t5_max_length() -> int:
+    return _resolve_positive_length_env(
+        env_var="CODEX_ANIMA_T5_MAX_LENGTH",
+        default=ANIMA_MAX_LENGTH_DEFAULT,
+    )
 
 
 def _resolve_dir_candidates(*, env_var: str, explicit: str | None, candidates: Iterable[Path]) -> list[Path]:
@@ -72,12 +127,14 @@ def _resolve_dir_candidates(*, env_var: str, explicit: str | None, candidates: I
     return normalized
 
 
-def _load_tokenizer_dir(*, env_var: str, explicit: str | None, candidates: Iterable[Path]) -> Any:
-    try:
-        from transformers import AutoTokenizer
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"transformers is required to load tokenizers ({env_var}).") from exc
-
+def _load_tokenizer_dir(
+    *,
+    env_var: str,
+    explicit: str | None,
+    candidates: Iterable[Path],
+    loader_name: str,
+    load_tokenizer: Callable[[str], Any],
+) -> Any:
     tried: list[str] = []
     errors: list[str] = []
     for p in _resolve_dir_candidates(env_var=env_var, explicit=explicit, candidates=candidates):
@@ -85,49 +142,129 @@ def _load_tokenizer_dir(*, env_var: str, explicit: str | None, candidates: Itera
         if not p.exists() or not p.is_dir():
             continue
         try:
-            tok = AutoTokenizer.from_pretrained(str(p), local_files_only=True, use_fast=True)
-            logger.info("Loaded tokenizer from %s (env=%s)", p, env_var)
+            tok = load_tokenizer(str(p))
+            emit_backend_message(
+                "Loaded tokenizer",
+                logger=logger.name,
+                loader=loader_name,
+                path=p,
+                env=env_var,
+            )
             return tok
         except Exception as exc:  # noqa: BLE001 - try next candidate
             errors.append(f"{p}: {type(exc).__name__}: {exc}")
 
     detail = "\n".join(errors) if errors else "<no load errors captured>"
     raise RuntimeError(
-        f"Failed to load an offline tokenizer for {env_var}. "
+        f"Failed to load an offline {loader_name} for {env_var}. "
         f"Set {env_var} or vendor the tokenizer under apps/backend/huggingface. "
         f"Tried: {tried}\nErrors:\n{detail}"
     )
 
 
-def _clean_prompt_text(text: str, *, emphasis_name: str = "Original") -> str:
-    parsed = parse_prompt_attention(str(text or ""), emphasis_name)
-    out: list[str] = []
-    for seg, weight in parsed:
-        if seg == "BREAK" and weight == -1:
-            # We do not support multi-section conditioning for Anima v1. Treat BREAK as whitespace.
-            out.append(" ")
+def _escape_important(text: str) -> str:
+    return str(text).replace("\\)", _ESCAPED_RIGHT_PAREN).replace("\\(", _ESCAPED_LEFT_PAREN)
+
+
+def _unescape_important(text: str) -> str:
+    return str(text).replace(_ESCAPED_RIGHT_PAREN, ")").replace(_ESCAPED_LEFT_PAREN, "(")
+
+
+def _parse_parentheses(text: str) -> list[str]:
+    result: list[str] = []
+    current = ""
+    nesting_level = 0
+    for char in str(text):
+        if char == "(":
+            if nesting_level == 0:
+                if current:
+                    result.append(current)
+                    current = "("
+                else:
+                    current = "("
+            else:
+                current += char
+            nesting_level += 1
             continue
-        out.append(str(seg))
-    return "".join(out)
+        if char == ")":
+            nesting_level -= 1
+            if nesting_level == 0:
+                result.append(current + ")")
+                current = ""
+            else:
+                current += char
+            continue
+        current += char
+    if current:
+        result.append(current)
+    return result
+
+
+def _token_weights(text: str, current_weight: float) -> list[tuple[str, float]]:
+    out: list[tuple[str, float]] = []
+    for item in _parse_parentheses(text):
+        weight = current_weight
+        if len(item) >= 2 and item[0] == "(" and item[-1] == ")":
+            inner = item[1:-1]
+            split_at = inner.rfind(":")
+            weight *= 1.1
+            if split_at > 0:
+                try:
+                    weight = float(inner[split_at + 1 :])
+                    inner = inner[:split_at]
+                except Exception:
+                    pass
+            out.extend(_token_weights(inner, weight))
+            continue
+        out.append((item, current_weight))
+    return out
+
+
+def _anima_weighted_segments(text: str) -> list[tuple[str, float]]:
+    escaped = _escape_important(str(text or ""))
+    weighted = _token_weights(escaped, 1.0)
+    resolved = [(_unescape_important(segment), float(weight)) for segment, weight in weighted]
+    for segment, _weight in resolved:
+        for word in str(segment).split():
+            if word.startswith("embedding:"):
+                embedding_name = str(word[len("embedding:") :]).strip() or "<empty>"
+                raise NotImplementedError(
+                    "Anima textual inversion embeddings are not yet implemented. "
+                    f"Unsupported prompt token: embedding:{embedding_name}"
+                )
+    return resolved
+
+
+def _tokenize_segment_ids(*, tokenizer: Any, segment_text: str, tokenizer_adds_end_token: bool) -> list[int]:
+    tokenized = tokenizer(
+        str(segment_text),
+        padding=False,
+        truncation=False,
+        verbose=False,
+    )
+    token_ids = tokenized.get("input_ids")
+    if isinstance(token_ids, list) and token_ids and isinstance(token_ids[0], int):
+        ids_out = [int(token_id) for token_id in token_ids]
+    elif isinstance(token_ids, list) and token_ids and isinstance(token_ids[0], list):
+        ids_out = [int(token_id) for token_id in token_ids[0]]
+    else:
+        raise RuntimeError("Prompt tokenizer did not return input_ids as list[int] or list[list[int]].")
+    if tokenizer_adds_end_token and ids_out:
+        ids_out = ids_out[:-1]
+    return ids_out
 
 
 def _default_qwen_tokenizer_candidates() -> list[Path]:
     repo_root = get_repo_root()
     return [
         repo_root / "apps" / "backend" / "huggingface" / "circlestone-labs" / "Anima" / "qwen25_tokenizer",
-        repo_root / "apps" / "backend" / "huggingface" / "Tongyi-MAI" / "Z-Image-Turbo" / "tokenizer",
-        repo_root / "apps" / "backend" / "huggingface" / "Tongyi-MAI" / "Z-Image" / "tokenizer",
     ]
 
 
 def _default_t5_tokenizer_candidates() -> list[Path]:
     repo_root = get_repo_root()
-    # Prefer Flux T5 tokenizer mirror (tokenizer_2).
     return [
         repo_root / "apps" / "backend" / "huggingface" / "circlestone-labs" / "Anima" / "t5_tokenizer",
-        repo_root / "apps" / "backend" / "huggingface" / "black-forest-labs" / "FLUX.1-dev" / "tokenizer_2",
-        repo_root / "apps" / "backend" / "huggingface" / "black-forest-labs" / "FLUX.1-Kontext-dev" / "tokenizer_2",
-        repo_root / "apps" / "backend" / "huggingface" / "black-forest-labs" / "FLUX.1-schnell" / "tokenizer_2",
     ]
 
 
@@ -197,69 +334,68 @@ def _resolve_pad_token_id_for_qwen(*, tokenizer: Any, context: str) -> int:
     return pad_id_int
 
 
+def _tokenize_qwen_row(
+    *,
+    tokenizer: Any,
+    text: str,
+    max_length: int,
+    return_word_ids: bool,
+) -> tuple[list[QwenWeightedToken], bool]:
+    row: list[QwenWeightedToken] = []
+    word_id = 1
+    for segment, _segment_weight in _anima_weighted_segments(text):
+        segment_ids = _tokenize_segment_ids(
+            tokenizer=tokenizer,
+            segment_text=segment,
+            tokenizer_adds_end_token=False,
+        )
+        for token_id in segment_ids:
+            # ComfyUI Anima keeps Qwen token weights flat at 1.0 even when prompt weighting
+            # is parsed for segment boundaries and T5-side weights.
+            entry = (token_id, 1.0, word_id) if return_word_ids else (token_id, 1.0)
+            row.append(_normalize_qwen_weighted_token_entry(entry, return_word_ids=return_word_ids))
+        if segment_ids:
+            word_id += 1
+
+    synthetic_masked_pad = False
+    if not row:
+        pad_id = _resolve_pad_token_id_for_qwen(
+            tokenizer=tokenizer,
+            context="Anima Qwen weighted tokenization produced an empty sequence",
+        )
+        entry = (pad_id, 1.0, 0) if return_word_ids else (pad_id, 1.0)
+        row.append(_normalize_qwen_weighted_token_entry(entry, return_word_ids=return_word_ids))
+        synthetic_masked_pad = True
+
+    if len(row) > max_length:
+        raise ValueError(
+            "Anima Qwen tokenization exceeded max_length=%d (len=%d). "
+            "Reduce prompt length or increase CODEX_ANIMA_QWEN_MAX_LENGTH."
+            % (max_length, len(row))
+        )
+    return row, synthetic_masked_pad
+
+
 def tokenize_qwen_with_weights(
     *,
     tokenizer: Any,
     texts: list[str],
-    emphasis_name: str = "Original",
-    max_length: int = 512,
+    max_length: int = ANIMA_MAX_LENGTH_DEFAULT,
     return_word_ids: bool = False,
 ) -> list[list[QwenWeightedToken]]:
-    """Tokenize Qwen prompts into weighted tuples, optionally preserving word-id metadata.
-
-    Notes:
-    - `word_id` is assigned per parsed emphasis segment from `parse_prompt_attention`.
-    - Tokens emitted by the same parsed segment share the same `word_id`.
-    """
+    """Tokenize Qwen prompts into tuples with Qwen weights pinned to `1.0` for Comfy parity."""
     max_length = int(max_length)
     if max_length <= 0:
         raise ValueError("max_length must be > 0")
 
     out: list[list[QwenWeightedToken]] = []
     for raw in texts:
-        parsed = parse_prompt_attention(str(raw or ""), emphasis_name)
-        row: list[QwenWeightedToken] = []
-        word_id = 1
-
-        for seg, weight in parsed:
-            if seg == "BREAK" and weight == -1:
-                seg = " "
-                weight = 1.0
-            tokenized = tokenizer(
-                [str(seg)],
-                padding=False,
-                truncation=False,
-                add_special_tokens=False,
-                verbose=False,
-            )
-            seg_ids = tokenized.get("input_ids")
-            if not (isinstance(seg_ids, list) and seg_ids and isinstance(seg_ids[0], list)):
-                raise RuntimeError("Qwen tokenizer did not return input_ids as list[list[int]].")
-            for token_id in seg_ids[0]:
-                raw_entry = (token_id, weight, word_id) if return_word_ids else (token_id, weight)
-                row.append(
-                    _normalize_qwen_weighted_token_entry(
-                        raw_entry,
-                        return_word_ids=return_word_ids,
-                    )
-                )
-            if seg_ids[0]:
-                word_id += 1
-
-        if not row:
-            pad_id = _resolve_pad_token_id_for_qwen(
-                tokenizer=tokenizer,
-                context="Anima Qwen weighted tokenization produced an empty sequence",
-            )
-            fallback = (pad_id, 1.0, 0) if return_word_ids else (pad_id, 1.0)
-            row.append(_normalize_qwen_weighted_token_entry(fallback, return_word_ids=return_word_ids))
-
-        if len(row) > max_length:
-            raise ValueError(
-                "Anima Qwen tokenization exceeded max_length=%d (len=%d). "
-                "Reduce prompt length or increase CODEX_ANIMA_QWEN_MAX_LENGTH."
-                % (max_length, len(row))
-            )
+        row, _synthetic_masked_pad = _tokenize_qwen_row(
+            tokenizer=tokenizer,
+            text=str(raw or ""),
+            max_length=max_length,
+            return_word_ids=return_word_ids,
+        )
         out.append(row)
     return out
 
@@ -281,89 +417,38 @@ class AnimaQwenTextEncoder(nn.Module):
         if self._tokenizer is not None:
             return self._tokenizer
         hint = self._tokenizer_path_hint
-        tok = _load_tokenizer_dir(
-            env_var="CODEX_ANIMA_QWEN_TOKENIZER_PATH",
-            explicit=hint,
-            candidates=_default_qwen_tokenizer_candidates(),
-        )
+        tok = load_anima_qwen_tokenizer(hint)
         self._tokenizer = tok
         return tok
 
     def tokenize(self, texts: list[str], *, max_length: int) -> _QwenTokenBatch:
         tok = self._require_tokenizer()
-        cleaned = [_clean_prompt_text(t) for t in texts]
-
-        # Note: keep add_special_tokens=False to match ComfyUI's SDTokenizer path (no start/end token).
-        # Fail loud if the prompt exceeds max_length (no silent truncation).
-        probe = tok(
-            cleaned,
-            padding=False,
-            truncation=False,
-            add_special_tokens=False,
-            verbose=False,
-        )
-        probe_ids = probe.get("input_ids")
-        if isinstance(probe_ids, list):
-            too_long = [i for i, seq in enumerate(probe_ids) if isinstance(seq, list) and len(seq) > int(max_length)]
-            if too_long:
-                raise ValueError(
-                    "Anima Qwen tokenizer prompt is too long for max_length=%d (indices=%s). "
-                    "Reduce prompt length or increase CODEX_ANIMA_QWEN_MAX_LENGTH."
-                    % (int(max_length), too_long)
-                )
-
-        encoded = tok(
-            cleaned,
-            padding=True,
-            truncation=True,
-            max_length=int(max_length),
-            add_special_tokens=False,
-            return_tensors="pt",
-        )
-        input_ids = encoded.get("input_ids")
-        attention_mask = encoded.get("attention_mask")
-        if not isinstance(input_ids, torch.Tensor) or not isinstance(attention_mask, torch.Tensor):
-            raise RuntimeError("Tokenizer did not return input_ids/attention_mask tensors.")
-        if input_ids.ndim != 2 or attention_mask.ndim != 2:
-            raise RuntimeError(
-                "Qwen tokenizer returned invalid tensor ranks: "
-                f"input_ids.ndim={input_ids.ndim}, attention_mask.ndim={attention_mask.ndim}."
-            )
-        if input_ids.shape != attention_mask.shape:
-            raise RuntimeError(
-                "Qwen tokenizer returned mismatched tensor shapes: "
-                f"input_ids.shape={tuple(input_ids.shape)} attention_mask.shape={tuple(attention_mask.shape)}."
-            )
-        if input_ids.shape[0] != len(cleaned):
-            raise RuntimeError(
-                "Qwen tokenizer returned unexpected batch size: "
-                f"got={int(input_ids.shape[0])} expected={len(cleaned)}."
-            )
-
-        if input_ids.shape[1] == 0:
-            pad_id = _resolve_pad_token_id_for_qwen(
+        token_rows: list[list[QwenWeightedToken]] = []
+        synthetic_masked_pad_rows: list[bool] = []
+        for text in texts:
+            row, synthetic_masked_pad = _tokenize_qwen_row(
                 tokenizer=tok,
-                context="Anima Qwen tokenizer produced an empty sequence for prompt(s)",
+                text=str(text or ""),
+                max_length=int(max_length),
+                return_word_ids=False,
             )
-            batch_size = int(input_ids.shape[0])
-            input_ids = torch.full((batch_size, 1), fill_value=pad_id, dtype=input_ids.dtype, device=input_ids.device)
-            attention_mask = torch.zeros((batch_size, 1), dtype=attention_mask.dtype, device=attention_mask.device)
-            logger.debug(
-                "Qwen tokenizer produced empty sequence; synthesized masked pad token for min_length=1 "
-                "(batch_size=%d, pad_token_id=%d).",
-                batch_size,
-                pad_id,
-            )
+            token_rows.append(row)
+            synthetic_masked_pad_rows.append(synthetic_masked_pad)
 
-        # Fail loud on truncation (transformers reports it via tokenizer warnings in some cases; we enforce via length).
-        if input_ids.shape[1] >= int(max_length):
-            # Best-effort check: if any row ends with a non-pad token while attention_mask indicates padding,
-            # it likely truncated. We keep the message actionable rather than guessing.
-            logger.warning(
-                "Qwen tokenizer hit max_length=%d (seq_len=%d). Prompt may have been truncated.",
-                int(max_length),
-                int(input_ids.shape[1]),
-            )
+        pad_id = _resolve_pad_token_id_for_qwen(
+            tokenizer=tok,
+            context="Anima Qwen tokenizer produced an empty sequence for prompt(s)",
+        )
+        batch_size = len(token_rows)
+        max_len = max((len(row) for row in token_rows), default=1)
+        input_ids = torch.full((batch_size, max_len), fill_value=pad_id, dtype=torch.long)
+        attention_mask = torch.zeros((batch_size, max_len), dtype=torch.long)
+
+        for index, row in enumerate(token_rows):
+            token_ids = [int(token_id) for token_id, _weight in row]
+            input_ids[index, : len(token_ids)] = torch.tensor(token_ids, dtype=torch.long)
+            if not synthetic_masked_pad_rows[index]:
+                attention_mask[index, : len(token_ids)] = 1
         return _QwenTokenBatch(input_ids=input_ids, attention_mask=attention_mask)
 
     def tokenize_with_weights(
@@ -371,14 +456,12 @@ class AnimaQwenTextEncoder(nn.Module):
         texts: list[str],
         *,
         max_length: int,
-        emphasis_name: str = "Original",
         return_word_ids: bool = False,
     ) -> list[list[QwenWeightedToken]]:
         tok = self._require_tokenizer()
         return tokenize_qwen_with_weights(
             tokenizer=tok,
             texts=texts,
-            emphasis_name=emphasis_name,
             max_length=max_length,
             return_word_ids=return_word_ids,
         )
@@ -423,7 +506,7 @@ class AnimaQwenTextEncoder(nn.Module):
 class AnimaQwenTextProcessingEngine:
     """Thin adapter providing a consistent callable interface around `AnimaQwenTextEncoder`."""
 
-    def __init__(self, text_encoder: AnimaQwenTextEncoder, *, max_length: int = 512) -> None:
+    def __init__(self, text_encoder: AnimaQwenTextEncoder, *, max_length: int = ANIMA_MAX_LENGTH_DEFAULT) -> None:
         self.text_encoder = text_encoder
         self.max_length = int(max_length)
 
@@ -438,13 +521,11 @@ class AnimaQwenTextProcessingEngine:
         self,
         texts: list[str],
         *,
-        emphasis_name: str = "Original",
         return_word_ids: bool = False,
     ) -> list[list[QwenWeightedToken]]:
         return self.text_encoder.tokenize_with_weights(
             texts,
             max_length=self.max_length,
-            emphasis_name=emphasis_name,
             return_word_ids=return_word_ids,
         )
 
@@ -452,13 +533,13 @@ class AnimaQwenTextProcessingEngine:
 def _validate_qwen3_06b_header(*, header: Mapping[str, object], context: str) -> None:
     header_keys = {str(key): value for key, value in header.items()}
     try:
-        _, normalized_header_view = remap_qwen_text_encoder_state_dict(
+        resolved = resolve_qwen_text_encoder_keyspace(
             header_keys,
             allow_lm_head_aux=True,
             allow_visual_aux=False,
             require_backbone_keys=True,
         )
-        normalized_header: Mapping[str, object] = dict(normalized_header_view)
+        normalized_header: Mapping[str, object] = resolved.view
     except Exception as exc:  # noqa: BLE001 - surfaced as strict header validation context
         raise RuntimeError(f"Qwen3-0.6B header key mapping failed: {exc} ({context})") from exc
 
@@ -474,29 +555,80 @@ def _validate_qwen3_06b_header(*, header: Mapping[str, object], context: str) ->
     if embed is None or len(embed) != 2:
         raise RuntimeError(f"Qwen3-0.6B header missing model.embed_tokens.weight shape: {context}")
     vocab, hidden = int(embed[0]), int(embed[1])
-    if hidden != 1024:
-        raise RuntimeError(f"Qwen3-0.6B embed dim mismatch for {context}: got {hidden}, expected 1024.")
+    if hidden != _QWEN3_06B_HIDDEN_SIZE:
+        raise RuntimeError(
+            f"Qwen3-0.6B embed dim mismatch for {context}: got {hidden}, expected {_QWEN3_06B_HIDDEN_SIZE}."
+        )
     if vocab <= 0:
         raise RuntimeError(f"Qwen3-0.6B vocab_size invalid for {context}: {vocab}.")
 
-    # Spot-check a few keys so wrong checkpoints fail loudly with a useful message.
-    required = (
-        "model.layers.0.self_attn.q_proj.weight",
-        "model.layers.0.mlp.gate_proj.weight",
-        "model.norm.weight",
-    )
-    missing = [k for k in required if k not in normalized_header]
-    if missing:
+    _validate_qwen3_06b_required_shapes(shape_for=_shape, context=context)
+
+
+def _shape_of_mapping(mapping: Mapping[str, object], key: str) -> tuple[int, ...] | None:
+    shape_getter = getattr(mapping, "shape_of", None)
+    if callable(shape_getter):
+        try:
+            shape = shape_getter(key)
+        except Exception:
+            shape = None
+        if shape is not None:
+            try:
+                return tuple(int(v) for v in shape)
+            except Exception:
+                return None
+    value = mapping.get(key)
+    shape = getattr(value, "shape", None)
+    if shape is None:
+        return None
+    try:
+        return tuple(int(v) for v in shape)
+    except Exception:
+        return None
+
+
+def _validate_qwen3_06b_required_shapes(
+    *,
+    shape_for: Callable[[str], tuple[int, ...] | None],
+    context: str,
+) -> None:
+    for key, expected_shape in _QWEN3_06B_REQUIRED_SHAPES.items():
+        shape = shape_for(key)
+        if shape is None:
+            raise RuntimeError(
+                "Qwen3-0.6B weights file does not look like a compatible Qwen text-encoder checkpoint. "
+                f"Missing key: {key} ({context})"
+            )
+        if tuple(shape) != tuple(expected_shape):
+            raise RuntimeError(
+                f"Qwen3-0.6B shape mismatch for {key} at {context}: "
+                f"got {shape}, expected {expected_shape}."
+            )
+
+
+def _validate_qwen3_06b_state_dict(*, state_dict: Mapping[str, object], context: str) -> None:
+    embed_shape = _shape_of_mapping(state_dict, "model.embed_tokens.weight")
+    if embed_shape is None or len(embed_shape) != 2:
+        raise RuntimeError(f"Qwen3-0.6B state_dict missing model.embed_tokens.weight shape: {context}")
+    vocab_size, hidden_size = int(embed_shape[0]), int(embed_shape[1])
+    if hidden_size != _QWEN3_06B_HIDDEN_SIZE:
         raise RuntimeError(
-            "Qwen3-0.6B weights file does not look like a compatible Qwen text-encoder checkpoint. "
-            f"Missing keys: {missing} ({context})"
+            f"Qwen3-0.6B embed dim mismatch for {context}: got {hidden_size}, expected {_QWEN3_06B_HIDDEN_SIZE}."
         )
+    if vocab_size <= 0:
+        raise RuntimeError(f"Qwen3-0.6B vocab_size invalid for {context}: {vocab_size}.")
+
+    _validate_qwen3_06b_required_shapes(
+        shape_for=lambda key: _shape_of_mapping(state_dict, key),
+        context=context,
+    )
 
 
 def load_anima_qwen3_06b_text_encoder(
     tenc_path: str,
     *,
     torch_dtype: torch.dtype,
+    device: torch.device | str,
 ) -> AnimaQwenTextEncoder:
     raw = str(tenc_path or "").strip()
     if not raw:
@@ -506,51 +638,134 @@ def load_anima_qwen3_06b_text_encoder(
         p = p.resolve()
     except Exception:
         p = p.absolute()
+    if device is None:
+        raise ValueError("Anima Qwen3-0.6B text encoder loader requires an explicit owner device.")
     if not p.exists() or not p.is_file():
         raise RuntimeError(f"Anima Qwen3-0.6B text encoder path not found: {p}")
-    if p.suffix.lower() not in {".safetensor", ".safetensors"}:
-        raise ValueError(f"Anima Qwen3-0.6B text encoder must be a .safetensors file, got: {p}")
+    load_device = torch.device(device)
+    to_args = dict(device=load_device, dtype=torch_dtype)
 
-    header = read_safetensors_header(p)
-    _validate_qwen3_06b_header(header=header, context=str(p))
+    from apps.backend.runtime.families.zimage.qwen3 import Qwen3_06B, resolve_qwen3_gguf_keyspace
 
-    from apps.backend.runtime.families.zimage.qwen3 import Qwen3_06B
+    suffix = p.suffix.lower()
+    if suffix in {".safetensor", ".safetensors"}:
+        header = read_safetensors_header(p)
+        _validate_qwen3_06b_header(header=header, context=str(p))
 
-    sd = load_torch_file(str(p), device="cpu")
-    if not isinstance(sd, Mapping):
-        raise RuntimeError(f"Anima Qwen3-0.6B loader returned non-mapping state_dict: {type(sd).__name__}")
-    sd = {str(k): v for k, v in sd.items()}
-    try:
-        key_style, sd = remap_qwen_text_encoder_state_dict(
-            sd,
-            allow_lm_head_aux=True,
-            allow_visual_aux=False,
-            require_backbone_keys=True,
-        )
-        logger.debug("Anima Qwen3-0.6B keymap style=%s", key_style.value)
-    except Exception as exc:  # noqa: BLE001 - surfaced as strict load-time context
-        raise RuntimeError(f"Anima Qwen3-0.6B key mapping failed: {exc}") from exc
+        sd = load_torch_file(str(p), device="cpu")
+        if not isinstance(sd, Mapping):
+            raise RuntimeError(f"Anima Qwen3-0.6B loader returned non-mapping state_dict: {type(sd).__name__}")
+        non_string_keys = [repr(key) for key in sd.keys() if not isinstance(key, str)]
+        if non_string_keys:
+            raise RuntimeError(
+                "Anima Qwen3-0.6B state_dict keys must be strings. "
+                f"non_string_keys_sample={non_string_keys[:10]}"
+            )
+        state_dict = cast(Mapping[str, torch.Tensor], sd)
+        try:
+            resolved = resolve_qwen_text_encoder_keyspace(
+                state_dict,
+                allow_lm_head_aux=True,
+                allow_visual_aux=False,
+                require_backbone_keys=True,
+            )
+            key_style = resolved.style
+            sd = resolved.view
+            style_label = key_style.value if hasattr(key_style, "value") else str(key_style)
+            emit_backend_message(
+                "Anima Qwen3-0.6B keymap style",
+                logger=logger.name,
+                level=logging.DEBUG,
+                style=style_label,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced as strict load-time context
+            raise RuntimeError(f"Anima Qwen3-0.6B key mapping failed: {exc}") from exc
+        _validate_qwen3_06b_state_dict(state_dict=sd, context=f"{p} (resolved keyspace)")
 
-    with using_codex_operations(device=None, dtype=torch_dtype, manual_cast_enabled=True):
-        model = Qwen3_06B(dtype=torch_dtype)
-    missing, unexpected = safe_load_state_dict(model, sd, log_name="anima.qwen3_06b")
-    if missing or unexpected:
-        raise RuntimeError(
-            "Anima Qwen3-0.6B strict load failed: "
-            f"missing={len(missing)} unexpected={len(unexpected)} "
-            f"missing_sample={missing[:10]} unexpected_sample={unexpected[:10]}"
-        )
+        with using_codex_operations(**to_args, manual_cast_enabled=True):
+            model = Qwen3_06B(dtype=torch_dtype).to(**to_args)
+    elif suffix == ".gguf":
+        try:
+            gguf_state_dict = load_gguf_state_dict(
+                str(p),
+                dequantize=False,
+                computation_dtype=torch_dtype,
+                device=load_device,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced as strict load-time context
+            raise RuntimeError(f"Anima Qwen3-0.6B GGUF load failed: {exc}") from exc
+        if not isinstance(gguf_state_dict, Mapping):
+            raise RuntimeError(
+                "Anima Qwen3-0.6B GGUF loader returned non-mapping state_dict: "
+                f"{type(gguf_state_dict).__name__}"
+            )
+        non_string_keys = [repr(key) for key in gguf_state_dict.keys() if not isinstance(key, str)]
+        if non_string_keys:
+            raise RuntimeError(
+                "Anima Qwen3-0.6B GGUF state_dict keys must be strings. "
+                f"non_string_keys_sample={non_string_keys[:10]}"
+            )
+        try:
+            sd = resolve_qwen3_gguf_keyspace(gguf_state_dict, num_layers=28)
+        except Exception as exc:  # noqa: BLE001 - surfaced as strict load-time context
+            raise RuntimeError(f"Anima Qwen3-0.6B GGUF keyspace resolution failed: {exc}") from exc
+        _validate_qwen3_06b_state_dict(state_dict=sd, context=f"{p} (GGUF resolved keyspace)")
+
+        with using_codex_operations(**to_args, manual_cast_enabled=True, weight_format="gguf"):
+            model = Qwen3_06B(dtype=torch_dtype).to(**to_args)
+            model.load_sd(sd)
+    else:
+        raise ValueError(f"Anima Qwen3-0.6B text encoder must be a .safetensors or .gguf file, got: {p}")
+
+    model.preferred_device = load_device
+    model.preferred_dtype = torch_dtype
+    if suffix in {".safetensor", ".safetensors"}:
+        missing, unexpected = safe_load_state_dict(model, sd, log_name="anima.qwen3_06b")
+        if missing or unexpected:
+            raise RuntimeError(
+                "Anima Qwen3-0.6B strict load failed: "
+                f"missing={len(missing)} unexpected={len(unexpected)} "
+                f"missing_sample={missing[:10]} unexpected_sample={unexpected[:10]}"
+            )
 
     model.eval()
-    model.to(dtype=torch_dtype)
     return AnimaQwenTextEncoder(model=model)
 
 
+def load_anima_qwen_tokenizer(tokenizer_path: str | None = None) -> Any:
+    try:
+        from transformers import Qwen2Tokenizer
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("transformers.Qwen2Tokenizer is required to load the Anima Qwen tokenizer.") from exc
+
+    tok = _load_tokenizer_dir(
+        env_var="CODEX_ANIMA_QWEN_TOKENIZER_PATH",
+        explicit=tokenizer_path,
+        candidates=_default_qwen_tokenizer_candidates(),
+        loader_name="Anima Qwen tokenizer (slow Qwen2Tokenizer)",
+        load_tokenizer=lambda path: Qwen2Tokenizer.from_pretrained(path, local_files_only=True),
+    )
+    if not isinstance(tok, Qwen2Tokenizer):
+        raise RuntimeError(
+            f"Anima Qwen tokenizer loaded unexpected class {type(tok).__name__}; expected Qwen2Tokenizer."
+        )
+    if bool(getattr(tok, "is_fast", False)):
+        raise RuntimeError("Anima Qwen tokenizer must load through the slow Qwen2Tokenizer path, not a fast tokenizer.")
+    return tok
+
+
 def load_anima_t5_tokenizer(tokenizer_path: str | None = None) -> Any:
+    try:
+        from transformers import AutoTokenizer
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("transformers is required to load the Anima T5 tokenizer.") from exc
+
     tok = _load_tokenizer_dir(
         env_var="CODEX_ANIMA_T5_TOKENIZER_PATH",
         explicit=tokenizer_path,
         candidates=_default_t5_tokenizer_candidates(),
+        loader_name="Anima T5 tokenizer",
+        load_tokenizer=lambda path: AutoTokenizer.from_pretrained(path, local_files_only=True, use_fast=True),
     )
 
     token_count: int | None = None
@@ -575,51 +790,58 @@ def load_anima_t5_tokenizer(tokenizer_path: str | None = None) -> Any:
     return tok
 
 
+def _resolve_t5_pad_token_id(tokenizer: Any) -> int:
+    pad_id = getattr(tokenizer, "pad_token_id", None)
+    if pad_id is None:
+        raise RuntimeError("Anima T5 tokenizer missing pad_token_id.")
+    try:
+        return int(pad_id)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Anima T5 tokenizer pad_token_id must be an int; got {pad_id!r}.") from exc
+
+
+def _resolve_t5_end_token_id(tokenizer: Any) -> int:
+    end_id = getattr(tokenizer, "eos_token_id", None)
+    if end_id is None:
+        raise RuntimeError("Anima T5 tokenizer missing eos_token_id required for Comfy parity.")
+    try:
+        return int(end_id)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Anima T5 tokenizer eos_token_id must be an int; got {end_id!r}.") from exc
+
+
 def tokenize_t5_with_weights(
     *,
     tokenizer: Any,
     texts: list[str],
-    emphasis_name: str = "Original",
-    max_length: int = 4096,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Tokenize texts into `(input_ids, weights)` for the Anima adapter (T5 tokenizer only; no text encoder)."""
+    max_length: int = ANIMA_MAX_LENGTH_DEFAULT,
+) -> AnimaT5TokenBatch:
+    """Tokenize texts into `(input_ids, weights, attention_mask)` for the Anima adapter."""
     max_length = int(max_length)
     if max_length <= 0:
         raise ValueError("max_length must be > 0")
 
-    pad_id = getattr(tokenizer, "pad_token_id", None)
-    if pad_id is None:
-        raise RuntimeError("T5 tokenizer missing pad_token_id")
-    pad_id = int(pad_id)
+    pad_id = _resolve_t5_pad_token_id(tokenizer)
+    end_id = _resolve_t5_end_token_id(tokenizer)
 
     all_ids: list[list[int]] = []
     all_weights: list[list[float]] = []
+    all_masks: list[list[int]] = []
 
     for raw in texts:
-        parsed = parse_prompt_attention(str(raw or ""), emphasis_name)
         ids: list[int] = []
         weights: list[float] = []
-        for seg, weight in parsed:
-            if seg == "BREAK" and weight == -1:
-                # See _clean_prompt_text; treat BREAK as whitespace.
-                seg = " "
-                weight = 1.0
-            tokenized = tokenizer(
-                [str(seg)],
-                padding=False,
-                truncation=False,
-                add_special_tokens=False,
-                verbose=False,
+        for segment, weight in _anima_weighted_segments(str(raw or "")):
+            segment_ids = _tokenize_segment_ids(
+                tokenizer=tokenizer,
+                segment_text=segment,
+                tokenizer_adds_end_token=True,
             )
-            seg_ids = tokenized.get("input_ids")
-            if not (isinstance(seg_ids, list) and seg_ids and isinstance(seg_ids[0], list)):
-                raise RuntimeError("T5 tokenizer did not return input_ids as list[list[int]].")
-            for tid in seg_ids[0]:
-                ids.append(int(tid))
+            for token_id in segment_ids:
+                ids.append(int(token_id))
                 weights.append(float(weight))
-        if not ids:
-            ids = [pad_id]
-            weights = [1.0]
+        ids.append(end_id)
+        weights.append(1.0)
         if len(ids) > max_length:
             raise ValueError(
                 "Anima T5 tokenization exceeded max_length=%d (len=%d). Reduce prompt length or increase CODEX_ANIMA_T5_MAX_LENGTH."
@@ -627,24 +849,61 @@ def tokenize_t5_with_weights(
             )
         all_ids.append(ids)
         all_weights.append(weights)
+        all_masks.append([1] * len(ids))
 
     batch = len(all_ids)
     max_len = max(len(x) for x in all_ids) if all_ids else 1
 
     ids_out = torch.full((batch, max_len), pad_id, dtype=torch.long)
-    w_out = torch.ones((batch, max_len), dtype=torch.float32)
-    for i, (ids, w) in enumerate(zip(all_ids, all_weights, strict=True)):
+    w_out = torch.zeros((batch, max_len), dtype=torch.float32)
+    mask_out = torch.zeros((batch, max_len), dtype=torch.long)
+    for i, (ids, w, mask) in enumerate(zip(all_ids, all_weights, all_masks, strict=True)):
         ids_out[i, : len(ids)] = torch.tensor(ids, dtype=torch.long)
         w_out[i, : len(w)] = torch.tensor(w, dtype=torch.float32)
+        mask_out[i, : len(mask)] = torch.tensor(mask, dtype=torch.long)
 
-    return ids_out, w_out
+    return AnimaT5TokenBatch(
+        input_ids=ids_out,
+        weights=w_out,
+        attention_mask=mask_out,
+    )
+
+
+def count_anima_prompt_tokens(
+    prompt: str,
+    *,
+    qwen_tokenizer: Any,
+    t5_tokenizer: Any,
+    qwen_max_length: int | None = None,
+    t5_max_length: int | None = None,
+) -> int:
+    qwen_max = int(qwen_max_length) if qwen_max_length is not None else resolve_anima_qwen_max_length()
+    t5_max = int(t5_max_length) if t5_max_length is not None else resolve_anima_t5_max_length()
+    qwen_tokens = tokenize_qwen_with_weights(
+        tokenizer=qwen_tokenizer,
+        texts=[str(prompt or "")],
+        max_length=qwen_max,
+        return_word_ids=False,
+    )
+    t5_batch = tokenize_t5_with_weights(
+        tokenizer=t5_tokenizer,
+        texts=[str(prompt or "")],
+        max_length=t5_max,
+    )
+    t5_count = int(t5_batch.attention_mask[0].sum().item()) if t5_batch.attention_mask.numel() > 0 else 0
+    return max(len(qwen_tokens[0]), t5_count)
 
 
 __all__ = [
+    "AnimaT5TokenBatch",
     "AnimaQwenTextEncoder",
     "AnimaQwenTextProcessingEngine",
+    "load_anima_qwen_tokenizer",
     "load_anima_qwen3_06b_text_encoder",
     "load_anima_t5_tokenizer",
+    "resolve_anima_qwen_max_length",
+    "resolve_anima_t5_max_length",
     "tokenize_qwen_with_weights",
     "tokenize_t5_with_weights",
+    "count_anima_prompt_tokens",
 ]

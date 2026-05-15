@@ -21,6 +21,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import emit_backend_message, get_backend_logger
 
 import logging
 from dataclasses import dataclass
@@ -38,7 +39,7 @@ from apps.backend.runtime.families.flux.embed import EmbedND, MLPEmbedder
 from apps.backend.runtime.families.flux.geometry import apply_rotary_embeddings, timestep_embedding
 from .config import ChromaArchitectureConfig, ChromaGuidanceConfig
 
-logger = logging.getLogger("backend.runtime.chroma")
+logger = get_backend_logger("backend.runtime.chroma")
 
 
 class Approximator(nn.Module):
@@ -302,11 +303,13 @@ class ChromaTransformer2DModel(nn.Module):
         conditioning = torch.cat((timestep_embed, zero_guidance), dim=1).unsqueeze(1)
         conditioning = conditioning.repeat(1, modulation_count, 1)
         approximator_input = torch.cat((conditioning, modulation_index), dim=-1)
-        logger.debug(
-            "Chroma modulation input built: batch=%d vectors=%d dim=%d",
-            img.shape[0],
-            modulation_count,
-            approximator_input.shape[-1],
+        emit_backend_message(
+            "Chroma modulation input built",
+            logger=logger.name,
+            level=logging.DEBUG,
+            batch=img.shape[0],
+            vectors=modulation_count,
+            dim=approximator_input.shape[-1],
         )
         return self.guidance(approximator_input)
 

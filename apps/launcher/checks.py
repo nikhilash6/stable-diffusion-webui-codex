@@ -7,7 +7,8 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Launcher environment validation helpers.
-Runs preflight checks for Python, Node/npm, and Vite installation, returning structured results for UI display and diagnostics.
+Runs mode-aware preflight checks and returns structured results for UI display and diagnostics
+(dev-service mode validates Node/npm/Vite; embedded mode validates built dist packaging contract).
 
 Symbols (top-level; keep in sync; no ghosts):
 - `LOGGER` (constant): Module logger for launcher checks.
@@ -20,13 +21,16 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_vite_requirement_satisfied` (function): Checks if an installed Vite version satisfies a package.json requirement string.
 - `_codex_root` (function): Resolves the repo root used for frontend checks.
 - `_check_vite` (function): Validates installed Vite version vs `apps/interface/package.json` requirement.
-- `run_launch_checks` (function): Executes all launcher checks and returns results.
+- `_resolve_mode_profile_for_checks` (function): Resolves launcher app mode profile for preflight execution.
+- `_check_embedded_dist_contract` (function): Validates embedded-mode SPA packaging contract.
+- `run_launch_checks` (function): Executes mode-aware launcher checks and returns results.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -35,6 +39,13 @@ from pathlib import Path
 from typing import List
 
 from apps.backend.infra.config.repo_root import get_repo_root
+from apps.launcher.profiles import (
+    CODEX_APP_MODE_PROFILE_ENV_KEY,
+    DEFAULT_LAUNCHER_MODE_PROFILE,
+    LAUNCHER_MODE_PROFILE_DEV_SERVICE,
+    LAUNCHER_MODE_PROFILE_EMBEDDED,
+    normalize_mode_profile,
+)
 
 LOGGER = logging.getLogger("codex.launcher.checks")
 MIN_NODE_MAJOR = 18
@@ -201,10 +212,90 @@ def _check_vite(codex_root: Path) -> CodexLaunchCheck:
     return CodexLaunchCheck(name="vite", ok=ok, detail=detail)
 
 
-def run_launch_checks() -> List[CodexLaunchCheck]:
+def _resolve_mode_profile_for_checks(mode_profile: str | None) -> str:
+    env_override = str(os.getenv(CODEX_APP_MODE_PROFILE_ENV_KEY, "") or "").strip()
+    if env_override:
+        return normalize_mode_profile(env_override, source=f"env {CODEX_APP_MODE_PROFILE_ENV_KEY}")
+    if mode_profile is not None and str(mode_profile).strip():
+        return normalize_mode_profile(
+            str(mode_profile),
+            source="launcher meta app_mode_profile",
+        )
+    return normalize_mode_profile(
+        DEFAULT_LAUNCHER_MODE_PROFILE,
+        source="default launcher app mode profile",
+    )
+
+
+def _check_embedded_dist_contract(codex_root: Path) -> CodexLaunchCheck:
+    dist_dir = codex_root / "apps" / "interface" / "dist"
+    index_path = dist_dir / "index.html"
+    assets_dir = dist_dir / "assets"
+    if not dist_dir.is_dir():
+        return CodexLaunchCheck(
+            name="embedded-dist",
+            ok=False,
+            detail=(
+                f"Embedded mode requires {dist_dir}. "
+                "Run 'npm run build' in apps/interface."
+            ),
+        )
+    if not index_path.is_file():
+        return CodexLaunchCheck(
+            name="embedded-dist",
+            ok=False,
+            detail=f"Embedded mode packaging contract violation: missing {index_path}.",
+        )
+    if not assets_dir.is_dir():
+        return CodexLaunchCheck(
+            name="embedded-dist",
+            ok=False,
+            detail=f"Embedded mode packaging contract violation: missing {assets_dir}.",
+        )
+    js_assets = sorted(assets_dir.glob("*.js"))
+    css_assets = sorted(assets_dir.glob("*.css"))
+    if not js_assets:
+        return CodexLaunchCheck(
+            name="embedded-dist",
+            ok=False,
+            detail=f"Embedded mode packaging contract violation: no JS bundle in {assets_dir}.",
+        )
+    if not css_assets:
+        return CodexLaunchCheck(
+            name="embedded-dist",
+            ok=False,
+            detail=f"Embedded mode packaging contract violation: no CSS bundle in {assets_dir}.",
+        )
+    return CodexLaunchCheck(
+        name="embedded-dist",
+        ok=True,
+        detail=(
+            f"Found dist contract at {dist_dir} "
+            f"(js={js_assets[0].name}, css={css_assets[0].name})."
+        ),
+    )
+
+
+def run_launch_checks(*, mode_profile: str | None = None) -> List[CodexLaunchCheck]:
     """Execute all launcher environment checks."""
     root = _codex_root()
-    checks = [_check_python_version(), _check_node(), _check_vite(root)]
+    resolved_mode = _resolve_mode_profile_for_checks(mode_profile)
+    checks: list[CodexLaunchCheck] = [
+        CodexLaunchCheck(name="app-mode-profile", ok=True, detail=f"{resolved_mode}"),
+        _check_python_version(),
+    ]
+    if resolved_mode == LAUNCHER_MODE_PROFILE_DEV_SERVICE:
+        checks.extend((_check_node(), _check_vite(root)))
+    elif resolved_mode == LAUNCHER_MODE_PROFILE_EMBEDDED:
+        checks.append(_check_embedded_dist_contract(root))
+    else:
+        checks.append(
+            CodexLaunchCheck(
+                name="app-mode-profile",
+                ok=False,
+                detail=f"Unhandled launcher app mode profile: {resolved_mode!r}",
+            )
+        )
     for check in checks:
         LOGGER.debug("Launch check %s ok=%s detail=%s", check.name, check.ok, check.detail)
     return checks

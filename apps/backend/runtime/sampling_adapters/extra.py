@@ -7,13 +7,17 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Optional sampler extras (UniPC, Restart, DDPM).
-Provides lightweight noise-schedule utilities and step samplers used by optional/experimental sampling paths (native-only).
+Provides lightweight noise-schedule utilities, a pure restart-step planner, and step samplers used by optional/experimental
+sampling paths (native-only).
 
 Symbols (top-level; keep in sync; no ghosts):
 - `NoiseScheduleVP` (class): VP noise schedule helper (discrete/linear/cosine) providing alpha/sigma/lambda accessors for samplers.
+- `get_sigmas_karras` (function): Karras sigma schedule builder with a terminal zero.
+- `to_d` (function): Sigma-space ODE derivative helper for denoised predictions.
 - `model_wrapper` (function): Wraps a model into a VP-space epsilon predictor with optional guidance modes.
 - `sample_unipc` (function): Minimal UniPC sampler implementation operating over a sigma schedule.
-- `sample_unipc_bh2` (function): UniPC BH2 placeholder (currently forwards to `sample_unipc`).
+- `RestartStepPlan` (dataclass): One executable restart step with explicit sigma bounds and optional renoise scale.
+- `build_restart_step_plan` (function): Pure restart planner that expands restart segments over an active sigma ladder.
 - `restart_sampler` (function): Restart sampling wrapper (supports restart segments + noise injection).
 - `default_noise_sampler` (function): Returns a default noise sampler closure for stochastic samplers.
 - `generic_step_sampler` (function): Generic sampler driver that iterates sigmas and calls a provided step function.
@@ -21,7 +25,9 @@ Symbols (top-level; keep in sync; no ghosts):
 - `sample_ddpm` (function): DDPM sampler wrapper using `generic_step_sampler`.
 """
 
+from dataclasses import dataclass
 import math
+from typing import Callable, Mapping, Sequence
 
 import torch
 from tqdm import trange
@@ -166,21 +172,152 @@ def sample_unipc(model, x, sigmas, extra_args=None, callback=None, disable=None)
     return x
 
 
-def sample_unipc_bh2(model, x, sigmas, extra_args=None, callback=None, disable=None):
-    # Placeholder: reuse UniPC core; BH2 variant could adopt a higher-order update.
-    return sample_unipc(model, x, sigmas, extra_args=extra_args, callback=callback, disable=disable)
+@dataclass(frozen=True)
+class RestartStepPlan:
+    sigma_current: float
+    sigma_next: float
+    renoise_scale: float = 0.0
+
+
+def build_restart_step_plan(
+    sigmas: torch.Tensor,
+    *,
+    restart_list: Mapping[float, Sequence[float]] | None = None,
+) -> list[RestartStepPlan]:
+    if sigmas.ndim != 1:
+        raise RuntimeError(f"Restart planner expects a 1D sigma schedule; got shape={tuple(sigmas.shape)}.")
+    if int(sigmas.numel()) < 2:
+        raise RuntimeError("Restart planner requires at least two sigma entries (start and end).")
+    if not bool(torch.all(torch.isfinite(sigmas))):
+        raise RuntimeError("Restart planner requires a finite sigma schedule.")
+
+    working_sigmas = sigmas
+    steps = int(working_sigmas.numel()) - 1
+    normalized_restart_list: Mapping[float, Sequence[float]]
+    if restart_list is None:
+        if steps >= 20:
+            restart_steps = 9
+            restart_times = 1
+            if steps >= 36:
+                restart_steps = steps // 4
+                restart_times = 2
+            base_steps = steps - restart_steps * restart_times
+            if base_steps < 1:
+                raise RuntimeError(
+                    "Restart auto-plan produced an invalid base step count "
+                    f"(steps={steps}, restart_steps={restart_steps}, restart_times={restart_times})."
+                )
+            working_sigmas = get_sigmas_karras(
+                base_steps,
+                float(working_sigmas[-2].item()),
+                float(working_sigmas[0].item()),
+                device=working_sigmas.device,
+                dtype=working_sigmas.dtype,
+            )
+            normalized_restart_list = {0.1: (restart_steps + 1, restart_times, 2.0)}
+        else:
+            normalized_restart_list = {}
+    else:
+        normalized_restart_list = restart_list
+
+    restart_map: dict[int, tuple[int, int, float]] = {}
+    for sigma_anchor, raw_value in normalized_restart_list.items():
+        if len(raw_value) != 3:
+            raise RuntimeError(
+                "Restart planner requires restart_list entries shaped as "
+                "{sigma_anchor: [restart_steps, restart_times, restart_max]}."
+            )
+        restart_steps_raw, restart_times_raw, restart_max_raw = raw_value
+        restart_steps = int(restart_steps_raw)
+        restart_times = int(restart_times_raw)
+        restart_max = float(restart_max_raw)
+        if restart_steps < 2:
+            raise RuntimeError(f"Restart planner requires restart_steps >= 2; got {restart_steps}.")
+        if restart_times < 1:
+            raise RuntimeError(f"Restart planner requires restart_times >= 1; got {restart_times}.")
+        if not math.isfinite(restart_max) or restart_max <= 0.0:
+            raise RuntimeError(f"Restart planner requires finite positive restart_max; got {restart_max}.")
+        anchor_index = int(torch.argmin(torch.abs(working_sigmas - float(sigma_anchor)), dim=0).item())
+        restart_map[anchor_index] = (restart_steps, restart_times, restart_max)
+
+    raw_step_pairs: list[tuple[float, float]] = []
+    for index in range(len(working_sigmas) - 1):
+        sigma_current = float(working_sigmas[index].item())
+        sigma_next = float(working_sigmas[index + 1].item())
+        raw_step_pairs.append((sigma_current, sigma_next))
+        restart_spec = restart_map.get(index + 1)
+        if restart_spec is None:
+            continue
+        restart_steps, restart_times, restart_max = restart_spec
+        restart_min_index = index + 1
+        restart_max_index = int(torch.argmin(torch.abs(working_sigmas - restart_max), dim=0).item())
+        if restart_max_index >= restart_min_index:
+            raise RuntimeError(
+                "Restart planner requires restart_max to resolve to an earlier higher-sigma anchor "
+                f"(restart_max={restart_max}, min_index={restart_min_index}, max_index={restart_max_index})."
+            )
+        restart_sigmas = get_sigmas_karras(
+            restart_steps,
+            float(working_sigmas[restart_min_index].item()),
+            float(working_sigmas[restart_max_index].item()),
+            device=working_sigmas.device,
+            dtype=working_sigmas.dtype,
+        )[:-1]
+        for _ in range(restart_times):
+            raw_step_pairs.extend(
+                (float(cur.item()), float(nxt.item()))
+                for cur, nxt in zip(restart_sigmas[:-1], restart_sigmas[1:])
+            )
+
+    step_plan: list[RestartStepPlan] = []
+    last_sigma: float | None = None
+    for sigma_current, sigma_next in raw_step_pairs:
+        if sigma_current < 0.0 or sigma_next < 0.0:
+            raise RuntimeError(
+                "Restart planner requires non-negative sigma values "
+                f"(sigma_current={sigma_current}, sigma_next={sigma_next})."
+            )
+        renoise_scale = 0.0
+        if last_sigma is not None and last_sigma < sigma_current:
+            renoise_scale_sq = sigma_current**2 - last_sigma**2
+            if renoise_scale_sq < -1e-8:
+                raise RuntimeError(
+                    "Restart planner produced a negative renoise variance "
+                    f"(sigma_current={sigma_current}, last_sigma={last_sigma})."
+                )
+            renoise_scale = math.sqrt(max(renoise_scale_sq, 0.0))
+        step_plan.append(
+            RestartStepPlan(
+                sigma_current=sigma_current,
+                sigma_next=sigma_next,
+                renoise_scale=renoise_scale,
+            )
+        )
+        last_sigma = sigma_next
+    return step_plan
 
 
 @torch.no_grad()
-def restart_sampler(model, x, sigmas, extra_args=None, callback=None, disable=None, s_noise=1.0, restart_list=None):
+def restart_sampler(
+    model,
+    x,
+    sigmas,
+    extra_args=None,
+    callback=None,
+    disable=None,
+    s_noise=1.0,
+    restart_list=None,
+    noise_sampler: Callable[[torch.Tensor], torch.Tensor] | None = None,
+):
     """Restart sampling (Restart Sampling for Improving Generative Processes, 2023).
 
     Optionally inserts restart segments built with Karras sigmas, applies Heun/Euler steps, and injects
-    noise between segments. Parameter semantics match the runtime config surface while using the native
-    sigma helpers in this module.
+    noise between segments. Parameter semantics match the runtime config surface while using the shared
+    pure restart planner in this module.
     """
 
     extra_args = {} if extra_args is None else extra_args
+    noise_sampler = (lambda reference: torch.randn_like(reference)) if noise_sampler is None else noise_sampler
     s_in = x.new_ones([x.shape[0]])
     step_id = 0
 
@@ -201,57 +338,14 @@ def restart_sampler(model, x, sigmas, extra_args=None, callback=None, disable=No
         step_id += 1
         return x_out
 
-    steps = sigmas.shape[0] - 1
-    # Auto restart plan mirrors the historical heuristic
-    if restart_list is None:
-        if steps >= 20:
-            restart_steps = 9
-            restart_times = 1
-            if steps >= 36:
-                restart_steps = steps // 4
-                restart_times = 2
-            base = get_sigmas_karras(
-                steps - restart_steps * restart_times,
-                float(sigmas[-2].item()),
-                float(sigmas[0].item()),
-                device=sigmas.device,
-                dtype=sigmas.dtype,
-            )
-            restart_list = {0.1: [restart_steps + 1, restart_times, 2]}
-            sigmas = base
-        else:
-            restart_list = {}
-
-    restart_map = {int(torch.argmin(abs(sigmas - key), dim=0)): value for key, value in restart_list.items()}
-
-    step_pairs = []
-    for i in range(len(sigmas) - 1):
-        step_pairs.append((sigmas[i], sigmas[i + 1]))
-        if i + 1 in restart_map:
-            restart_steps, restart_times, restart_max = restart_map[i + 1]
-            min_idx = i + 1
-            max_idx = int(torch.argmin(abs(sigmas - restart_max), dim=0))
-            if max_idx < min_idx:
-                sigma_restart = get_sigmas_karras(
-                    restart_steps,
-                    float(sigmas[min_idx].item()),
-                    float(sigmas[max_idx].item()),
-                    device=sigmas.device,
-                    dtype=sigmas.dtype,
-                )[:-1]
-                while restart_times > 0:
-                    restart_times -= 1
-                    step_pairs.extend(zip(sigma_restart[:-1], sigma_restart[1:]))
-
-    last_sigma = None
-    for idx in trange(len(step_pairs), disable=disable):
-        cur, nxt = step_pairs[idx]
-        if last_sigma is None:
-            last_sigma = cur
-        elif last_sigma < cur:
-            x = x + torch.randn_like(x) * s_noise * max(cur**2 - last_sigma**2, 0.0) ** 0.5
-        x = _heun_step(x, cur, nxt)
-        last_sigma = nxt
+    step_plan = build_restart_step_plan(sigmas, restart_list=restart_list)
+    for step_id_plan in trange(len(step_plan), disable=disable):
+        plan = step_plan[step_id_plan]
+        if plan.renoise_scale > 0.0:
+            x = x + noise_sampler(x) * s_noise * plan.renoise_scale
+        sigma_current = torch.tensor(plan.sigma_current, device=x.device, dtype=x.dtype)
+        sigma_next = torch.tensor(plan.sigma_next, device=x.device, dtype=x.dtype)
+        x = _heun_step(x, sigma_current, sigma_next)
     return x
 
 

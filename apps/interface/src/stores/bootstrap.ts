@@ -7,11 +7,12 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Application bootstrap orchestrator and fatal-error funnel for the interface.
-Owns required startup sequencing (engine capabilities, model tabs, quicksettings), enforces hard-fatal behavior on required failures,
-and exposes a retry flow used by the root App fatal screen.
+Owns two-phase startup sequencing: a minimal required phase (`engine_capabilities`) that gates initial UI readiness, and a deferred phase
+(`model_tabs`) that continues in the background after minimal readiness. Required failures are hard-fatal; deferred failures are explicit but non-fatal.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `BootstrapStatus` (type): Global bootstrap state (`idle|loading|ready|fatal`).
+- `BootstrapCriticalStatus` (type): Minimal required bootstrap state (`idle|loading|ready|fatal`).
+- `BootstrapDeferredStatus` (type): Deferred bootstrap state (`idle|loading|ready|error`).
 - `useBootstrapStore` (store): Pinia store exposing bootstrap lifecycle + global error funnel helpers.
 */
 
@@ -20,7 +21,8 @@ import { computed, ref } from 'vue'
 import { useEngineCapabilitiesStore } from './engine_capabilities'
 import { useModelTabsStore } from './model_tabs'
 
-export type BootstrapStatus = 'idle' | 'loading' | 'ready' | 'fatal'
+export type BootstrapCriticalStatus = 'idle' | 'loading' | 'ready' | 'fatal'
+export type BootstrapDeferredStatus = 'idle' | 'loading' | 'ready' | 'error'
 
 function normalizeErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message || error.name || 'Unknown error'
@@ -29,15 +31,31 @@ function normalizeErrorMessage(error: unknown): string {
 }
 
 export const useBootstrapStore = defineStore('bootstrap', () => {
-  const status = ref<BootstrapStatus>('idle')
+  const criticalStatus = ref<BootstrapCriticalStatus>('idle')
+  const deferredStatus = ref<BootstrapDeferredStatus>('idle')
   const fatalContext = ref<string>('')
   const fatalMessage = ref<string>('')
-  let bootstrapPromise: Promise<void> | null = null
+  const deferredContext = ref<string>('')
+  const deferredMessage = ref<string>('')
+  let criticalBootstrapPromise: Promise<void> | null = null
+  let deferredBootstrapPromise: Promise<void> | null = null
   let globalHandlersInstalled = false
 
-  const isReady = computed(() => status.value === 'ready')
-  const isLoading = computed(() => status.value === 'loading')
-  const isFatal = computed(() => status.value === 'fatal')
+  const isReady = computed(() => criticalStatus.value === 'ready')
+  const isLoading = computed(() => criticalStatus.value === 'loading')
+  const isFatal = computed(() => criticalStatus.value === 'fatal')
+  const isDeferredLoading = computed(() => deferredStatus.value === 'loading')
+  const hasDeferredError = computed(() => deferredStatus.value === 'error')
+
+  function clearFatalState(): void {
+    fatalContext.value = ''
+    fatalMessage.value = ''
+  }
+
+  function clearDeferredState(): void {
+    deferredContext.value = ''
+    deferredMessage.value = ''
+  }
 
   function reportFatal(error: unknown, context: string): void {
     const message = normalizeErrorMessage(error)
@@ -48,7 +66,7 @@ export const useBootstrapStore = defineStore('bootstrap', () => {
     console.error('[bootstrap] fatal error', { context, error })
     fatalContext.value = String(context || 'Fatal error')
     fatalMessage.value = message
-    status.value = 'fatal'
+    criticalStatus.value = 'fatal'
   }
 
   async function runRequired<T>(context: string, fn: () => Promise<T>): Promise<T> {
@@ -60,38 +78,79 @@ export const useBootstrapStore = defineStore('bootstrap', () => {
     }
   }
 
-  async function start(opts: { force?: boolean } = {}): Promise<void> {
+  async function startDeferred(opts: { force?: boolean } = {}): Promise<void> {
     const force = Boolean(opts.force)
-    if (!force && isReady.value) return
-    if (bootstrapPromise) return bootstrapPromise
+    if (criticalStatus.value !== 'ready') return
+    if (!force && deferredStatus.value === 'ready') return
+    if (deferredBootstrapPromise) return deferredBootstrapPromise
 
-    if (force || status.value === 'fatal') {
-      fatalContext.value = ''
-      fatalMessage.value = ''
+    if (force || deferredStatus.value === 'error') {
+      clearDeferredState()
     }
-    status.value = 'loading'
+    deferredStatus.value = 'loading'
 
-    const engineCaps = useEngineCapabilitiesStore()
     const tabsStore = useModelTabsStore()
-    bootstrapPromise = (async () => {
-      await runRequired('Failed to load engine capabilities', async () => {
-        await engineCaps.init({ force })
-      })
-      await runRequired('Failed to load model tabs', async () => {
+    deferredBootstrapPromise = (async () => {
+      try {
         await tabsStore.load()
-      })
-      status.value = 'ready'
+        deferredStatus.value = 'ready'
+      } catch (error: unknown) {
+        deferredContext.value = 'Failed to load model tabs'
+        deferredMessage.value = normalizeErrorMessage(error)
+        deferredStatus.value = 'error'
+        console.error('[bootstrap] deferred startup failed', {
+          context: deferredContext.value,
+          error,
+        })
+      }
     })()
 
     try {
-      await bootstrapPromise
+      await deferredBootstrapPromise
     } finally {
-      bootstrapPromise = null
+      deferredBootstrapPromise = null
+    }
+  }
+
+  async function start(opts: { force?: boolean } = {}): Promise<void> {
+    const force = Boolean(opts.force)
+    if (!force && isReady.value) {
+      void startDeferred()
+      return
+    }
+    if (criticalBootstrapPromise) return criticalBootstrapPromise
+
+    if (force || criticalStatus.value === 'fatal') {
+      clearFatalState()
+    }
+    if (force) {
+      clearDeferredState()
+      deferredStatus.value = 'idle'
+    }
+    criticalStatus.value = 'loading'
+
+    const engineCaps = useEngineCapabilitiesStore()
+    criticalBootstrapPromise = (async () => {
+      await runRequired('Failed to load engine capabilities', async () => {
+        await engineCaps.init({ force })
+      })
+      criticalStatus.value = 'ready'
+      void startDeferred({ force })
+    })()
+
+    try {
+      await criticalBootstrapPromise
+    } finally {
+      criticalBootstrapPromise = null
     }
   }
 
   async function retry(): Promise<void> {
     await start({ force: true })
+  }
+
+  async function retryDeferred(): Promise<void> {
+    await startDeferred({ force: true })
   }
 
   function installGlobalErrorHandlers(): void {
@@ -109,14 +168,21 @@ export const useBootstrapStore = defineStore('bootstrap', () => {
   }
 
   return {
-    status,
+    criticalStatus,
+    deferredStatus,
     fatalContext,
     fatalMessage,
+    deferredContext,
+    deferredMessage,
     isReady,
     isLoading,
     isFatal,
+    isDeferredLoading,
+    hasDeferredError,
     start,
+    startDeferred,
     retry,
+    retryDeferred,
     reportFatal,
     runRequired,
     installGlobalErrorHandlers,

@@ -10,7 +10,9 @@ Purpose: SafeTensors source helpers for the GGUF converter (single-file and shar
 Supports opening `.safetensors` files, `*.safetensors.index.json` sharded indexes, and directories containing either layout.
 
 Symbols (top-level; keep in sync; no ghosts):
+- `ResolvedSafetensorsSource` (dataclass): Concrete safetensors source layout selected from a file/dir/index path.
 - `resolve_config_json_path` (function): Resolve a config path (file/dir/HF layout) to a concrete `config.json` path.
+- `resolve_safetensors_source` (function): Resolve a safetensors source path into a concrete single-file or sharded layout.
 - `open_safetensors_source` (function): Context manager that opens a safetensors source (single or sharded) for reading.
 """
 
@@ -20,7 +22,7 @@ import contextlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 from safetensors import safe_open
 
@@ -38,6 +40,26 @@ def resolve_config_json_path(config_path: str) -> Path:
 class _ShardedSafetensorsIndex:
     index_path: Path
     tensor_to_shard: dict[str, Path]
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedSafetensorsSource:
+    """Concrete safetensors source layout selected from a file/dir/index path."""
+
+    path: Path
+    single_file_path: Path | None
+    index_path: Path | None
+    tensor_to_shard: Mapping[str, Path]
+
+    @property
+    def is_sharded(self) -> bool:
+        return self.index_path is not None
+
+    @property
+    def data_files(self) -> tuple[Path, ...]:
+        if self.single_file_path is not None:
+            return (self.single_file_path,)
+        return tuple(sorted(set(self.tensor_to_shard.values()), key=lambda shard: str(shard)))
 
 
 def _load_sharded_safetensors_index(index_path: Path) -> _ShardedSafetensorsIndex:
@@ -86,6 +108,61 @@ def _pick_safetensors_index_path(weights_dir: Path) -> Path | None:
     raise ValueError(
         f"Multiple safetensors index files found under {weights_dir}: {names}{more}. "
         "Pass the desired '*.safetensors.index.json' path explicitly."
+    )
+
+
+def resolve_safetensors_source(path: str) -> ResolvedSafetensorsSource:
+    """Resolve a user-provided safetensors path into a concrete single-file or sharded source layout."""
+
+    p = Path(path).expanduser()
+    if p.is_dir():
+        index_path = _pick_safetensors_index_path(p)
+        if index_path is not None:
+            index = _load_sharded_safetensors_index(index_path)
+            return ResolvedSafetensorsSource(
+                path=index.index_path,
+                single_file_path=None,
+                index_path=index.index_path,
+                tensor_to_shard=dict(index.tensor_to_shard),
+            )
+
+        candidates = sorted(p.glob("*.safetensors"))
+        if len(candidates) == 1:
+            return ResolvedSafetensorsSource(
+                path=candidates[0].resolve(),
+                single_file_path=candidates[0].resolve(),
+                index_path=None,
+                tensor_to_shard={},
+            )
+        if not candidates:
+            raise FileNotFoundError(f"No .safetensors files found under: {p}")
+        names = ", ".join(c.name for c in candidates[:6])
+        more = "" if len(candidates) <= 6 else f" (+{len(candidates) - 6} more)"
+        raise ValueError(
+            f"Multiple .safetensors files found under {p}: {names}{more}. "
+            "Pass a single file path or the '*.safetensors.index.json' path explicitly."
+        )
+
+    # Explicit index file path.
+    if p.is_file() and p.name.endswith(".safetensors.index.json"):
+        index = _load_sharded_safetensors_index(p)
+        return ResolvedSafetensorsSource(
+            path=index.index_path,
+            single_file_path=None,
+            index_path=index.index_path,
+            tensor_to_shard=dict(index.tensor_to_shard),
+        )
+
+    if p.suffix.lower() != ".safetensors":
+        raise ValueError(f"Expected a .safetensors file, '*.safetensors.index.json', or directory, got: {p}")
+    if not p.is_file():
+        raise FileNotFoundError(f"Safetensors file not found: {p}")
+    resolved = p.resolve()
+    return ResolvedSafetensorsSource(
+        path=resolved,
+        single_file_path=resolved,
+        index_path=None,
+        tensor_to_shard={},
     )
 
 
@@ -138,46 +215,23 @@ def open_safetensors_source(path: str) -> Iterator[Any]:
     - or a directory containing either a single `.safetensors` or an index file.
     """
 
-    p = Path(path).expanduser()
-    if p.is_dir():
-        index_path = _pick_safetensors_index_path(p)
-        if index_path is not None:
-            index = _load_sharded_safetensors_index(index_path)
-            with _ShardedSafetensors(index) as source:
-                yield source
-            return
-
-        candidates = sorted(p.glob("*.safetensors"))
-        if len(candidates) == 1:
-            with safe_open(str(candidates[0]), framework="pt", device="cpu") as source:
-                yield source
-            return
-        if not candidates:
-            raise FileNotFoundError(f"No .safetensors files found under: {p}")
-        names = ", ".join(c.name for c in candidates[:6])
-        more = "" if len(candidates) <= 6 else f" (+{len(candidates) - 6} more)"
-        raise ValueError(
-            f"Multiple .safetensors files found under {p}: {names}{more}. "
-            "Pass a single file path or the '*.safetensors.index.json' path explicitly."
-        )
-
-    # Explicit index file path.
-    if p.is_file() and p.name.endswith(".safetensors.index.json"):
-        index = _load_sharded_safetensors_index(p)
-        with _ShardedSafetensors(index) as source:
+    resolved = resolve_safetensors_source(path)
+    if resolved.single_file_path is not None:
+        with safe_open(str(resolved.single_file_path), framework="pt", device="cpu") as source:
             yield source
         return
 
-    if p.suffix.lower() != ".safetensors":
-        raise ValueError(f"Expected a .safetensors file/dir/index.json, got: {p}")
-    if not p.is_file():
-        raise FileNotFoundError(f"Safetensors file not found: {p}")
-    with safe_open(str(p), framework="pt", device="cpu") as source:
+    index = _ShardedSafetensorsIndex(
+        index_path=resolved.index_path if resolved.index_path is not None else resolved.path,
+        tensor_to_shard=dict(resolved.tensor_to_shard),
+    )
+    with _ShardedSafetensors(index) as source:
         yield source
 
 
 __all__ = [
+    "ResolvedSafetensorsSource",
     "open_safetensors_source",
     "resolve_config_json_path",
+    "resolve_safetensors_source",
 ]
-

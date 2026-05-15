@@ -8,27 +8,48 @@ Required Notice: see NOTICE
 
 Purpose: Model Tabs store (tab definitions + per-tab params + ordering) for the WebUI.
 Owns the list of engine tabs, persists tab CRUD/reorder via `/api/ui/tabs`, normalizes/validates tab payloads from the backend, and provides
-default parameter shapes per tab type (image vs WAN video) using engine defaults and form-state schemas. Hires upscaler values are stable ids
+default parameter shapes per tab type (image vs WAN/LTX video) using engine defaults and form-state schemas. Image-tab second-pass model state lives
+under typed `swapModel` owners (global `swapModel`, hires `hires.swapModel`), native SDXL img2img/inpaint SUPIR state lives under the single nested
+owner `supir`, and stale legacy `hires.checkpoint` / refiner-embedded `vae` snapshot
+fields plus selector-only top-level `swapModel` snapshots are dropped during hydration instead of being preserved as rename glue. Hires upscaler values are stable ids
 (`latent:*` / `spandrel:*`) for hires-fix wiring, and img2img UI keeps an explicit resize/upscaler layout state (`img2imgResizeMode`,
-`img2imgUpscaler`) decoupled from backend hires dispatch. WAN video normalization persists no-stretch img2vid guide controls
-(`img2vidImageScale`, `img2vidCropOffsetX`, `img2vidCropOffsetY`) with range normalization.
+`img2imgUpscaler`) decoupled from backend hires dispatch. Image automation, SUPIR mode, and IP-Adapter UI state now stay under canonical owners
+(`runAction`, `initSource`, `supir`, `ipAdapter`) instead of drifting into flat helper fields. The nested `supir` owner now also carries the public restore
+window control (`restoreCfgSTmin`) as normalized UI state. WAN 2.2 tab state is now split by exact lane: `wan22_14b` keeps the high/low two-stage
+owners with sampler/scheduler backfill, while `wan22_5b` owns a single-stage `stage` selector plus top-level prompt/sampler/seed fields and the
+shared no-stretch img2vid guide controls (`img2vidImageScale`, `img2vidCropOffsetX`, `img2vidCropOffsetY`). FLUX.2 tabs keep the truthful Klein 4B / base-4B slice contract by capping `textEncoders` to one
+`flux2/*` Qwen selector without overriding shared img2img denoise state. LTX normalization treats `mode` as the canonical owner of txt2vid/img2vid,
+persists explicit `executionProfile` state, and leaves stale/blank profile values visible until the active checkpoint metadata or user choice resolves
+them truthfully without silently rewriting stored raw profile ids.
+Image-tab sampler/scheduler defaults are consumed only from backend capabilities; when those defaults are unavailable the store leaves fields blank for request-boundary validation instead of inventing frontend fallback values.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `BaseTabType` (type): API tab type discriminator (from backend `ApiTab['type']`).
-- `ImageTabType` (type): Image-only tab type discriminator (`BaseTabType` without `wan`).
+- `ImageTabType` (type): Image-only tab type discriminator (`BaseTabType` without video tab types).
 - `BaseTabMeta` (interface): Tab metadata timestamps (created/updated) tracked client-side.
 - `ModelTabsErrorCode` (type): Error code taxonomy for model-tabs store failures.
 - `ModelTabsStoreError` (class): Typed store error thrown for tab lookup/API/contract/reorder/serialization failures.
 - `WanStageLoraParams` (interface): UI WAN stage LoRA entry (`sha` + optional `weight`) for ordered stage `loras[]` payload wiring.
-- `WanStageParams` (interface): UI WAN stage params (high/low), including stage prompt/negative prompt, ordered `loras[]`, and optional explicit `flowShift`, used by video tabs and payload builders.
+- `WanStageParams` (interface): UI WAN stage params (high/low), including sampler/scheduler, stage prompt/negative prompt, ordered `loras[]`, and optional explicit `flowShift`, used by video tabs and payload builders.
 - `WanImg2VidMode` (type): WAN img2vid temporal mode discriminator (`solo|sliding|svi2|svi2_pro`).
 - `WanChunkSeedMode` (type): WAN sliding/SVI per-window seed strategy (`fixed|increment|random`).
 - `WanVideoParams` (interface): UI WAN video params (dims/fps/frames + optional init image + img2vid temporal controls + no-stretch guide controls (`img2vidImageScale` + crop offsets) + output/interpolation + SeedVR2 upscaling controls).
 - `WanAssetsParams` (interface): WAN asset selectors (metadata/text encoder/VAE) used by WAN requests.
+- `LtxGenerationMode` (type): LTX video mode discriminator (`txt2vid|img2vid`).
+- `LtxTabParams` (interface): UI LTX video params, including checkpoint-owned `executionProfile` state plus prompt/init-image/video controls.
 - `BaseTab` (interface): Generic tab record persisted in the store (id/type/label + params + meta).
-- `ImageBaseParams` (interface): Common image-tab params (prompt, seed, steps, CFG, dims, etc.) shared across SD/Flux.1/Chroma/ZImage
+- `ImageBaseParams` (interface): Common image-tab params (prompt, seed, steps, CFG, dims, etc.) shared across SD/Flux.1/Flux.2/Chroma/ZImage
   (includes optional family-specific fields like `zimageTurbo`, img2img layout state `img2imgResizeMode`/`img2imgUpscaler`,
-  inpaint mask controls (`maskRegionSplit` and related toggles), and advanced guidance policy controls).
+  inpaint mask controls (`maskRegionSplit` and related toggles), image automation owners (`runAction`, `initSource`, `supir`, `ipAdapter`), and advanced guidance policy controls).
+- `ImageRunAction` (type): Run CTA mode discriminator (`generate|infinite`) persisted per image tab.
+- `ImageFolderSelectionMode` (type): Folder traversal amount discriminator (`all|count`) used by init/IP-Adapter directory sources.
+- `ImageFolderOrderMode` (type): Folder traversal order discriminator (`random|sorted`) used by init/IP-Adapter directory sources.
+- `ImageFolderSortBy` (type): Sort key discriminator for ordered directory traversal (`name|size|created_at|modified_at`).
+- `InitSourceFormState` (interface): Img2img initial-image source owner (`img|dir` plus directory traversal settings and crop toggle).
+- `SupirModeFormState` (interface): Native SDXL img2img/inpaint SUPIR owner (`enabled`, variant/sampler selectors, and tranche-1 restore controls).
+- `createDefaultSupirModeFormState` (function): Canonical default factory for the nested SUPIR owner state.
+- `IpAdapterSourceFormState` (interface): IP-Adapter source owner (`img|dir`, uploaded reference image, same-as-init shortcut, and directory traversal settings).
+- `IpAdapterFormState` (interface): IP-Adapter card state owner (enable flag, asset selectors, source owner, and strength range controls).
 - `GuidanceAdvancedParams` (interface): Per-tab advanced guidance policy state (APG/rescale/trunc/renorm).
 - `DEFAULT_GUIDANCE_ADVANCED_PARAMS` (constant): Canonical defaults for `ImageBaseParams.guidanceAdvanced`.
 - `TabParamsByType` (type): Canonical params map by tab type.
@@ -42,7 +63,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `defaultImageParamsForType` (function): Returns canonical image-tab defaults for a specific image tab type.
 - `normalizeTabType` (function): Validates/coerces raw type values into `BaseTabType`.
 - `BASE_REQUIRED_TYPES` (const): Baseline tab types always auto-created by the UI store.
-- `requiredTypesFromCapabilities` (function): Derives required tab types from backend capability map (adds `anima` only when exposed).
+- `requiredTypesFromCapabilities` (function): Derives required tab types from backend capability map (adds capability-exposed `ltx2`/`anima` tabs).
 - `asRecordObject` (function): Narrowing helper that normalizes unknown values into plain records for merge-safe processing.
 - `isPlainRecord` (function): Validates object values as plain record payloads (no arrays/class instances) for patch serialization safety.
 - `PersistSerializationPhase` (type): Serialization boundary phases used by params persistence snapshots and rollback.
@@ -51,10 +72,19 @@ Symbols (top-level; keep in sync; no ghosts):
 - `asParamsRecord` (function): Explicit boundary cast helper from typed tab params to persisted `Record<string, unknown>`.
 - `normalizeWanFrameCount` (function): Clamps/snap-normalizes WAN frame counts to the `4n+1` domain.
 - `normalizeWanVideoParams` (function): Sanitizes WAN video nested params (frames/window/attention controls) with `img2vidMode` as source of truth.
-- `normalizeWanParams` (function): Applies WAN-specific nested merge normalization for `high/low/video/assets` params.
-- `normalizeImageParams` (function): Applies image-tab nested merge normalization (`hires/refiner`) with sampler/scheduler and mask-enforcement fallback.
+- `normalizeWan14bParams` (function): Applies exact WAN 14B nested merge normalization for `high/low/video/assets`, enforcing canonical stage scheduler `simple`.
+- `normalizeWan5bParams` (function): Applies exact WAN 5B single-stage normalization for `stage/video/assets` plus top-level prompt/sampler/seed owners.
+- `shouldPersistWan14bStageSamplingBackfill` (function): Detects persisted WAN 14B params requiring High/Low stage sampler/scheduler migration (`sampler='uni-pc bh2'`, `scheduler='simple'`).
+- `buildImageTopLevelBackfillPatch` (function): Builds a missing-top-level-only image-tab backfill patch from the normalized owner shape so hydration can persist absent canonical keys without widening into unrelated nested drift.
+- `normalizeImageParams` (function): Applies image-tab nested merge normalization (`hires/refiner`) with sampler/scheduler and strict inpaint-mode reset.
 - `normalizeParamsForType` (function): Normalizes raw params payload based on tab type (shape checking; discards invalid fields).
 - `normalizeTab` (function): Normalizes a raw tab record (id/type/params/meta) into the store shape.
+- `syncImageSparsePersistHints` (function): Syncs sparse image-owner missing-key hints from normalized in-memory params.
+- `snapshotImageSparsePersistHints` (function): Captures sparse image-owner missing-key hints before a queued persist mutates them.
+- `restoreImageSparsePersistHints` (function): Restores sparse image-owner missing-key hints during rollback.
+- `markExplicitImagePersistKeys` (function): Marks image-owner keys explicitly touched by one local patch so sparse pruning does not erase them.
+- `pruneSparseImagePersistDefaults` (function): Removes server-missing sparse image-owner defaults from one persisted payload unless explicitly touched.
+- `applyPersistedImageSparsePersistHints` (function): Advances sparse image-owner missing-key hints only for the exact keys that just persisted successfully.
 - `cloneParamsForPersist` (function): Proxy-safe `structuredClone` boundary for params snapshots/payloads; throws typed serialization failures.
 - `restorePendingParamsSnapshot` (function): Restores tab params/meta from pending snapshot after failed persistence attempts.
 - `scheduleParamsPersist` (function): Schedules debounced `/api/ui/tabs/:id` params PATCH calls.
@@ -66,12 +96,12 @@ import { defineStore } from 'pinia'
 import { ref, computed, toRaw } from 'vue'
 import { fetchTabs, createTabApi, updateTabApi, reorderTabsApi, deleteTabApi } from '../api/client'
 import type { ApiTab } from '../api/types'
-import type { HiresFormState, RefinerFormState } from '../api/payloads'
+import type { HiresFormState, RefinerFormState, SwapModelFormState, SwapStageFormState } from '../api/payloads'
 import { type EngineType, getEngineConfig, getEngineDefaults } from './engine_config'
 import { useEngineCapabilitiesStore } from './engine_capabilities'
-import { fallbackSamplingDefaultsForTabFamily, normalizeTabFamily, type TabFamily } from '../utils/engine_taxonomy'
+import { isWanTabFamily, normalizeTabFamily, resolveImageRequestEngineId } from '../utils/engine_taxonomy'
 import { DEFAULT_IMG2IMG_RESIZE_MODE, normalizeImg2ImgResizeMode, type Img2ImgResizeMode } from '../utils/img2img_resize'
-import { normalizeMaskEnforcement } from '../utils/image_params'
+import { parseInpaintMode } from '../utils/image_params'
 import {
   normalizeWanChunkOverlap,
   normalizeWanWindowCommit,
@@ -81,7 +111,10 @@ import {
 import { normalizeWanImg2VidImageScale } from '../utils/wan_img2vid_frame_projection'
 
 export type BaseTabType = ApiTab['type']
-export type ImageTabType = Exclude<BaseTabType, 'wan'>
+export type ImageTabType = Exclude<BaseTabType, 'wan22_14b' | 'wan22_5b' | 'ltx2'>
+export type WanTabType = Extract<BaseTabType, 'wan22_14b' | 'wan22_5b'>
+export type Wan14bTabType = Extract<BaseTabType, 'wan22_14b'>
+export type Wan5bTabType = Extract<BaseTabType, 'wan22_5b'>
 
 export interface BaseTabMeta {
   createdAt: string
@@ -186,6 +219,59 @@ export interface WanAssetsParams {
   vae: string
 }
 
+export type LtxGenerationMode = 'txt2vid' | 'img2vid'
+
+export interface LtxTabParams {
+  schemaVersion: number
+  mode: LtxGenerationMode
+  prompt: string
+  negativePrompt: string
+  width: number
+  height: number
+  fps: number
+  frames: number
+  steps: number
+  cfgScale: number
+  executionProfile: string
+  seed: number
+  checkpoint: string
+  vae: string
+  textEncoder: string
+  initImageData: string
+  initImageName: string
+  videoReturnFrames: boolean
+}
+
+export type Wan14bTabParams = Record<string, unknown> & {
+  schemaVersion: number
+  high: WanStageParams
+  low: WanStageParams
+  video: WanVideoParams
+  assets: WanAssetsParams
+  lightx2v: boolean
+  lowFollowsHigh: boolean
+}
+
+export type Wan5bStageParams = Record<string, unknown> & {
+  modelDir: string
+  loras: WanStageLoraParams[]
+  flowShift?: number
+}
+
+export type Wan5bTabParams = Record<string, unknown> & {
+  schemaVersion: number
+  prompt: string
+  negativePrompt: string
+  stage: Wan5bStageParams
+  video: WanVideoParams
+  assets: WanAssetsParams
+  sampler: string
+  scheduler: string
+  steps: number
+  cfgScale: number
+  seed: number
+}
+
 export interface BaseTab {
   id: string
   type: BaseTabType
@@ -197,6 +283,7 @@ export interface BaseTab {
 }
 
 export interface ImageBaseParams {
+  schemaVersion: number
   prompt: string
   negativePrompt: string
   width: number
@@ -209,28 +296,97 @@ export interface ImageBaseParams {
   clipSkip: number
   batchSize: number
   batchCount: number
+  runAction: ImageRunAction
   img2imgResizeMode: Img2ImgResizeMode
   img2imgUpscaler: string
   guidanceAdvanced: GuidanceAdvancedParams
   hires: HiresFormState
+  swapModel: SwapStageFormState
   refiner: RefinerFormState
   checkpoint: string
   textEncoders: string[]
   useInitImage: boolean
+  initSource: InitSourceFormState
   initImageData: string
   initImageName: string
   denoiseStrength: number
   useMask: boolean
   maskImageData: string
   maskImageName: string
-  maskEnforcement: 'post_blend' | 'per_step_clamp'
+  inpaintMode: 'per_step_blend' | 'post_sample_blend' | 'fooocus_inpaint' | 'brushnet'
+  perStepBlendStrength: number
+  perStepBlendSteps: number
   inpaintFullResPadding: number
   inpaintingFill: number
   maskInvert: boolean
   maskBlur: number
   maskRound: boolean
   maskRegionSplit: boolean
+  supir: SupirModeFormState
+  ipAdapter: IpAdapterFormState
   zimageTurbo?: boolean
+}
+
+export type ImageRunAction = 'generate' | 'infinite'
+export type ImageFolderSelectionMode = 'all' | 'count'
+export type ImageFolderOrderMode = 'random' | 'sorted'
+export type ImageFolderSortBy = 'name' | 'size' | 'created_at' | 'modified_at'
+
+export interface InitSourceFormState {
+  mode: 'img' | 'dir'
+  folderPath: string
+  selectionMode: ImageFolderSelectionMode
+  count: number
+  order: ImageFolderOrderMode
+  sortBy: ImageFolderSortBy
+  useCrop: boolean
+}
+
+export type SupirVariant = 'v0F' | 'v0Q'
+export type SupirColorFixMode = 'None' | 'AdaIN' | 'Wavelet'
+
+export interface SupirModeFormState {
+  enabled: boolean
+  variant: SupirVariant
+  sampler: string
+  controlScale: number
+  restorationScale: number
+  restoreCfgSTmin: number
+  colorFix: SupirColorFixMode
+}
+
+export function createDefaultSupirModeFormState(): SupirModeFormState {
+  return {
+    enabled: false,
+    variant: 'v0Q',
+    sampler: 'restore_euler_edm_stable',
+    controlScale: 0.8,
+    restorationScale: 4,
+    restoreCfgSTmin: 0.05,
+    colorFix: 'None',
+  }
+}
+
+export interface IpAdapterSourceFormState {
+  mode: 'img' | 'dir'
+  sameAsInit: boolean
+  referenceImageData: string
+  referenceImageName: string
+  folderPath: string
+  selectionMode: ImageFolderSelectionMode
+  count: number
+  order: ImageFolderOrderMode
+  sortBy: ImageFolderSortBy
+}
+
+export interface IpAdapterFormState {
+  enabled: boolean
+  model: string
+  imageEncoder: string
+  source: IpAdapterSourceFormState
+  weight: number
+  startAt: number
+  endAt: number
 }
 
 export interface GuidanceAdvancedParams {
@@ -265,17 +421,13 @@ export type TabParamsByType = {
   sd15: ImageBaseParams
   sdxl: ImageBaseParams
   flux1: ImageBaseParams
+  flux2: ImageBaseParams
   zimage: ImageBaseParams
   chroma: ImageBaseParams
   anima: ImageBaseParams
-  wan: {
-    high: WanStageParams
-    low: WanStageParams
-    video: WanVideoParams
-    assets: WanAssetsParams
-    lightx2v: boolean
-    lowFollowsHigh: boolean
-  }
+  ltx2: LtxTabParams
+  wan22_14b: Wan14bTabParams
+  wan22_5b: Wan5bTabParams
 }
 
 export type TabByType<T extends BaseTabType = BaseTabType> = Omit<BaseTab, 'type' | 'params'> & {
@@ -292,6 +444,103 @@ type ModelTabsStorageState = {
 
 export const MODEL_TABS_STORAGE_KEY = 'codex:model-tabs:v2'
 const STORAGE_KEY = MODEL_TABS_STORAGE_KEY
+const TAB_PARAMS_SCHEMA_VERSION = 4
+
+const IMAGE_PARAM_TOP_LEVEL_KEYS = new Set<string>([
+  'schemaVersion',
+  'prompt',
+  'negativePrompt',
+  'width',
+  'height',
+  'sampler',
+  'scheduler',
+  'steps',
+  'cfgScale',
+  'seed',
+  'clipSkip',
+  'batchSize',
+  'batchCount',
+  'runAction',
+  'img2imgResizeMode',
+  'img2imgUpscaler',
+  'guidanceAdvanced',
+  'hires',
+  'swapModel',
+  'refiner',
+  'checkpoint',
+  'textEncoders',
+  'useInitImage',
+  'initSource',
+  'initImageData',
+  'initImageName',
+  'denoiseStrength',
+  'useMask',
+  'maskImageData',
+  'maskImageName',
+  'inpaintMode',
+  'perStepBlendStrength',
+  'perStepBlendSteps',
+  'inpaintFullResPadding',
+  'inpaintingFill',
+  'maskInvert',
+  'maskBlur',
+  'maskRound',
+  'maskRegionSplit',
+  'supir',
+  'ipAdapter',
+  'zimageTurbo',
+])
+const IMAGE_PARAM_NO_AUTOBACKFILL_KEYS = new Set<string>([
+  'inpaintMode',
+])
+const IMAGE_PARAM_SPARSE_PERSIST_DEFAULT_KEYS = new Set<string>([
+  'inpaintMode',
+])
+
+const WAN14B_PARAM_TOP_LEVEL_KEYS = new Set<string>([
+  'schemaVersion',
+  'high',
+  'low',
+  'video',
+  'assets',
+  'lightx2v',
+  'lowFollowsHigh',
+])
+
+const WAN5B_PARAM_TOP_LEVEL_KEYS = new Set<string>([
+  'schemaVersion',
+  'prompt',
+  'negativePrompt',
+  'stage',
+  'video',
+  'assets',
+  'sampler',
+  'scheduler',
+  'steps',
+  'cfgScale',
+  'seed',
+])
+
+const LTX_PARAM_TOP_LEVEL_KEYS = new Set<string>([
+  'schemaVersion',
+  'mode',
+  'prompt',
+  'negativePrompt',
+  'width',
+  'height',
+  'fps',
+  'frames',
+  'steps',
+  'cfgScale',
+  'executionProfile',
+  'seed',
+  'checkpoint',
+  'vae',
+  'textEncoder',
+  'initImageData',
+  'initImageName',
+  'videoReturnFrames',
+])
 
 function buildStoragePayload(tabList: BaseTab[], currentActiveId: string): ModelTabsStorageState {
   const tabRefs: ModelTabsStorageTabRef[] = tabList.map((tab) => ({
@@ -330,14 +579,13 @@ function defaultParams<T extends BaseTabType>(
   type: T,
   opts?: { sampler?: string; scheduler?: string },
 ): TabParamsByType[T] {
-  // Video tabs (WAN)
-  if (type === 'wan') {
+  if (type === 'wan22_14b' || type === 'wan22_5b') {
     const stage = (): WanStageParams => ({
       modelDir: '',
       prompt: '',
       negativePrompt: '',
-      sampler: '',
-      scheduler: '',
+      sampler: 'uni-pc bh2',
+      scheduler: 'simple',
       steps: 30,
       cfgScale: 7,
       seed: -1,
@@ -384,31 +632,88 @@ function defaultParams<T extends BaseTabType>(
       upscalingLatentNoiseScale: 0,
     }
     const assets: WanAssetsParams = { metadata: '', textEncoder: '', vae: '' }
-    const wanDefaults: TabParamsByType['wan'] = {
-      high: stage(),
-      low: stage(),
+    if (type === 'wan22_14b') {
+      const wanDefaults: Wan14bTabParams = {
+        schemaVersion: TAB_PARAMS_SCHEMA_VERSION,
+        high: stage(),
+        low: stage(),
+        video,
+        assets,
+        lightx2v: false,
+        lowFollowsHigh: false,
+      }
+      return wanDefaults as TabParamsByType[T]
+    }
+    const wan5bDefaults: Wan5bTabParams = {
+      schemaVersion: TAB_PARAMS_SCHEMA_VERSION,
+      prompt: '',
+      negativePrompt: '',
+      stage: {
+        modelDir: '',
+        loras: [],
+      },
       video,
       assets,
-      lightx2v: false,
-      lowFollowsHigh: false,
+      sampler: 'uni-pc bh2',
+      scheduler: 'simple',
+      steps: 30,
+      cfgScale: 7,
+      seed: -1,
     }
-    return wanDefaults as TabParamsByType[T]
+    return wan5bDefaults as TabParamsByType[T]
   }
 
-  // Image tabs (SD15, SDXL, FLUX.1)
+  if (type === 'ltx2') {
+    const capsStore = useEngineCapabilitiesStore()
+    const ltxExecutionSurface = capsStore.getLtxExecutionSurface('ltx2')
+    const defaultProfile = String(ltxExecutionSurface?.default_execution_profile || '').trim()
+    const defaultSteps = defaultProfile
+      ? ltxExecutionSurface?.default_steps_by_profile[defaultProfile] ?? 30
+      : 30
+    const defaultGuidance = defaultProfile
+      ? ltxExecutionSurface?.default_guidance_scale_by_profile[defaultProfile] ?? 4
+      : 4
+    const ltxDefaults: TabParamsByType['ltx2'] = {
+      schemaVersion: TAB_PARAMS_SCHEMA_VERSION,
+      mode: 'txt2vid',
+      prompt: '',
+      negativePrompt: '',
+      width: 768,
+      height: 512,
+      fps: 24,
+      frames: 121,
+      steps: defaultSteps,
+      cfgScale: defaultGuidance,
+      executionProfile: '',
+      seed: -1,
+      checkpoint: '',
+      vae: '',
+      textEncoder: '',
+      initImageData: '',
+      initImageName: '',
+      videoReturnFrames: false,
+    }
+    return ltxDefaults as TabParamsByType[T]
+  }
+
   const config = getEngineConfig(type as EngineType)
   const defaults = getEngineDefaults(type as EngineType)
-  const guidance = config.capabilities.usesDistilledCfg && defaults.distilledCfg !== undefined ? defaults.distilledCfg : defaults.cfg
-  const samplingDefaults = fallbackSamplingDefaultsForTabFamily(type as TabFamily)
-  const resolvedSampler = String(opts?.sampler || '').trim() || samplingDefaults.sampler
-  const resolvedScheduler = String(opts?.scheduler || '').trim() || samplingDefaults.scheduler
+  const guidance = (!config.capabilities.usesCfg && defaults.distilledCfg !== undefined) ? defaults.distilledCfg : defaults.cfg
+  const resolvedSampler = String(opts?.sampler || '').trim()
+  const resolvedScheduler = String(opts?.scheduler || '').trim()
   const refinerDefaults: RefinerFormState = {
     enabled: false,
     swapAtStep: 1,
     cfg: 3.5,
     seed: -1,
     model: undefined,
-    vae: undefined,
+  }
+  const swapStageDefaults: SwapStageFormState = {
+    enabled: false,
+    swapAtStep: 1,
+    cfg: guidance,
+    seed: -1,
+    model: undefined,
   }
   const hiresDefaults: HiresFormState = {
     enabled: false,
@@ -419,8 +724,7 @@ function defaultParams<T extends BaseTabType>(
     steps: 0,
     upscaler: 'latent:bicubic-aa',
     tile: { tile: 256, overlap: 16 },
-    checkpoint: undefined,
-    modules: [],
+    swapModel: undefined,
     sampler: undefined,
     scheduler: undefined,
     prompt: undefined,
@@ -429,7 +733,38 @@ function defaultParams<T extends BaseTabType>(
     distilledCfg: undefined,
     refiner: { ...refinerDefaults },
   }
+  const initSourceDefaults: InitSourceFormState = {
+    mode: 'img',
+    folderPath: '',
+    selectionMode: 'all',
+    count: 1,
+    order: 'sorted',
+    sortBy: 'name',
+    useCrop: false,
+  }
+  const ipAdapterSourceDefaults: IpAdapterSourceFormState = {
+    mode: 'img',
+    sameAsInit: false,
+    referenceImageData: '',
+    referenceImageName: '',
+    folderPath: '',
+    selectionMode: 'all',
+    count: 1,
+    order: 'sorted',
+    sortBy: 'name',
+  }
+  const ipAdapterDefaults: IpAdapterFormState = {
+    enabled: false,
+    model: '',
+    imageEncoder: '',
+    source: { ...ipAdapterSourceDefaults },
+    weight: 1,
+    startAt: 0,
+    endAt: 1,
+  }
+  const supirDefaults = createDefaultSupirModeFormState()
   const imageDefaults: ImageBaseParams = {
+    schemaVersion: TAB_PARAMS_SCHEMA_VERSION,
     prompt: '',
     negativePrompt: config.capabilities.usesNegativePrompt ? '' : '',
     width: defaults.width,
@@ -442,27 +777,34 @@ function defaultParams<T extends BaseTabType>(
     clipSkip: 0,
     batchSize: 1,
     batchCount: 1,
+    runAction: 'generate',
     img2imgResizeMode: DEFAULT_IMG2IMG_RESIZE_MODE,
     img2imgUpscaler: 'latent:bicubic-aa',
     guidanceAdvanced: { ...DEFAULT_GUIDANCE_ADVANCED_PARAMS },
     hires: { ...hiresDefaults },
+    swapModel: { ...swapStageDefaults },
     refiner: { ...refinerDefaults },
     checkpoint: '',
     textEncoders: [],
     useInitImage: false,
+    initSource: { ...initSourceDefaults },
     initImageData: '',
     initImageName: '',
     denoiseStrength: 0.75,
     useMask: false,
     maskImageData: '',
     maskImageName: '',
-    maskEnforcement: 'per_step_clamp',
+    inpaintMode: 'per_step_blend',
+    perStepBlendStrength: 1,
+    perStepBlendSteps: 0,
     inpaintFullResPadding: 32,
     inpaintingFill: 1,
     maskInvert: false,
     maskBlur: 4,
     maskRound: true,
     maskRegionSplit: true,
+    supir: { ...supirDefaults },
+    ipAdapter: { ...ipAdapterDefaults, source: { ...ipAdapterDefaults.source } },
   }
   if (type === 'zimage') {
     imageDefaults.zimageTurbo = true
@@ -478,8 +820,8 @@ export function defaultImageParamsForType(
   type: BaseTabType,
   opts?: { sampler?: string; scheduler?: string },
 ): ImageBaseParams {
-  if (type === 'wan') {
-    const msg = "defaultImageParamsForType received 'wan'; expected an image tab type."
+  if (isWanTabFamily(type) || type === 'ltx2') {
+    const msg = `defaultImageParamsForType received '${type}'; expected an image tab type.`
     console.error(`[model_tabs] ${msg}`, { type })
     throw new Error(msg)
   }
@@ -513,6 +855,139 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
 function asParamsRecord(params: TabParamsByType[BaseTabType]): Record<string, unknown> {
   return params as unknown as Record<string, unknown>
+}
+
+function normalizePositiveInt(rawValue: unknown, fallback: number): number {
+  const numeric = Number(rawValue)
+  if (!Number.isFinite(numeric)) return Math.max(1, Math.trunc(fallback))
+  return Math.max(1, Math.trunc(numeric))
+}
+
+function normalizeLtxMode(rawValue: unknown, fallback: LtxGenerationMode): LtxGenerationMode {
+  const normalized = String(rawValue || '').trim().toLowerCase()
+  if (normalized === 'txt2vid' || normalized === 'img2vid') return normalized
+  return fallback
+}
+
+function normalizeLtxParams(raw: unknown, defaults: LtxTabParams): LtxTabParams {
+  const patch = asRecordObject(raw)
+  const merged: LtxTabParams = { ...defaults }
+  for (const [key, value] of Object.entries(patch)) {
+    if (!LTX_PARAM_TOP_LEVEL_KEYS.has(key)) continue
+    ;(merged as unknown as Record<string, unknown>)[key] = value
+  }
+  merged.mode = normalizeLtxMode(patch.mode, defaults.mode)
+  merged.prompt = String(merged.prompt || '')
+  merged.negativePrompt = String(merged.negativePrompt || '')
+  merged.width = normalizePositiveInt(merged.width, defaults.width)
+  merged.height = normalizePositiveInt(merged.height, defaults.height)
+  merged.fps = normalizePositiveInt(merged.fps, defaults.fps)
+  merged.frames = normalizePositiveInt(merged.frames, defaults.frames)
+  merged.steps = normalizePositiveInt(merged.steps, defaults.steps)
+  merged.cfgScale = Number.isFinite(Number(merged.cfgScale)) ? Number(merged.cfgScale) : defaults.cfgScale
+  merged.executionProfile = String(merged.executionProfile || '').trim()
+  merged.seed = Number.isFinite(Number(merged.seed)) ? Math.trunc(Number(merged.seed)) : defaults.seed
+  merged.checkpoint = String(merged.checkpoint || '').trim()
+  merged.vae = String(merged.vae || '').trim()
+  merged.textEncoder = String(merged.textEncoder || '').trim()
+  merged.initImageData = String(merged.initImageData || '')
+  merged.initImageName = String(merged.initImageName || '')
+  merged.videoReturnFrames = normalizeBoolean(merged.videoReturnFrames, defaults.videoReturnFrames)
+  merged.schemaVersion = TAB_PARAMS_SCHEMA_VERSION
+  return merged
+}
+
+function parseParamsSchemaVersion(rawValue: unknown): number | null {
+  if (typeof rawValue === 'number' && Number.isFinite(rawValue)) {
+    return Math.max(0, Math.trunc(rawValue))
+  }
+  if (typeof rawValue === 'string') {
+    const trimmed = rawValue.trim()
+    if (/^-?\d+$/.test(trimmed)) return Math.max(0, Math.trunc(Number(trimmed)))
+  }
+  return null
+}
+
+function migrateImageParamsPatch(rawPatch: Record<string, unknown>): {
+  patch: Partial<ImageBaseParams>
+  droppedUnknownKeys: string[]
+  fromVersion: number | null
+} {
+  const patch: Record<string, unknown> = {}
+  const droppedUnknownKeys: string[] = []
+  for (const [key, value] of Object.entries(rawPatch)) {
+    if (!IMAGE_PARAM_TOP_LEVEL_KEYS.has(key)) {
+      droppedUnknownKeys.push(key)
+      continue
+    }
+    patch[key] = value
+  }
+  if (isPlainRecord(patch.swapModel)) {
+    const rawSwapModel = patch.swapModel as Record<string, unknown>
+    const hasSwapStageControlKeys = (
+      Object.prototype.hasOwnProperty.call(rawSwapModel, 'enabled')
+      || Object.prototype.hasOwnProperty.call(rawSwapModel, 'swapAtStep')
+      || Object.prototype.hasOwnProperty.call(rawSwapModel, 'cfg')
+      || Object.prototype.hasOwnProperty.call(rawSwapModel, 'seed')
+    )
+    if (!hasSwapStageControlKeys) {
+      delete patch.swapModel
+      droppedUnknownKeys.push('swapModel')
+    }
+  }
+  const fromVersion = parseParamsSchemaVersion(rawPatch.schemaVersion)
+  patch.schemaVersion = TAB_PARAMS_SCHEMA_VERSION
+  return {
+    patch: patch as Partial<ImageBaseParams>,
+    droppedUnknownKeys,
+    fromVersion,
+  }
+}
+
+function migrateWan14bParamsPatch(rawPatch: Record<string, unknown>): {
+  patch: Partial<Wan14bTabParams>
+  droppedUnknownKeys: string[]
+  fromVersion: number | null
+} {
+  const patch: Record<string, unknown> = {}
+  const droppedUnknownKeys: string[] = []
+  for (const [key, value] of Object.entries(rawPatch)) {
+    if (!WAN14B_PARAM_TOP_LEVEL_KEYS.has(key)) {
+      droppedUnknownKeys.push(key)
+      continue
+    }
+    patch[key] = value
+  }
+  const fromVersion = parseParamsSchemaVersion(rawPatch.schemaVersion)
+  patch.schemaVersion = TAB_PARAMS_SCHEMA_VERSION
+  return {
+    patch: patch as Partial<Wan14bTabParams>,
+    droppedUnknownKeys,
+    fromVersion,
+  }
+}
+
+function migrateWan5bParamsPatch(rawPatch: Record<string, unknown>): {
+  patch: Partial<Wan5bTabParams>
+  droppedUnknownKeys: string[]
+  fromVersion: number | null
+} {
+  const patch: Record<string, unknown> = {}
+  const droppedUnknownKeys: string[] = []
+  for (const [key, value] of Object.entries(rawPatch)) {
+    if (!WAN5B_PARAM_TOP_LEVEL_KEYS.has(key)) {
+      droppedUnknownKeys.push(key)
+      continue
+    }
+    patch[key] = value
+  }
+  const fromVersion = parseParamsSchemaVersion(rawPatch.schemaVersion)
+  patch.schemaVersion = TAB_PARAMS_SCHEMA_VERSION
+  return {
+    patch: patch as Partial<Wan5bTabParams>,
+    droppedUnknownKeys,
+    fromVersion,
+  }
 }
 
 function normalizeWanFrameCount(rawValue: number, min = 9, max = 401): number {
@@ -594,6 +1069,106 @@ function normalizeBoolean(rawValue: unknown, fallback: boolean): boolean {
     if (normalized === '0' || normalized === 'false' || normalized === 'no' || normalized === 'off') return false
   }
   return fallback
+}
+
+function normalizeImageRunAction(rawValue: unknown, fallback: ImageRunAction): ImageRunAction {
+  return rawValue === 'infinite' ? 'infinite' : fallback
+}
+
+function normalizeImageFolderSelectionMode(rawValue: unknown, fallback: ImageFolderSelectionMode): ImageFolderSelectionMode {
+  return rawValue === 'count' ? 'count' : fallback
+}
+
+function normalizeImageFolderOrderMode(rawValue: unknown, fallback: ImageFolderOrderMode): ImageFolderOrderMode {
+  return rawValue === 'random' || rawValue === 'sorted' ? rawValue : fallback
+}
+
+function normalizeImageFolderSortBy(rawValue: unknown, fallback: ImageFolderSortBy): ImageFolderSortBy {
+  return rawValue === 'size' || rawValue === 'created_at' || rawValue === 'modified_at' || rawValue === 'name'
+    ? rawValue
+    : fallback
+}
+
+function normalizeInitSourceFormState(rawValue: unknown, defaults: InitSourceFormState): InitSourceFormState {
+  const patch = asRecordObject(rawValue)
+  return {
+    mode: patch.mode === 'dir' ? 'dir' : defaults.mode,
+    folderPath: String(patch.folderPath || '').trim(),
+    selectionMode: normalizeImageFolderSelectionMode(patch.selectionMode, defaults.selectionMode),
+    count: Math.max(1, Math.trunc(clampFiniteNumber(patch.count, defaults.count, 1))),
+    order: normalizeImageFolderOrderMode(patch.order, defaults.order),
+    sortBy: normalizeImageFolderSortBy(patch.sortBy, defaults.sortBy),
+    useCrop: normalizeBoolean(patch.useCrop, defaults.useCrop),
+  }
+}
+
+function normalizeSupirVariant(rawValue: unknown, fallback: SupirVariant): SupirVariant {
+  return rawValue === 'v0F' || rawValue === 'v0Q' ? rawValue : fallback
+}
+
+function normalizeSupirColorFixMode(rawValue: unknown, fallback: SupirColorFixMode): SupirColorFixMode {
+  return rawValue === 'None' || rawValue === 'AdaIN' || rawValue === 'Wavelet' ? rawValue : fallback
+}
+
+function normalizePositiveSupirNumber(rawValue: unknown, fallback: number, maxValue: number): number {
+  const numeric = Number(rawValue)
+  if (!Number.isFinite(numeric) || numeric <= 0) return fallback
+  return Math.min(maxValue, numeric)
+}
+
+function normalizeNonNegativeSupirNumber(rawValue: unknown, fallback: number, maxValue: number): number {
+  const numeric = Number(rawValue)
+  if (!Number.isFinite(numeric) || numeric < 0) return fallback
+  return Math.min(maxValue, numeric)
+}
+
+export function normalizeSupirSamplerSelection(rawValue: unknown, fallback: string): string {
+  const normalized = String(rawValue || '').trim()
+  if (!normalized) return fallback
+  return normalized
+}
+
+function normalizeSupirModeFormState(rawValue: unknown, defaults: SupirModeFormState): SupirModeFormState {
+  const patch = asRecordObject(rawValue)
+  const sampler = normalizeSupirSamplerSelection(patch.sampler, defaults.sampler)
+  return {
+    enabled: normalizeBoolean(patch.enabled, defaults.enabled),
+    variant: normalizeSupirVariant(patch.variant, defaults.variant),
+    sampler,
+    controlScale: normalizePositiveSupirNumber(patch.controlScale, defaults.controlScale, 2),
+    restorationScale: normalizePositiveSupirNumber(patch.restorationScale, defaults.restorationScale, 6),
+    restoreCfgSTmin: normalizeNonNegativeSupirNumber(patch.restoreCfgSTmin, defaults.restoreCfgSTmin, 5),
+    colorFix: normalizeSupirColorFixMode(patch.colorFix, defaults.colorFix),
+  }
+}
+
+function normalizeIpAdapterSourceFormState(rawValue: unknown, defaults: IpAdapterSourceFormState): IpAdapterSourceFormState {
+  const patch = asRecordObject(rawValue)
+  const mode = patch.mode === 'dir' ? 'dir' : defaults.mode
+  return {
+    mode,
+    sameAsInit: mode === 'img' ? normalizeBoolean(patch.sameAsInit, defaults.sameAsInit) : false,
+    referenceImageData: String(patch.referenceImageData || ''),
+    referenceImageName: String(patch.referenceImageName || '').trim(),
+    folderPath: String(patch.folderPath || '').trim(),
+    selectionMode: normalizeImageFolderSelectionMode(patch.selectionMode, defaults.selectionMode),
+    count: Math.max(1, Math.trunc(clampFiniteNumber(patch.count, defaults.count, 1))),
+    order: normalizeImageFolderOrderMode(patch.order, defaults.order),
+    sortBy: normalizeImageFolderSortBy(patch.sortBy, defaults.sortBy),
+  }
+}
+
+function normalizeIpAdapterFormState(rawValue: unknown, defaults: IpAdapterFormState): IpAdapterFormState {
+  const patch = asRecordObject(rawValue)
+  return {
+    enabled: normalizeBoolean(patch.enabled, defaults.enabled),
+    model: String(patch.model || '').trim(),
+    imageEncoder: String(patch.imageEncoder || '').trim(),
+    source: normalizeIpAdapterSourceFormState(patch.source, defaults.source),
+    weight: clampFiniteNumber(patch.weight, defaults.weight, 0, 2),
+    startAt: normalizeUnitInterval(patch.startAt, defaults.startAt),
+    endAt: normalizeUnitInterval(patch.endAt, defaults.endAt),
+  }
 }
 
 function normalizeWanVideoParams(raw: Partial<WanVideoParams>, defaults: WanVideoParams): WanVideoParams {
@@ -715,6 +1290,7 @@ function normalizeWanVideoParams(raw: Partial<WanVideoParams>, defaults: WanVide
   )
   merged.img2vidCropOffsetX = normalizeUnitInterval(merged.img2vidCropOffsetX, defaults.img2vidCropOffsetX)
   merged.img2vidCropOffsetY = normalizeUnitInterval(merged.img2vidCropOffsetY, defaults.img2vidCropOffsetY)
+  merged.returnFrames = normalizeBoolean(merged.returnFrames, defaults.returnFrames ?? false)
 
   merged.interpolationFps = normalizeInterpolationTargetFps(
     merged.interpolationFps,
@@ -790,21 +1366,135 @@ function normalizeWanVideoParams(raw: Partial<WanVideoParams>, defaults: WanVide
   }
 }
 
-function normalizeWanParams(raw: unknown, defaults: TabParamsByType['wan']): TabParamsByType['wan'] {
-  const patch = asRecordObject(raw) as Partial<TabParamsByType['wan']>
-  const highPatch = asRecordObject(patch.high)
-  const lowPatch = asRecordObject(patch.low)
+function normalizeWan14bStageParams(stagePatch: unknown, stageDefaults: WanStageParams): WanStageParams {
+  const stagePatchRecord = asRecordObject(stagePatch)
+  const merged: WanStageParams = {
+    ...stageDefaults,
+    ...(stagePatchRecord as Partial<WanStageParams>),
+  }
+  const sampler = typeof merged.sampler === 'string' ? merged.sampler.trim() : ''
+  merged.sampler = sampler || stageDefaults.sampler
+  const scheduler = typeof merged.scheduler === 'string' ? merged.scheduler.trim().toLowerCase() : ''
+  merged.scheduler = scheduler === 'simple' ? scheduler : 'simple'
+  const normalizedStage: WanStageParams = {
+    modelDir: merged.modelDir,
+    prompt: merged.prompt,
+    negativePrompt: merged.negativePrompt,
+    sampler: merged.sampler,
+    scheduler: merged.scheduler,
+    steps: merged.steps,
+    cfgScale: merged.cfgScale,
+    seed: merged.seed,
+    loras: Array.isArray(merged.loras) ? merged.loras : stageDefaults.loras,
+  }
+  if (typeof merged.flowShift === 'number' && Number.isFinite(merged.flowShift)) {
+    normalizedStage.flowShift = merged.flowShift
+  }
+  return normalizedStage
+}
+
+function normalizeWan14bParams(raw: unknown, defaults: Wan14bTabParams): Wan14bTabParams {
+  const rawPatch = asRecordObject(raw)
+  const migration = migrateWan14bParamsPatch(rawPatch)
+  if (migration.droppedUnknownKeys.length > 0) {
+    console.warn(
+      `[model_tabs] Dropping stale WAN 14B params key(s) during migration: ${migration.droppedUnknownKeys.join(', ')}`,
+      { fromVersion: migration.fromVersion, toVersion: TAB_PARAMS_SCHEMA_VERSION },
+    )
+  }
+  const patch = migration.patch
   const videoPatch = asRecordObject(patch.video)
   const assetsPatch = asRecordObject(patch.assets)
   const normalizedVideo = normalizeWanVideoParams(videoPatch as Partial<WanVideoParams>, defaults.video)
   return {
     ...defaults,
-    ...patch,
-    high: { ...defaults.high, ...(highPatch as Partial<WanStageParams>) },
-    low: { ...defaults.low, ...(lowPatch as Partial<WanStageParams>) },
+    high: normalizeWan14bStageParams(patch.high, defaults.high),
+    low: normalizeWan14bStageParams(patch.low, defaults.low),
     video: normalizedVideo,
     assets: { ...defaults.assets, ...(assetsPatch as Partial<WanAssetsParams>) },
+    lightx2v: normalizeBoolean(patch.lightx2v, defaults.lightx2v),
+    lowFollowsHigh: normalizeBoolean(patch.lowFollowsHigh, defaults.lowFollowsHigh),
+    schemaVersion: TAB_PARAMS_SCHEMA_VERSION,
   }
+}
+
+function normalizeWan5bStageParams(stagePatch: unknown, stageDefaults: Wan5bStageParams): Wan5bStageParams {
+  const stagePatchRecord = asRecordObject(stagePatch)
+  const merged: Wan5bStageParams = {
+    ...stageDefaults,
+    ...(stagePatchRecord as Partial<Wan5bStageParams>),
+  }
+  const normalizedStage: Wan5bStageParams = {
+    modelDir: String(merged.modelDir || '').trim(),
+    loras: Array.isArray(merged.loras) ? merged.loras : stageDefaults.loras,
+  }
+  if (typeof merged.flowShift === 'number' && Number.isFinite(merged.flowShift)) {
+    normalizedStage.flowShift = merged.flowShift
+  }
+  return normalizedStage
+}
+
+function normalizeWan5bParams(raw: unknown, defaults: Wan5bTabParams): Wan5bTabParams {
+  const rawPatch = asRecordObject(raw)
+  const migration = migrateWan5bParamsPatch(rawPatch)
+  if (migration.droppedUnknownKeys.length > 0) {
+    console.warn(
+      `[model_tabs] Dropping stale WAN 5B params key(s) during migration: ${migration.droppedUnknownKeys.join(', ')}`,
+      { fromVersion: migration.fromVersion, toVersion: TAB_PARAMS_SCHEMA_VERSION },
+    )
+  }
+  const patch = migration.patch
+  const videoPatch = asRecordObject(patch.video)
+  const assetsPatch = asRecordObject(patch.assets)
+  const sampler = typeof patch.sampler === 'string' ? patch.sampler.trim() : ''
+  const scheduler = typeof patch.scheduler === 'string' ? patch.scheduler.trim().toLowerCase() : ''
+  const steps = Number(patch.steps)
+  const seed = Number(patch.seed)
+  return {
+    ...defaults,
+    prompt: typeof patch.prompt === 'string' ? patch.prompt : defaults.prompt,
+    negativePrompt: typeof patch.negativePrompt === 'string' ? patch.negativePrompt : defaults.negativePrompt,
+    stage: normalizeWan5bStageParams(patch.stage, defaults.stage),
+    video: normalizeWanVideoParams(videoPatch as Partial<WanVideoParams>, defaults.video),
+    assets: { ...defaults.assets, ...(assetsPatch as Partial<WanAssetsParams>) },
+    sampler: sampler || defaults.sampler,
+    scheduler: scheduler === 'simple' ? scheduler : defaults.scheduler,
+    steps: Number.isFinite(steps) ? Math.max(1, Math.trunc(steps)) : defaults.steps,
+    cfgScale: clampFiniteNumber(patch.cfgScale, defaults.cfgScale, 0, Number.POSITIVE_INFINITY),
+    seed: Number.isFinite(seed) ? Math.trunc(seed) : defaults.seed,
+    schemaVersion: TAB_PARAMS_SCHEMA_VERSION,
+  }
+}
+
+function shouldPersistWan14bStageSamplingBackfill(raw: unknown): boolean {
+  const patch = asRecordObject(raw)
+  const high = asRecordObject(patch.high)
+  const low = asRecordObject(patch.low)
+  const highSampler = typeof high.sampler === 'string' ? high.sampler.trim() : ''
+  const lowSampler = typeof low.sampler === 'string' ? low.sampler.trim() : ''
+  const highScheduler = typeof high.scheduler === 'string' ? high.scheduler.trim().toLowerCase() : ''
+  const lowScheduler = typeof low.scheduler === 'string' ? low.scheduler.trim().toLowerCase() : ''
+  const needsSamplerBackfill = highSampler.length === 0 || lowSampler.length === 0
+  const needsSchedulerBackfill = highScheduler !== 'simple' || lowScheduler !== 'simple'
+  return needsSamplerBackfill || needsSchedulerBackfill
+}
+
+function buildImageTopLevelBackfillPatch(
+  raw: unknown,
+  normalized: ImageBaseParams,
+): Partial<ImageBaseParams> | null {
+  const patch = asRecordObject(raw)
+  const backfillPatch: Partial<ImageBaseParams> = {}
+  let needsBackfill = false
+  for (const key of IMAGE_PARAM_TOP_LEVEL_KEYS) {
+    if (IMAGE_PARAM_NO_AUTOBACKFILL_KEYS.has(key)) continue
+    if (Object.prototype.hasOwnProperty.call(patch, key)) continue
+    const normalizedValue = normalized[key as keyof ImageBaseParams]
+    if (normalizedValue === undefined) continue
+    ;(backfillPatch as Record<string, unknown>)[key] = normalizedValue
+    needsBackfill = true
+  }
+  return needsBackfill ? backfillPatch : null
 }
 
 function normalizeGuidanceAdvancedParams(raw: unknown, defaults: GuidanceAdvancedParams): GuidanceAdvancedParams {
@@ -840,16 +1530,41 @@ function normalizeGuidanceAdvancedParams(raw: unknown, defaults: GuidanceAdvance
   }
 }
 
+function clampFiniteNumber(value: unknown, fallback: number, min?: number, max?: number): number {
+  const numeric = Number(value)
+  const finiteValue = Number.isFinite(numeric) ? numeric : fallback
+  if (min !== undefined && finiteValue < min) return min
+  if (max !== undefined && finiteValue > max) return max
+  return finiteValue
+}
+
 function normalizeImageParams(raw: unknown, defaults: ImageBaseParams): ImageBaseParams {
-  const patch = asRecordObject(raw) as Partial<ImageBaseParams>
+  const rawPatch = asRecordObject(raw)
+  const migration = migrateImageParamsPatch(rawPatch)
+  if (migration.droppedUnknownKeys.length > 0) {
+    console.warn(
+      `[model_tabs] Dropping stale image params key(s) during migration: ${migration.droppedUnknownKeys.join(', ')}`,
+      { fromVersion: migration.fromVersion, toVersion: TAB_PARAMS_SCHEMA_VERSION },
+    )
+  }
+  const patch = migration.patch
   const hiresPatch = asRecordObject(patch.hires)
+  const hiresSwapModelPatch = asRecordObject(hiresPatch.swapModel)
   const hiresRefinerPatch = asRecordObject(hiresPatch.refiner)
   const hiresTilePatch = asRecordObject(hiresPatch.tile)
+  const swapModelPatch = asRecordObject(patch.swapModel)
   const refinerPatch = asRecordObject(patch.refiner)
+  const initSourcePatch = asRecordObject(patch.initSource)
+  const supirPatch = asRecordObject(patch.supir)
+  const ipAdapterPatch = asRecordObject(patch.ipAdapter)
+  const ipAdapterSourcePatch = asRecordObject(ipAdapterPatch.source)
 
   const mergedHires: HiresFormState = {
     ...defaults.hires,
     ...(hiresPatch as Partial<HiresFormState>),
+    swapModel: Object.keys(hiresSwapModelPatch).length > 0
+      ? (hiresSwapModelPatch as Partial<SwapModelFormState>) as SwapModelFormState
+      : defaults.hires.swapModel,
     refiner: {
       ...(asRecordObject(defaults.hires.refiner) as Partial<RefinerFormState>),
       ...(hiresRefinerPatch as Partial<RefinerFormState>),
@@ -859,16 +1574,43 @@ function normalizeImageParams(raw: unknown, defaults: ImageBaseParams): ImageBas
       ...(hiresTilePatch as Partial<HiresFormState['tile']>),
     },
   }
+  delete (mergedHires as unknown as Record<string, unknown>).modules
 
   const merged: ImageBaseParams = {
     ...defaults,
     ...patch,
+    swapModel: Object.keys(swapModelPatch).length > 0
+      ? {
+          ...defaults.swapModel,
+          ...(swapModelPatch as Partial<SwapStageFormState>),
+        }
+      : defaults.swapModel,
     hires: mergedHires,
     refiner: {
       ...defaults.refiner,
       ...(refinerPatch as Partial<RefinerFormState>),
     },
+    initSource: {
+      ...defaults.initSource,
+      ...(initSourcePatch as Partial<InitSourceFormState>),
+    },
+    supir: {
+      ...defaults.supir,
+      ...(supirPatch as Partial<SupirModeFormState>),
+    },
+    ipAdapter: {
+      ...defaults.ipAdapter,
+      ...(ipAdapterPatch as Partial<IpAdapterFormState>),
+      source: {
+        ...defaults.ipAdapter.source,
+        ...(ipAdapterSourcePatch as Partial<IpAdapterSourceFormState>),
+      },
+    },
   }
+
+  delete (merged.hires as unknown as Record<string, unknown>).checkpoint
+  delete (merged.refiner as unknown as Record<string, unknown>).vae
+  delete (merged.hires.refiner as unknown as Record<string, unknown>).vae
 
   merged.useInitImage = normalizeBoolean(merged.useInitImage, defaults.useInitImage)
   merged.useMask = normalizeBoolean(merged.useMask, defaults.useMask)
@@ -883,6 +1625,21 @@ function normalizeImageParams(raw: unknown, defaults: ImageBaseParams): ImageBas
   merged.refiner.swapAtStep = Number.isFinite(globalSwapAtStep) && globalSwapAtStep >= 1
     ? Math.trunc(globalSwapAtStep)
     : 1
+  merged.swapModel.enabled = normalizeBoolean(merged.swapModel.enabled, defaults.swapModel.enabled)
+  const globalModelSwapAtStep = Number(merged.swapModel.swapAtStep)
+  merged.swapModel.swapAtStep = Number.isFinite(globalModelSwapAtStep) && globalModelSwapAtStep >= 1
+    ? Math.trunc(globalModelSwapAtStep)
+    : 1
+  merged.swapModel.cfg = clampFiniteNumber(
+    merged.swapModel.cfg,
+    merged.cfgScale,
+    0,
+    Number.POSITIVE_INFINITY,
+  )
+  merged.swapModel.seed = Number.isFinite(Number(merged.swapModel.seed))
+    ? Math.trunc(Number(merged.swapModel.seed))
+    : defaults.swapModel.seed
+  merged.swapModel.model = String(merged.swapModel.model || '').trim() || undefined
   if (merged.hires.refiner) {
     const hiresSwapAtStep = Number(merged.hires.refiner.swapAtStep)
     merged.hires.refiner.swapAtStep = Number.isFinite(hiresSwapAtStep) && hiresSwapAtStep >= 1
@@ -896,15 +1653,32 @@ function normalizeImageParams(raw: unknown, defaults: ImageBaseParams): ImageBas
   if (typeof merged.scheduler !== 'string' || !merged.scheduler.trim()) {
     merged.scheduler = defaults.scheduler
   }
-  merged.maskEnforcement = normalizeMaskEnforcement(
-    typeof merged.maskEnforcement === 'string' ? merged.maskEnforcement : defaults.maskEnforcement,
+  merged.inpaintMode = parseInpaintMode(
+    typeof merged.inpaintMode === 'string' ? merged.inpaintMode : null,
+  ) ?? defaults.inpaintMode
+  merged.perStepBlendStrength = clampFiniteNumber(merged.perStepBlendStrength, defaults.perStepBlendStrength, 0, 1)
+  merged.perStepBlendSteps = Math.trunc(
+    clampFiniteNumber(merged.perStepBlendSteps, defaults.perStepBlendSteps, 0),
   )
   merged.img2imgResizeMode = normalizeImg2ImgResizeMode(merged.img2imgResizeMode)
   merged.img2imgUpscaler = String(merged.img2imgUpscaler || '').trim() || defaults.img2imgUpscaler
+  merged.textEncoders = Array.isArray(merged.textEncoders)
+    ? merged.textEncoders
+        .map((entry) => String(entry || '').trim())
+        .filter((entry, index, array) => entry.length > 0 && array.indexOf(entry) === index)
+    : defaults.textEncoders.slice()
   merged.guidanceAdvanced = normalizeGuidanceAdvancedParams(
     patch.guidanceAdvanced,
     defaults.guidanceAdvanced ?? DEFAULT_GUIDANCE_ADVANCED_PARAMS,
   )
+  merged.runAction = normalizeImageRunAction(merged.runAction, defaults.runAction)
+  merged.initSource = normalizeInitSourceFormState(merged.initSource, defaults.initSource)
+  merged.supir = normalizeSupirModeFormState(merged.supir, defaults.supir)
+  merged.ipAdapter = normalizeIpAdapterFormState(merged.ipAdapter, defaults.ipAdapter)
+  if (merged.ipAdapter.endAt < merged.ipAdapter.startAt) {
+    merged.ipAdapter.endAt = merged.ipAdapter.startAt
+  }
+  merged.schemaVersion = TAB_PARAMS_SCHEMA_VERSION
   return merged
 }
 
@@ -914,10 +1688,22 @@ function normalizeParamsForType<T extends BaseTabType>(
   defaultsOverride?: TabParamsByType[T],
 ): TabParamsByType[T] {
   const defaults = defaultsOverride ?? defaultParams(type)
-  if (type === 'wan') {
-    return normalizeWanParams(raw, defaults as TabParamsByType['wan']) as TabParamsByType[T]
+  if (type === 'wan22_14b') {
+    return normalizeWan14bParams(raw, defaults as Wan14bTabParams) as TabParamsByType[T]
   }
-  return normalizeImageParams(raw, defaults as ImageBaseParams) as TabParamsByType[T]
+  if (type === 'wan22_5b') {
+    return normalizeWan5bParams(raw, defaults as Wan5bTabParams) as TabParamsByType[T]
+  }
+  if (type === 'ltx2') {
+    return normalizeLtxParams(raw, defaults as TabParamsByType['ltx2']) as TabParamsByType[T]
+  }
+  const normalized = normalizeImageParams(raw, defaults as ImageBaseParams)
+  if (type === 'flux2') {
+    normalized.textEncoders = normalized.textEncoders
+      .filter((label) => label.startsWith('flux2/'))
+      .slice(0, 1)
+  }
+  return normalized as TabParamsByType[T]
 }
 
 type RawTab = Omit<BaseTab, 'type' | 'params'> & {
@@ -938,10 +1724,13 @@ function normalizeTab(
   }
 }
 
-const BASE_REQUIRED_TYPES: BaseTabType[] = ['sd15', 'sdxl', 'flux1', 'chroma', 'zimage', 'wan']
+const BASE_REQUIRED_TYPES: BaseTabType[] = ['sd15', 'sdxl', 'flux1', 'flux2', 'chroma', 'zimage', 'wan22_14b', 'wan22_5b']
 
 export function requiredTypesFromCapabilities(engines: Record<string, unknown>): BaseTabType[] {
   const types: BaseTabType[] = [...BASE_REQUIRED_TYPES]
+  if (Object.prototype.hasOwnProperty.call(engines, 'ltx2')) {
+    types.push('ltx2')
+  }
   if (Object.prototype.hasOwnProperty.call(engines, 'anima')) {
     types.push('anima')
   }
@@ -952,6 +1741,8 @@ export const useModelTabsStore = defineStore('modelTabs', () => {
   const tabs = ref<BaseTab[]>([])
   const activeId = ref<string>('')
   const pendingParamsPersists = new Map<string, PendingParamsPersist>()
+  const imageSparsePersistMissingKeysByTabId = new Map<string, Set<string>>()
+  let loadPromise: Promise<void> | null = null
 
   const PARAMS_PERSIST_DEBOUNCE_MS = 220
 
@@ -969,9 +1760,102 @@ export const useModelTabsStore = defineStore('modelTabs', () => {
     deferreds: PersistDeferred[]
     snapshotParams: Record<string, unknown> | null
     snapshotUpdatedAt: string
+    snapshotSparseMissingKeys: string[] | null
+    explicitImagePersistKeys: Set<string>
   }
 
   type PersistSerializationPhase = 'snapshot' | 'patch' | 'persist' | 'rollback'
+
+  function syncImageSparsePersistHints(tabId: string, tabType: BaseTabType, rawParams: unknown): void {
+    if (isWanTabFamily(tabType) || tabType === 'ltx2') {
+      imageSparsePersistMissingKeysByTabId.delete(tabId)
+      return
+    }
+    const rawPatch = asRecordObject(rawParams)
+    const missingKeys = new Set<string>()
+    for (const key of IMAGE_PARAM_SPARSE_PERSIST_DEFAULT_KEYS) {
+      if (!Object.prototype.hasOwnProperty.call(rawPatch, key)) {
+        missingKeys.add(key)
+      }
+    }
+    if (missingKeys.size === 0) {
+      imageSparsePersistMissingKeysByTabId.delete(tabId)
+      return
+    }
+    imageSparsePersistMissingKeysByTabId.set(tabId, missingKeys)
+  }
+
+  function snapshotImageSparsePersistHints(tabId: string): string[] | null {
+    const missingKeys = imageSparsePersistMissingKeysByTabId.get(tabId)
+    if (!missingKeys || missingKeys.size === 0) return null
+    return Array.from(missingKeys).sort()
+  }
+
+  function restoreImageSparsePersistHints(tabId: string, snapshot: string[] | null): void {
+    if (!snapshot || snapshot.length === 0) {
+      imageSparsePersistMissingKeysByTabId.delete(tabId)
+      return
+    }
+    imageSparsePersistMissingKeysByTabId.set(tabId, new Set(snapshot))
+  }
+
+  function markExplicitImagePersistKeys(
+    pending: PendingParamsPersist,
+    tabType: BaseTabType,
+    patch: Record<string, unknown>,
+  ): void {
+    if (isWanTabFamily(tabType) || tabType === 'ltx2') return
+    for (const key of IMAGE_PARAM_SPARSE_PERSIST_DEFAULT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(patch, key)) {
+        pending.explicitImagePersistKeys.add(key)
+      }
+    }
+  }
+
+  function pruneSparseImagePersistDefaults(
+    tabId: string,
+    tabType: BaseTabType,
+    params: Record<string, unknown>,
+    explicitKeys: ReadonlySet<string>,
+  ): Record<string, unknown> {
+    if (isWanTabFamily(tabType) || tabType === 'ltx2') return params
+    const missingKeys = imageSparsePersistMissingKeysByTabId.get(tabId)
+    if (!missingKeys || missingKeys.size === 0) return params
+    let prunedParams = params
+    const defaults = defaultImageParamsForType(tabType)
+    if (
+      missingKeys.has('inpaintMode') &&
+      !explicitKeys.has('inpaintMode') &&
+      Object.prototype.hasOwnProperty.call(prunedParams, 'inpaintMode') &&
+      prunedParams.inpaintMode === defaults.inpaintMode
+    ) {
+      prunedParams = { ...prunedParams }
+      delete prunedParams.inpaintMode
+    }
+    return prunedParams
+  }
+
+  function applyPersistedImageSparsePersistHints(
+    tabId: string,
+    tabType: BaseTabType,
+    explicitKeys: ReadonlySet<string>,
+  ): string[] | null {
+    if (isWanTabFamily(tabType) || tabType === 'ltx2') {
+      imageSparsePersistMissingKeysByTabId.delete(tabId)
+      return null
+    }
+    const nextMissingKeys = new Set(imageSparsePersistMissingKeysByTabId.get(tabId) ?? [])
+    for (const key of explicitKeys) {
+      nextMissingKeys.delete(key)
+    }
+    if (nextMissingKeys.size === 0) {
+      imageSparsePersistMissingKeysByTabId.delete(tabId)
+      return null
+    }
+    const snapshot = Array.from(nextMissingKeys).sort()
+    imageSparsePersistMissingKeysByTabId.set(tabId, new Set(snapshot))
+    return snapshot
+  }
 
   async function resolveRequiredTypesFromCapabilities(): Promise<BaseTabType[]> {
     const capsStore = useEngineCapabilitiesStore()
@@ -1130,11 +2014,15 @@ export const useModelTabsStore = defineStore('modelTabs', () => {
 
   function restorePendingParamsSnapshot(tabId: string, tab: BaseTab, pending: PendingParamsPersist): void {
     if (pending.snapshotParams) {
-      tab.params = cloneParamsForPersist(tabId, 'rollback', pending.snapshotParams)
+      const rolledBackParams = cloneParamsForPersist(tabId, 'rollback', pending.snapshotParams)
+      tab.params = asParamsRecord(normalizeParamsForType(tab.type, rolledBackParams, defaultParamsForType(tab.type)))
     }
+    restoreImageSparsePersistHints(tabId, pending.snapshotSparseMissingKeys)
     tab.meta.updatedAt = pending.snapshotUpdatedAt
     pending.version = pending.persistedVersion
     pending.snapshotParams = null
+    pending.snapshotSparseMissingKeys = null
+    pending.explicitImagePersistKeys.clear()
   }
 
   function getPendingParamsPersist(tabId: string, tab: BaseTab): PendingParamsPersist {
@@ -1148,6 +2036,8 @@ export const useModelTabsStore = defineStore('modelTabs', () => {
       deferreds: [],
       snapshotParams: null,
       snapshotUpdatedAt: tab.meta.updatedAt,
+      snapshotSparseMissingKeys: null,
+      explicitImagePersistKeys: new Set<string>(),
     }
     pendingParamsPersists.set(tabId, created)
     return created
@@ -1200,9 +2090,20 @@ export const useModelTabsStore = defineStore('modelTabs', () => {
       return
     }
     let paramsToPersist: Record<string, unknown>
+    let normalizedParamsToPersist: Record<string, unknown>
+    const explicitImagePersistKeysToPersist = new Set(pending.explicitImagePersistKeys)
     const updatedAtSnapshot = tab.meta.updatedAt
     try {
       paramsToPersist = cloneParamsForPersist(tabId, 'persist', tab.params as Record<string, unknown>)
+      const migratedParams = asParamsRecord(normalizeParamsForType(tab.type, paramsToPersist, defaultParamsForType(tab.type)))
+      normalizedParamsToPersist = cloneParamsForPersist(tabId, 'persist', migratedParams)
+      tab.params = cloneParamsForPersist(tabId, 'persist', migratedParams)
+      paramsToPersist = pruneSparseImagePersistDefaults(
+        tabId,
+        tab.type,
+        normalizedParamsToPersist,
+        explicitImagePersistKeysToPersist,
+      )
     } catch (error) {
       const mapped = error instanceof ModelTabsStoreError
         ? error
@@ -1223,16 +2124,26 @@ export const useModelTabsStore = defineStore('modelTabs', () => {
     try {
       await updateTabApi(tabId, { params: paramsToPersist })
       pending.persistedVersion = versionToPersist
+      const persistedSparseMissingKeys = applyPersistedImageSparsePersistHints(
+        tabId,
+        tab.type,
+        explicitImagePersistKeysToPersist,
+      )
+      for (const key of explicitImagePersistKeysToPersist) {
+        pending.explicitImagePersistKeys.delete(key)
+      }
 
       const resolveList = pending.deferreds.filter((entry) => entry.version <= versionToPersist)
       pending.deferreds = pending.deferreds.filter((entry) => entry.version > versionToPersist)
       resolveList.forEach((entry) => entry.resolve())
 
       if (pending.version > pending.persistedVersion) {
-        pending.snapshotParams = paramsToPersist
+        pending.snapshotParams = normalizedParamsToPersist
         pending.snapshotUpdatedAt = updatedAtSnapshot
+        pending.snapshotSparseMissingKeys = persistedSparseMissingKeys
       } else {
         pending.snapshotParams = null
+        pending.snapshotSparseMissingKeys = null
         pending.snapshotUpdatedAt = tab.meta.updatedAt
       }
       save()
@@ -1262,13 +2173,9 @@ export const useModelTabsStore = defineStore('modelTabs', () => {
   }
 
   function preferredSamplingDefaultsForType(type: BaseTabType): { sampler: string; scheduler: string } | null {
-    if (type === 'wan') return null
+    if (isWanTabFamily(type) || type === 'ltx2') return null
     const capsStore = useEngineCapabilitiesStore()
-    const fallback = fallbackSamplingDefaultsForTabFamily(type as TabFamily)
-    return capsStore.resolveSamplingDefaults(type, {
-      fallbackSampler: fallback.sampler,
-      fallbackScheduler: fallback.scheduler,
-    })
+    return capsStore.resolveSamplingDefaults(resolveImageRequestEngineId(type, false))
   }
 
   function defaultParamsForType<T extends BaseTabType>(type: T): TabParamsByType[T] {
@@ -1281,7 +2188,7 @@ export const useModelTabsStore = defineStore('modelTabs', () => {
     let nextOrder = tabs.value.length ? (Math.max(...tabs.value.map(t => t.order)) + 1) : 0
     for (const type of requiredTypes) {
       if (existing.has(type)) continue
-      const title = type === 'wan' ? 'WAN 2.2' : getEngineConfig(type as EngineType).label
+      const title = getEngineConfig(type as EngineType).label
       const params = asParamsRecord(defaultParamsForType(type))
       let createdId = ''
       try {
@@ -1300,49 +2207,92 @@ export const useModelTabsStore = defineStore('modelTabs', () => {
         params,
         meta: { createdAt, updatedAt: createdAt },
       })
+      imageSparsePersistMissingKeysByTabId.delete(createdId)
       existing.add(type)
     }
   }
 
   async function load(): Promise<void> {
-    if (pendingParamsPersists.size > 0) {
-      for (const tabId of pendingParamsPersists.keys()) {
-        clearPendingParamsPersist(
-          tabId,
-          new ModelTabsStoreError('invalid_response', 'Tabs were reloaded while param updates were pending.'),
-        )
+    if (loadPromise) return loadPromise
+
+    loadPromise = (async () => {
+      if (pendingParamsPersists.size > 0) {
+        for (const tabId of pendingParamsPersists.keys()) {
+          clearPendingParamsPersist(
+            tabId,
+            new ModelTabsStoreError('invalid_response', 'Tabs were reloaded while param updates were pending.'),
+          )
+        }
       }
-    }
-    const requiredTypes = await resolveRequiredTypesFromCapabilities()
-    const preferredActiveId = activeId.value || (() => {
-      try {
-        const raw = localStorage.getItem(STORAGE_KEY)
-        if (!raw) return ''
-        const parsed = JSON.parse(raw) as { activeId?: unknown }
-        return typeof parsed.activeId === 'string' ? parsed.activeId : ''
-      } catch {
-        return ''
+      const requiredTypes = await resolveRequiredTypesFromCapabilities()
+      const preferredActiveId = activeId.value || (() => {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY)
+          if (!raw) return ''
+          const parsed = JSON.parse(raw) as { activeId?: unknown }
+          return typeof parsed.activeId === 'string' ? parsed.activeId : ''
+        } catch {
+          return ''
+        }
+      })()
+
+      const res = await fetchTabs()
+      if (!res || !Array.isArray(res.tabs)) {
+        const msg = "Invalid '/api/ui/tabs' response: missing 'tabs' array."
+        console.error(`[model_tabs] ${msg}`, res)
+        throw new ModelTabsStoreError('invalid_response', msg, { details: { response: res as unknown as Record<string, unknown> } })
       }
+
+      const rawTabs = res.tabs as unknown[]
+      imageSparsePersistMissingKeysByTabId.clear()
+      tabs.value = rawTabs.map((tab) => normalizeTab(tab as BaseTab, defaultParamsForType))
+      for (let index = 0; index < rawTabs.length; index += 1) {
+        const tab = tabs.value[index]
+        const rawTab = asRecordObject(rawTabs[index])
+        if (!tab) continue
+        syncImageSparsePersistHints(tab.id, tab.type, rawTab.params)
+        if (tab.type === 'wan22_14b') {
+          if (!shouldPersistWan14bStageSamplingBackfill(rawTab.params)) continue
+          const params = tab.params as Wan14bTabParams
+          void updateParams<Record<string, unknown>>(tab.id, {
+            high: params.high,
+            low: params.low,
+          }).catch((error) => {
+            console.warn('[model_tabs] Failed to persist WAN stage sampler/scheduler migration backfill; continuing load.', {
+              tabId: tab.id,
+              error,
+            })
+          })
+          continue
+        }
+        if (tab.type === 'ltx2') continue
+        const normalizedParams = tab.params as unknown as ImageBaseParams
+        const imageBackfillPatch = buildImageTopLevelBackfillPatch(rawTab.params, normalizedParams)
+        if (!imageBackfillPatch) continue
+        void updateParams<Record<string, unknown>>(tab.id, imageBackfillPatch as unknown as Record<string, unknown>).catch((error) => {
+          console.warn('[model_tabs] Failed to queue image-tab top-level params backfill; continuing load.', {
+            tabId: tab.id,
+            error,
+          })
+        })
+      }
+      tabs.value.sort((a, b) => a.order - b.order)
+      activeId.value = (preferredActiveId && tabs.value.some(t => t.id === preferredActiveId)) ? preferredActiveId : (tabs.value[0]?.id ?? '')
+      await ensureRequiredTabs(requiredTypes)
+      tabs.value.sort((a, b) => a.order - b.order)
+      if (activeId.value && !tabs.value.some(t => t.id === activeId.value)) activeId.value = tabs.value[0]?.id ?? ''
+      save()
     })()
 
-    const res = await fetchTabs()
-    if (!res || !Array.isArray(res.tabs)) {
-      const msg = "Invalid '/api/ui/tabs' response: missing 'tabs' array."
-      console.error(`[model_tabs] ${msg}`, res)
-      throw new ModelTabsStoreError('invalid_response', msg, { details: { response: res as unknown as Record<string, unknown> } })
+    try {
+      await loadPromise
+    } finally {
+      loadPromise = null
     }
-
-    tabs.value = (res.tabs as unknown as BaseTab[]).map((tab) => normalizeTab(tab, defaultParamsForType))
-    tabs.value.sort((a, b) => a.order - b.order)
-    activeId.value = (preferredActiveId && tabs.value.some(t => t.id === preferredActiveId)) ? preferredActiveId : (tabs.value[0]?.id ?? '')
-    await ensureRequiredTabs(requiredTypes)
-    tabs.value.sort((a, b) => a.order - b.order)
-    if (activeId.value && !tabs.value.some(t => t.id === activeId.value)) activeId.value = tabs.value[0]?.id ?? ''
-    save()
   }
 
   async function create(type: BaseTabType, title?: string): Promise<string> {
-    const resolvedTitle = title?.trim() || (type === 'wan' ? 'WAN 2.2' : getEngineConfig(type as EngineType).label)
+    const resolvedTitle = title?.trim() || getEngineConfig(type as EngineType).label
     const params = asParamsRecord(defaultParamsForType(type))
     let createdId = ''
     try {
@@ -1362,6 +2312,7 @@ export const useModelTabsStore = defineStore('modelTabs', () => {
       params,
       meta: { createdAt, updatedAt: createdAt },
     })
+    imageSparsePersistMissingKeysByTabId.delete(createdId)
     save()
     return createdId
   }
@@ -1382,6 +2333,7 @@ export const useModelTabsStore = defineStore('modelTabs', () => {
     copy.meta.createdAt = nowIso()
     copy.meta.updatedAt = copy.meta.createdAt
     tabs.value.push(copy)
+    imageSparsePersistMissingKeysByTabId.delete(copy.id)
     save()
     return copy.id
   }
@@ -1397,6 +2349,7 @@ export const useModelTabsStore = defineStore('modelTabs', () => {
       id,
       new ModelTabsStoreError('tab_not_found', `Tab not found: '${id}'.`, { details: { id } }),
     )
+    imageSparsePersistMissingKeysByTabId.delete(id)
     tabs.value = tabs.value.filter(t => t.id !== id)
     if (activeId.value === id) activeId.value = tabs.value[0]?.id ?? ''
     normalizeOrder()
@@ -1485,7 +2438,9 @@ export const useModelTabsStore = defineStore('modelTabs', () => {
     if (pending.snapshotParams === null) {
       pending.snapshotParams = cloneParamsForPersist(id, 'snapshot', current as unknown as Record<string, unknown>)
       pending.snapshotUpdatedAt = t.meta.updatedAt
+      pending.snapshotSparseMissingKeys = snapshotImageSparsePersistHints(id)
     }
+    markExplicitImagePersistKeys(pending, t.type, patchSnapshot)
 
     Object.assign(current, patchSnapshot)
     t.meta.updatedAt = nowIso()

@@ -19,6 +19,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import datetime as _datetime
 import hashlib
@@ -33,7 +34,7 @@ from typing import Any, Mapping
 from apps.backend.infra.config.env_flags import env_flag
 from apps.backend.infra.config.repo_root import get_repo_root
 
-_log = logging.getLogger("backend.contract_trace")
+_log = get_backend_logger("backend.contract_trace")
 _lock = threading.Lock()
 _trace_path: Path | None = None
 

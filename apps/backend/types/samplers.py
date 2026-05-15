@@ -7,7 +7,8 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Sampler and scheduler type definitions.
-Defines the canonical `SamplerKind` enum and an `ApplyOutcome` result container.
+Defines the canonical `SamplerKind` enum used for strict sampler parsing across API/runtime surfaces and an `ApplyOutcome` result container.
+Executable native variants are added explicitly when supported; removed public sampler identifiers stay absent from this enum surface.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `ApplyOutcome` (dataclass): Result of applying sampler/scheduler selection to a pipeline/request.
@@ -42,28 +43,23 @@ class SamplerKind(str, Enum):
     HEUNPP2 = "heunpp2"
     LMS = "lms"
     DDIM = "ddim"
-    DDIM_CFG_PP = "ddim cfg++"
     DPM2M = "dpm++ 2m"
     DPM2M_CFG_PP = "dpm++ 2m cfg++"
+    DPMPP_SDE = "dpm++ sde"
     DPM2M_SDE = "dpm++ 2m sde"
     DPM2M_SDE_HEUN = "dpm++ 2m sde heun"
     DPM2M_SDE_GPU = "dpm++ 2m sde gpu"
     DPM2M_SDE_HEUN_GPU = "dpm++ 2m sde heun gpu"
-    DPM_SDE = "dpm++ sde"
-    PLMS = "plms"
-    PNDM = "pndm"
     UNI_PC = "uni-pc"
     UNI_PC_BH2 = "uni-pc bh2"
     DPM2S_ANCESTRAL = "dpm++ 2s ancestral"
     DPM2S_ANCESTRAL_CFG_PP = "dpm++ 2s ancestral cfg++"
     DPM3M_SDE = "dpm++ 3m sde"
-    DPM3M_SDE_GPU = "dpm++ 3m sde gpu"
     DPM2 = "dpm 2"
     DPM2_ANCESTRAL = "dpm 2 ancestral"
     DPM_FAST = "dpm fast"
     DPM_ADAPTIVE = "dpm adaptive"
     DDPM = "ddpm"
-    LCM = "lcm"
     IPNDM = "ipndm"
     IPNDM_V = "ipndm v"
     DEIS = "deis"

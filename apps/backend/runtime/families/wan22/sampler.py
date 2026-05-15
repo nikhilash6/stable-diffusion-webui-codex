@@ -19,6 +19,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import emit_backend_message, get_backend_logger
 
 import logging
 from typing import Callable, Optional
@@ -28,7 +29,7 @@ from torch import nn
 
 from apps.backend.runtime.memory import memory_management
 
-logger = logging.getLogger("backend.runtime.wan22.sampler")
+logger = get_backend_logger("backend.runtime.wan22.sampler")
 
 WAN_FLOW_MULTIPLIER_DEFAULT = 1000.0
 
@@ -88,7 +89,7 @@ class WanVideoSampler:
         self.transformer = transformer
         self.device = _default_mount_device() if device is None else device
         self.dtype = dtype
-        self._logger = logging.getLogger(__name__)
+        self._logger = get_backend_logger(__name__)
     
     @torch.inference_mode()
     def sample(
@@ -138,9 +139,14 @@ class WanVideoSampler:
         if uncond is None:
             uncond = torch.zeros_like(cond)
         
-        self._logger.info(
-            "WAN sampling: shape=%s steps=%d cfg=%.1f shift=%.1f multiplier=%.1f",
-            shape, num_steps, cfg_scale, flow_shift, float(flow_multiplier),
+        emit_backend_message(
+            "WAN sampling",
+            logger=self._logger.name,
+            shape=shape,
+            steps=num_steps,
+            cfg=cfg_scale,
+            shift=flow_shift,
+            multiplier=float(flow_multiplier),
         )
         
         # Euler ODE integration
@@ -180,12 +186,18 @@ class WanVideoSampler:
                 callback(i + 1, num_steps, x)
             
             if (i + 1) % 5 == 0 or i == 0:
-                self._logger.debug(
-                    "Step %d/%d: t=%.4f->%.4f norm=%.2f",
-                    i + 1, num_steps, float(t), float(t_next), float(x.norm()),
+                emit_backend_message(
+                    "WAN sampling step",
+                    logger=self._logger.name,
+                    level=logging.DEBUG,
+                    step=i + 1,
+                    total=num_steps,
+                    t=float(t),
+                    t_next=float(t_next),
+                    norm=float(x.norm()),
                 )
         
-        self._logger.info("WAN sampling complete")
+        emit_backend_message("WAN sampling complete", logger=self._logger.name)
         return x
 
 
@@ -259,7 +271,7 @@ def sample_txt2vid(
     )
     
     # Decode through VAE
-    logger.info("Decoding latents through VAE")
+    emit_backend_message("Decoding latents through VAE", logger=logger.name)
     with torch.inference_mode():
         video = vae.decode(latents)
     

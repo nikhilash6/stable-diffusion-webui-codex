@@ -1,6 +1,6 @@
 # apps/backend/infra/config Overview
 Date: 2026-02-18
-Last Review: 2026-02-23
+Last Review: 2026-05-02
 Status: Active
 
 ## Purpose
@@ -11,6 +11,7 @@ Status: Active
 - `args.py` — Runtime CLI/env parser and `RuntimeMemoryConfig` builder.
 - `bootstrap_env.py` — Bootstrap env overlay publication without mutating global `os.environ`.
 - `env_flags.py` — Canonical env flag parsers shared by runtime diagnostics/features.
+- `lora_apply_mode.py` — Strict enum/parser/reader for LoRA application mode; unset config resolves to `online`.
 - `lora_merge_mode.py` — Strict enum/parser/reader for LoRA merge math mode (`fast|precise`).
 - `lora_refresh_signature.py` — Strict enum/parser/reader for LoRA refresh signature mode (`structural|content_sha256`).
 - `paths.py` — Paths.json/settings discovery and model root provisioning helpers.
@@ -24,4 +25,7 @@ Status: Active
 - 2026-02-23: `args.py` now supports `--main-device` and enforces a global main-device invariant (core/TE/VAE locked to one value), with fallback to `cuda` when available (else `cpu`) when not explicitly provided.
 - 2026-02-23: `args.py` now defaults offload authority to CPU when `--offload-device`/`CODEX_OFFLOAD_DEVICE` is unset or `auto`; invalid unresolved offload backend states now fail loud in `build_runtime_memory_config(...)` instead of silently mirroring main-device backend.
 - 2026-02-23: `args.py` now validates `--cuda-malloc` against allocator env contract: strict mode fails loud unless `PYTORCH_CUDA_ALLOC_CONF` resolves to `backend:cudaMallocAsync` (including malformed/multiple backend entry detection).
+- 2026-03-05: `paths.py` model-root provisioning now includes Flux.2 keys (`flux2_ckpt`, `flux2_tenc`, `flux2_vae`, `flux2_loras`) alongside existing families.
+- 2026-03-12: `paths.py` model-root provisioning now includes LTX2 keys (`ltx2_ckpt`, `ltx2_tenc`, `ltx2_vae`, `ltx2_connectors`, `ltx2_loras`) so repo-relative `models/ltx2*` folders are created with the same startup path-seam used by other families.
 - Keep this folder focused on config/bootstrap contracts; runtime execution logic belongs outside `infra/config`.
+- 2026-03-31: Bootstrap env naming must follow the real owner seam: runtime-global/bootstrap keys live here, family-prefixed keys stay in family-owned code, and shared runtime feature toggles must not be introduced under a model-family prefix.

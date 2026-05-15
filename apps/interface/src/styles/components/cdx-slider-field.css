@@ -29,6 +29,7 @@
     align-items: center;
     gap: 0.45rem;
     min-width: 0;
+    cursor: pointer;
   }
 
   .cdx-slider-field__label-help {
@@ -46,6 +47,7 @@
     border: 0.0625rem solid hsla(210, 70%, 65%, 0.35);
     box-shadow: inset 0 0.03125rem 0 hsla(0, 0%, 100%, 0.2);
     flex-shrink: 0;
+    cursor: pointer;
   }
 
   .cdx-slider-field__right {

@@ -19,6 +19,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 import os
@@ -51,7 +52,7 @@ from .constants import (
 
 from .quant_shapes import quant_shape_from_byte_shape
 
-logger = logging.getLogger(__name__)
+logger = get_backend_logger(__name__)
 
 
 SHARD_NAME_FORMAT = "{:s}-{:05d}-of-{:05d}.gguf"

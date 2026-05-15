@@ -2,7 +2,7 @@
 
 # apps/backend/runtime/streaming Overview
 Date: 2026-02-03
-Last Review: 2026-02-21
+Last Review: 2026-03-12
 Status: Active
 
 ## Purpose
@@ -22,3 +22,4 @@ Status: Active
   - Flux: `apps/backend/runtime/families/flux/streaming/controller.py`
   - WAN22: `apps/backend/runtime/families/wan22/streaming/controller.py`
 - 2026-02-21: `controller.py::StreamingController.reset()` now clears `_segments_by_name` in addition to access/on-device state to avoid stale segment retention across generations.
+- 2026-03-12: `controller.py::StreamingController.clear_residency()` is the shared helper for clearing tracked on-device state without resetting transfer stats; family wrappers should use it after deterministic cleanup to avoid double-evicting already-tracked segments.

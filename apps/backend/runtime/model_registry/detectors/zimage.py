@@ -38,7 +38,6 @@ from apps.backend.runtime.model_registry.specs import (
     TextEncoderSignature,
     VAESignature,
 )
-from apps.backend.quantization.tensor import CodexParameter
 from apps.backend.runtime.families.zimage.inference import infer_zimage_dims
 
 
@@ -84,8 +83,8 @@ class ZImageDetector(ModelDetector):
         return True
 
     def build_signature(self, bundle: SignalBundle) -> ModelSignature:  # type: ignore[override]
-        # Detect if this is a GGUF quantized checkpoint
-        is_gguf = any(isinstance(v, CodexParameter) and v.qtype is not None for v in bundle.state_dict.values())
+        # Detect if this is a GGUF quantized checkpoint.
+        is_gguf = bundle.is_gguf_quantized()
         
         # Detect which key prefix is used (prefixed for some exports, unprefixed for GGUF).
         keys_set = set(bundle.keys)

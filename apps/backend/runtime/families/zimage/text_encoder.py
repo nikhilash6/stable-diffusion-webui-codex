@@ -19,22 +19,24 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import emit_backend_message, get_backend_logger
 
 import logging
 import os
+from collections.abc import Mapping
 from pathlib import Path
-from typing import List, Optional, Dict
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
 
 from apps.backend.infra.config.repo_root import get_repo_root
 from apps.backend.runtime.memory import memory_management
-from apps.backend.runtime.state_dict.keymap_qwen_text_encoder import remap_qwen_text_encoder_state_dict
+from apps.backend.runtime.state_dict.keymap_qwen_text_encoder import resolve_qwen_text_encoder_keyspace
 
 from .debug import env_flag, env_int, find_indices, summarize_ints, tensor_stats, truncate_text
 
-logger = logging.getLogger("backend.runtime.zimage.text_encoder")
+logger = get_backend_logger("backend.runtime.zimage.text_encoder")
 
 # Chat template for Qwen3 (reference template)
 QWEN3_TEMPLATE = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
@@ -87,10 +89,10 @@ class ZImageTextEncoder(nn.Module):
         Returns:
             ZImageTextEncoder instance.
         """
-        logger.info("Loading Qwen3 text encoder from GGUF: %s", gguf_path)
+        emit_backend_message("Loading Qwen3 text encoder from GGUF", logger=logger.name, path=gguf_path)
         
         # Import native Qwen3 implementation
-        from .qwen3 import Qwen3_4B, Qwen3Config, remap_gguf_keys
+        from .qwen3 import Qwen3_4B, Qwen3Config, resolve_qwen3_gguf_keyspace
         
         # Load GGUF state dict using our infrastructure
         from apps.backend.runtime.ops.operations import using_codex_operations
@@ -98,14 +100,14 @@ class ZImageTextEncoder(nn.Module):
         
         try:
             # Load GGUF file
-            logger.info("Loading GGUF state dict...")
+            emit_backend_message("Loading GGUF state dict", logger=logger.name)
             gguf_state_dict = load_gguf_state_dict(gguf_path)
-            logger.info("Loaded %d tensors from GGUF", len(gguf_state_dict))
+            emit_backend_message("Loaded GGUF tensors", logger=logger.name, tensors=len(gguf_state_dict))
             
-            # Remap keys from GGUF format to our model format
-            logger.info("Remapping GGUF keys to native format...")
-            state_dict = remap_gguf_keys(gguf_state_dict, num_layers=36)
-            logger.info("Remapped to %d native keys", len(state_dict))
+            # Resolve GGUF keys into the native lookup keyspace without renaming tensors
+            emit_backend_message("Resolving GGUF keyspace to native lookup view", logger=logger.name)
+            state_dict = resolve_qwen3_gguf_keyspace(gguf_state_dict, num_layers=36)
+            emit_backend_message("Resolved native lookup keys", logger=logger.name, keys=len(state_dict))
             
             # Use Codex operations context to enable GGUF tensor support
             # This patches torch.nn.Linear to CodexOperationsGGUF.Linear which handles CodexParameter
@@ -116,43 +118,84 @@ class ZImageTextEncoder(nn.Module):
                 
                 debug_run = env_flag("CODEX_ZIMAGE_DEBUG_TENC_RUN", False)
                 if debug_run:
-                    logger.info("[zimage-debug] tenc.gguf embed_tokens=%s", type(model.model.embed_tokens))
-                    logger.info("[zimage-debug] tenc.gguf q_proj=%s", type(model.model.layers[0].self_attn.q_proj))
+                    emit_backend_message(
+                        "[zimage-debug] tenc.gguf module types",
+                        logger=logger.name,
+                        embed_tokens=type(model.model.embed_tokens).__name__,
+                        q_proj=type(model.model.layers[0].self_attn.q_proj).__name__,
+                    )
 
                     emb_key = "model.embed_tokens.weight"
                     if emb_key in state_dict:
                         emb_tensor = state_dict[emb_key]
-                        logger.info("[zimage-debug] tenc.gguf %s type=%s", emb_key, type(emb_tensor))
-                        logger.info("[zimage-debug] tenc.gguf %s shape=%s", emb_key, emb_tensor.shape)
+                        emit_backend_message(
+                            "[zimage-debug] tenc.gguf tensor",
+                            logger=logger.name,
+                            key=emb_key,
+                            tensor_type=type(emb_tensor).__name__,
+                            shape=getattr(emb_tensor, "shape", None),
+                        )
                         if hasattr(emb_tensor, "real_shape"):
-                            logger.info("[zimage-debug] tenc.gguf %s real_shape=%s", emb_key, emb_tensor.real_shape)
+                            emit_backend_message(
+                                "[zimage-debug] tenc.gguf tensor real_shape",
+                                logger=logger.name,
+                                key=emb_key,
+                                real_shape=emb_tensor.real_shape,
+                            )
 
                 # Load state dict - patched layers will handle GGUF tensors correctly
                 try:
                     model.load_sd(state_dict)
                 except RuntimeError as e:
-                    logger.error("RuntimeError during load_sd: %s", e)
-                    # Dump model shape for comparison
-                    logger.error("Model embedding weight shape: %s", model.model.embed_tokens.weight.shape)
+                    emit_backend_message(
+                        "RuntimeError during load_sd",
+                        logger=logger.name,
+                        level=logging.ERROR,
+                        error=str(e),
+                    )
+                    emit_backend_message(
+                        "Model embedding weight shape",
+                        logger=logger.name,
+                        level=logging.ERROR,
+                        shape=model.model.embed_tokens.weight.shape,
+                    )
                     raise
                 
                 model = model.to(dtype=torch_dtype)
             
             param_count = sum(p.numel() for p in model.parameters())
-            logger.info("GGUF text encoder loaded: %d params (%.2fB)", 
-                       param_count, param_count / 1e9)
+            emit_backend_message(
+                "GGUF text encoder loaded",
+                logger=logger.name,
+                params=param_count,
+                params_b=param_count / 1e9,
+            )
             
             return cls(model, hidden_size=2560, layer_idx=-2)
             
         except ImportError as e:
-            logger.error("GGUF loader/ops not available: %s", e)
+            emit_backend_message(
+                "GGUF loader/ops not available",
+                logger=logger.name,
+                level=logging.ERROR,
+                error=str(e),
+            )
             raise ValueError(f"GGUF loader/ops not available: {e}")
         except Exception as e:
-            logger.error("Failed to load GGUF text encoder: %s", e)
+            emit_backend_message(
+                "Failed to load GGUF text encoder",
+                logger=logger.name,
+                level=logging.ERROR,
+                error=str(e),
+            )
             raise ValueError(f"Failed to load GGUF text encoder from {gguf_path}: {e}")
     
     @classmethod
-    def from_state_dict(cls, state_dict: Dict[str, torch.Tensor], torch_dtype: torch.dtype = torch.bfloat16) -> "ZImageTextEncoder":
+    def from_state_dict(
+        cls,
+        state_dict: Mapping[str, torch.Tensor],
+        torch_dtype: torch.dtype = torch.bfloat16,
+    ) -> "ZImageTextEncoder":
         """Load text encoder from state_dict.
         
         Args:
@@ -162,17 +205,39 @@ class ZImageTextEncoder(nn.Module):
         Returns:
             ZImageTextEncoder instance.
         """
-        logger.info("Loading Qwen3 text encoder from state_dict (%d keys)", len(state_dict))
+        if not isinstance(state_dict, Mapping):
+            raise RuntimeError(
+                "Z Image Qwen3-4B state_dict must be a mapping; "
+                f"got {type(state_dict).__name__}."
+            )
+        for raw_key in state_dict.keys():
+            if not isinstance(raw_key, str):
+                raise RuntimeError(
+                    "Z Image Qwen3-4B state_dict keys must be strings. "
+                    f"Got {type(raw_key).__name__}."
+                )
+        emit_backend_message(
+            "Loading Qwen3 text encoder from state_dict",
+            logger=logger.name,
+            keys=len(state_dict),
+        )
 
         try:
-            state_dict = {str(k): v for k, v in state_dict.items()}
-            key_style, remapped_state_dict = remap_qwen_text_encoder_state_dict(
+            resolved = resolve_qwen_text_encoder_keyspace(
                 state_dict,
                 allow_lm_head_aux=True,
                 allow_visual_aux=True,
                 require_backbone_keys=True,
             )
-            logger.debug("ZImage Qwen3 keymap style=%s", key_style.value)
+            key_style = resolved.style
+            resolved_state_dict = resolved.view
+            style_label = key_style.value if hasattr(key_style, "value") else str(key_style)
+            emit_backend_message(
+                "ZImage Qwen3 keymap style",
+                logger=logger.name,
+                level=logging.DEBUG,
+                style=style_label,
+            )
 
             # Use native Qwen3_4B implementation (compatible with the exported format)
             from .qwen3 import Qwen3_4B, Qwen3Config
@@ -183,17 +248,22 @@ class ZImageTextEncoder(nn.Module):
                 model = Qwen3_4B(config, dtype=torch_dtype)
 
                 # Load weights - native implementation has compatible key format
-                model.load_sd(remapped_state_dict)
+                model.load_sd(resolved_state_dict)
                 
                 # Move to target dtype
                 model.to(dtype=torch_dtype)
             
             encoder = cls(model, hidden_size=2560, layer_idx=-2)
-            logger.info("Safetensors text encoder loaded successfully")
+            emit_backend_message("Safetensors text encoder loaded successfully", logger=logger.name)
             return encoder
             
         except Exception as e:
-            logger.error("Failed to load text encoder from state_dict: %s", e)
+            emit_backend_message(
+                "Failed to load text encoder from state_dict",
+                logger=logger.name,
+                level=logging.ERROR,
+                error=str(e),
+            )
             raise ValueError(f"Failed to load text encoder from state_dict: {e}")
     
     @property
@@ -221,7 +291,11 @@ class ZImageTextEncoder(nn.Module):
         try:
             from transformers import AutoTokenizer
         except ImportError:
-            logger.error("transformers library required for Qwen tokenizer")
+            emit_backend_message(
+                "transformers library required for Qwen tokenizer",
+                logger=logger.name,
+                level=logging.ERROR,
+            )
             raise
 
         # Prefer explicit config, then vendored Hugging Face assets, then bundled tokenizer snapshot.
@@ -265,7 +339,7 @@ class ZImageTextEncoder(nn.Module):
                 continue
             try:
                 self._tokenizer = AutoTokenizer.from_pretrained(str(p), local_files_only=True, use_fast=True)
-                logger.info("Qwen tokenizer loaded: %s", str(p))
+                emit_backend_message("Qwen tokenizer loaded", logger=logger.name, path=str(p))
                 return
             except Exception as exc:  # noqa: BLE001 - try next candidate
                 errors.append(f"{p}: {type(exc).__name__}: {exc}")
@@ -338,7 +412,12 @@ class ZImageTextEncoder(nn.Module):
             texts = wrapped
 
         if debug_text and texts:
-            logger.info("[zimage-debug] tenc.tokenize apply_template=%s text0=%s", apply_template, truncate_text(texts[0], limit=text_max))
+            emit_backend_message(
+                "[zimage-debug] tenc.tokenize",
+                logger=logger.name,
+                apply_template=apply_template,
+                text0=truncate_text(texts[0], limit=text_max),
+            )
         
         tokens = self._tokenizer(
             texts,
@@ -352,32 +431,57 @@ class ZImageTextEncoder(nn.Module):
             try:
                 ids0 = tokens["input_ids"][0].tolist()
                 pad_id = getattr(self._tokenizer, "pad_token_id", None)
-                logger.info(
-                    "[zimage-debug] tenc.tokens shape=%s pad_id=%s ids=%s",
-                    tuple(tokens["input_ids"].shape),
-                    str(pad_id),
-                    summarize_ints([int(v) for v in ids0], window=12),
+                emit_backend_message(
+                    "[zimage-debug] tenc.tokens",
+                    logger=logger.name,
+                    shape=tuple(tokens["input_ids"].shape),
+                    pad_id=str(pad_id),
+                    ids=summarize_ints([int(v) for v in ids0], window=12),
                 )
                 # Common Qwen token ids (observed in bundled tokenizer snapshots): im_start=151644, im_end=151645.
                 # We log indices to help compare template slicing logic.
                 for name, tok in (("im_start", 151644), ("im_end", 151645)):
                     idxs = find_indices([int(v) for v in ids0], tok, limit=8)
                     if idxs:
-                        logger.info("[zimage-debug] tenc.tokens %s=%d idx=%s", name, tok, idxs)
+                        emit_backend_message(
+                            "[zimage-debug] tenc.tokens marker",
+                            logger=logger.name,
+                            name=name,
+                            token=tok,
+                            idx=idxs,
+                        )
                 if isinstance(pad_id, int):
                     pad_idxs = find_indices([int(v) for v in ids0], int(pad_id), limit=8)
                     if pad_idxs:
-                        logger.info("[zimage-debug] tenc.tokens pad idx=%s", pad_idxs)
-            except Exception:
-                logger.exception("[zimage-debug] failed to summarize token ids")
+                        emit_backend_message(
+                            "[zimage-debug] tenc.tokens pad",
+                            logger=logger.name,
+                            idx=pad_idxs,
+                        )
+            except Exception as exc:
+                emit_backend_message(
+                    "[zimage-debug] failed to summarize token ids",
+                    logger=logger.name,
+                    level=logging.ERROR,
+                    error=str(exc),
+                )
 
         if debug_decode and "input_ids" in tokens:
             try:
                 ids0 = tokens["input_ids"][0].tolist()
                 decoded = self._tokenizer.decode(ids0)
-                logger.info("[zimage-debug] tenc.decode text0=%s", truncate_text(decoded, limit=text_max))
-            except Exception:
-                logger.exception("[zimage-debug] failed to decode token ids")
+                emit_backend_message(
+                    "[zimage-debug] tenc.decode",
+                    logger=logger.name,
+                    text0=truncate_text(decoded, limit=text_max),
+                )
+            except Exception as exc:
+                emit_backend_message(
+                    "[zimage-debug] failed to decode token ids",
+                    logger=logger.name,
+                    level=logging.ERROR,
+                    error=str(exc),
+                )
         
         return {
             "input_ids": tokens["input_ids"].to(self.device),
@@ -405,8 +509,8 @@ class ZImageTextEncoder(nn.Module):
 
         debug_run = env_flag("CODEX_ZIMAGE_DEBUG_TENC_RUN", False)
         if debug_run:
-            tensor_stats(logger, "tenc.input_ids", tokens.get("input_ids"))
-            tensor_stats(logger, "tenc.attention_mask", tokens.get("attention_mask"))
+            tensor_stats(logger.name, "tenc.input_ids", tokens.get("input_ids"))
+            tensor_stats(logger.name, "tenc.attention_mask", tokens.get("attention_mask"))
         
         # Check if this is our native Qwen3_4B model or a HuggingFace model
         # Native Qwen3_4B returns (hidden_states, intermediate) tuple
@@ -422,11 +526,12 @@ class ZImageTextEncoder(nn.Module):
                 layer_idx = self.layer_idx
         final_norm = env_flag("CODEX_ZIMAGE_QWEN_FINAL_NORM_INTERMEDIATE", True)
         if debug_run:
-            logger.info(
-                "[zimage-debug] tenc.encode native=%s layer_idx=%s final_norm_intermediate=%s",
-                bool(is_native_model),
-                str(layer_idx),
-                bool(final_norm),
+            emit_backend_message(
+                "[zimage-debug] tenc.encode",
+                logger=logger.name,
+                native=bool(is_native_model),
+                layer_idx=str(layer_idx),
+                final_norm_intermediate=bool(final_norm),
             )
         
         if is_native_model:
@@ -450,7 +555,7 @@ class ZImageTextEncoder(nn.Module):
             hidden = outputs.hidden_states[layer_idx]
 
         if debug_run:
-            tensor_stats(logger, "tenc.hidden", hidden)
+            tensor_stats(logger.name, "tenc.hidden", hidden)
         
         return hidden.to(self.dtype)
     

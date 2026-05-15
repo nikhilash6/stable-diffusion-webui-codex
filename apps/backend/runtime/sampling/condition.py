@@ -8,7 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: Conditioning helpers for diffusion sampling (tensor and dict-based conditioning payloads).
 Enforces shape invariants and wraps conditioning tensors in small helper classes used by samplers and legacy adapters, including optional
-dual-tokenization extras (`t5xxl_ids`/`t5xxl_weights`) required by Anima conditioning.
+dual-tokenization extras (`t5xxl_ids`/`t5xxl_weights`/`t5xxl_attention_mask`) required by Anima conditioning.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `repeat_to_batch_size` (function): Repeat/slice a tensor batch dimension to match a target batch size.
@@ -25,6 +25,7 @@ Symbols (top-level; keep in sync; no ghosts):
 import math
 import logging
 import torch
+from apps.backend.runtime.logging import emit_backend_message
 
 
 def repeat_to_batch_size(tensor, batch_size):
@@ -154,36 +155,35 @@ def compile_conditions(cond):
         )
         return [result]
 
-    # Dict-based path: require keys and shapes
+    # Dict-based path: require cross-attn and validate optional extras.
     if not isinstance(cond, dict):
         raise TypeError(f"conditioning must be Tensor or dict; got {type(cond).__name__}")
     if 'crossattn' not in cond:
         raise ValueError("conditioning dict missing required key 'crossattn'")
-    if 'vector' not in cond:
-        raise ValueError("conditioning dict missing required key 'vector' (pooled/global embedding)")
 
     cross_attn = cond['crossattn']
-    pooled_output = cond['vector']
+    has_vector = 'vector' in cond
+    pooled_output = cond['vector'] if has_vector else None
 
     if not isinstance(cross_attn, torch.Tensor) or cross_attn.ndim != 3:
         raise ValueError(f"'crossattn' must be a 3D tensor (B,S,C); got {type(cross_attn).__name__} shape={getattr(cross_attn,'shape',None)}")
-    if not isinstance(pooled_output, torch.Tensor) or pooled_output.ndim != 2:
-        raise ValueError(f"'vector' must be a 2D tensor (B,V); got {type(pooled_output).__name__} shape={getattr(pooled_output,'shape',None)}")
-
-    if int(cross_attn.shape[0]) != int(pooled_output.shape[0]):
-        raise ValueError(
-            "conditioning batch mismatch: "
-            f"crossattn.B={int(cross_attn.shape[0])} vector.B={int(pooled_output.shape[0])}"
-        )
 
     result = dict(
         cross_attn=cross_attn,
-        pooled_output=pooled_output,
         model_conds=dict(
             c_crossattn=ConditionCrossAttn(cross_attn),
-            y=Condition(pooled_output),
         ),
     )
+    if has_vector:
+        if not isinstance(pooled_output, torch.Tensor) or pooled_output.ndim != 2:
+            raise ValueError(f"'vector' must be a 2D tensor (B,V); got {type(pooled_output).__name__} shape={getattr(pooled_output,'shape',None)}")
+        if int(cross_attn.shape[0]) != int(pooled_output.shape[0]):
+            raise ValueError(
+                "conditioning batch mismatch: "
+                f"crossattn.B={int(cross_attn.shape[0])} vector.B={int(pooled_output.shape[0])}"
+            )
+        result['pooled_output'] = pooled_output
+        result['model_conds']['y'] = Condition(pooled_output)
 
     if 'guidance' in cond:
         guidance = cond['guidance']
@@ -200,12 +200,16 @@ def compile_conditions(cond):
 
     has_t5_ids = 't5xxl_ids' in cond
     has_t5_weights = 't5xxl_weights' in cond
-    if has_t5_ids != has_t5_weights:
-        raise ValueError("conditioning must provide both 't5xxl_ids' and 't5xxl_weights' together")
+    has_t5_mask = 't5xxl_attention_mask' in cond
+    if len({has_t5_ids, has_t5_weights, has_t5_mask}) != 1:
+        raise ValueError(
+            "conditioning must provide 't5xxl_ids', 't5xxl_weights', and 't5xxl_attention_mask' together"
+        )
 
     if has_t5_ids:
         t5xxl_ids = cond['t5xxl_ids']
         t5xxl_weights = cond['t5xxl_weights']
+        t5xxl_attention_mask = cond['t5xxl_attention_mask']
         if not isinstance(t5xxl_ids, torch.Tensor) or t5xxl_ids.ndim != 2:
             raise ValueError(
                 f"'t5xxl_ids' must be a 2D tensor (B,S); got {type(t5xxl_ids).__name__} "
@@ -216,10 +220,20 @@ def compile_conditions(cond):
                 f"'t5xxl_weights' must be a 2D tensor (B,S); got {type(t5xxl_weights).__name__} "
                 f"shape={getattr(t5xxl_weights, 'shape', None)}"
             )
+        if not isinstance(t5xxl_attention_mask, torch.Tensor) or t5xxl_attention_mask.ndim != 2:
+            raise ValueError(
+                f"'t5xxl_attention_mask' must be a 2D tensor (B,S); got {type(t5xxl_attention_mask).__name__} "
+                f"shape={getattr(t5xxl_attention_mask, 'shape', None)}"
+            )
         if t5xxl_ids.shape != t5xxl_weights.shape:
             raise ValueError(
                 "conditioning shape mismatch: "
                 f"t5xxl_ids={tuple(t5xxl_ids.shape)} t5xxl_weights={tuple(t5xxl_weights.shape)}"
+            )
+        if t5xxl_ids.shape != t5xxl_attention_mask.shape:
+            raise ValueError(
+                "conditioning shape mismatch: "
+                f"t5xxl_ids={tuple(t5xxl_ids.shape)} t5xxl_attention_mask={tuple(t5xxl_attention_mask.shape)}"
             )
         if int(t5xxl_ids.shape[0]) != int(cross_attn.shape[0]):
             raise ValueError(
@@ -228,6 +242,7 @@ def compile_conditions(cond):
             )
         result['model_conds']['t5xxl_ids'] = Condition(t5xxl_ids.to(dtype=torch.long))
         result['model_conds']['t5xxl_weights'] = Condition(t5xxl_weights)
+        result['model_conds']['t5xxl_attention_mask'] = Condition(t5xxl_attention_mask.to(dtype=torch.long))
 
     if 'image_latents' in cond and cond['image_latents'] is not None:
         image_latents = cond['image_latents']
@@ -238,11 +253,13 @@ def compile_conditions(cond):
             )
         result['model_conds']['image_latents'] = Condition(image_latents)
 
-    if logger.isEnabledFor(logging.DEBUG):
-        logger.debug(
-            "compiled conditions: cross_attn=%s pooled=%s",
-            tuple(cross_attn.shape), tuple(pooled_output.shape)
-        )
+    emit_backend_message(
+        "compiled conditions",
+        logger=__name__,
+        level=logging.DEBUG,
+        cross_attn=tuple(cross_attn.shape),
+        pooled=None if pooled_output is None else tuple(pooled_output.shape),
+    )
     return [result]
 
 
@@ -267,4 +284,3 @@ def compile_weighted_conditions(cond, weights):
         results += h
 
     return results
-logger = logging.getLogger("backend.runtime.sampling.condition")

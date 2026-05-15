@@ -7,7 +7,8 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Main Tk application for the Codex launcher GUI.
-Builds the window + tabs (including `Manual Env Vars`), wires background tasks, and provides a stable `main()` entrypoint used by `apps/codex_launcher.py`.
+Builds the window + tabs (including `Manual Env Vars`), seeds launcher service handles from persisted launcher meta, wires background tasks,
+and provides a stable `main()` entrypoint used by `apps/codex_launcher.py`.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `CodexLauncherApp` (class): Tk app; orchestrates tabs + controller + polling.
@@ -58,7 +59,11 @@ class CodexLauncherApp(tk.Tk):
 
         store = LauncherProfileStore.load()
         log_buffer = CodexLogBuffer(capacity=4000)
-        services = default_services(log_buffer=log_buffer)
+        services = default_services(
+            log_buffer=log_buffer,
+            mode_profile=str(getattr(store.meta, "app_mode_profile", "") or ""),
+            frontend_dev_typecheck=bool(getattr(store.meta, "frontend_dev_typecheck", False)),
+        )
         self._controller = LauncherController(
             codex_root=self.codex_root,
             store=store,
@@ -85,6 +90,7 @@ class CodexLauncherApp(tk.Tk):
             self._controller,
             run_in_thread=self._run_in_thread,
             set_status=self._set_status,
+            mark_changed=self._mark_changed,
         )
         self._runtime_bootstrap_tab = RuntimeTab(
             self._controller,
@@ -107,6 +113,7 @@ class CodexLauncherApp(tk.Tk):
         self._manual_env_vars_tab = ManualEnvVarsTab(
             self._controller,
             canvas_bg=self._palette.bg1,
+            palette=self._palette,
             mark_changed=self._mark_changed,
         )
         self._diagnostics_tab = DiagnosticsTab(
@@ -122,16 +129,17 @@ class CodexLauncherApp(tk.Tk):
         )
 
         tabs = [
-            ("Services", self._services_tab.build(self._notebook)),
-            ("Bootstrap", self._runtime_bootstrap_tab.build(self._notebook)),
-            ("Engine", self._runtime_engine_tab.build(self._notebook)),
-            ("Safety", self._runtime_safety_tab.build(self._notebook)),
-            ("Manual Env Vars", self._manual_env_vars_tab.build(self._notebook)),
-            ("Diagnostics", self._diagnostics_tab.build(self._notebook)),
-            ("Logs", self._logs_tab.build(self._notebook)),
+            ("Services", self._services_tab.build(self._notebook), 0),
+            ("Bootstrap", self._runtime_bootstrap_tab.build(self._notebook), 0),
+            ("Engine", self._runtime_engine_tab.build(self._notebook), 0),
+            ("Safety", self._runtime_safety_tab.build(self._notebook), 2),
+            ("Manual Env Vars", self._manual_env_vars_tab.build(self._notebook), 0),
+            ("Diagnostics", self._diagnostics_tab.build(self._notebook), 0),
+            ("Logs", self._logs_tab.build(self._notebook), 0),
         ]
-        for name, frame in tabs:
-            self._notebook.add(frame, text=name)
+        for name, frame, underline in tabs:
+            self._notebook.add(frame, text=name, underline=underline)
+        self._notebook.enable_traversal()
 
         self._tab_change_guard = True
         try:
@@ -188,17 +196,23 @@ class CodexLauncherApp(tk.Tk):
     def _build_status_bar(self) -> None:
         bar = ttk.Frame(self, style="Section.Toolbar.TFrame")
         bar.grid(row=1, column=0, sticky="ew", padx=10, pady=10)
-        ttk.Button(bar, text="Save Settings", command=self._save).pack(side="left", padx=(0, 8))
-        ttk.Button(bar, text="Revert", command=self._revert).pack(side="left", padx=(0, 8))
-        ttk.Button(bar, text="Exit Without Saving", command=self._exit_no_save).pack(side="left")
+
+        action_group = ttk.Frame(bar, style="Section.Toolbar.TFrame")
+        action_group.pack(side="left")
+        ttk.Button(action_group, text="Save Settings", style="Primary.TButton", command=self._save).pack(side="left", padx=(0, 8))
+        ttk.Button(action_group, text="Revert", command=self._revert).pack(side="left", padx=(0, 8))
+        ttk.Button(action_group, text="Exit Without Saving", style="Quiet.TButton", command=self._exit_no_save).pack(side="left")
+
+        prefs_group = ttk.Frame(bar, style="Section.Toolbar.TFrame")
+        prefs_group.pack(side="left", padx=(16, 0))
         ttk.Checkbutton(
-            bar,
+            prefs_group,
             text="Show advanced controls",
             variable=self._show_advanced_controls,
             command=self._on_show_advanced_controls_changed,
             style="Toggle.TCheckbutton",
-        ).pack(side="left", padx=(16, 0))
-        ttk.Label(bar, textvariable=self._status_text, style="Muted.TLabel").pack(side="right")
+        ).pack(side="left")
+        ttk.Label(bar, textvariable=self._status_text, style="Statusline.TLabel").pack(side="right")
 
     # ------------------------------------------------------------------ status/dirty
 
@@ -228,7 +242,7 @@ class CodexLauncherApp(tk.Tk):
 
     def _mark_changed(self) -> None:
         self._unsaved_changes = True
-        self._set_status("Unsaved changes")
+        self._set_status("Unsaved changes. Start/Restart uses last saved settings until you save.")
 
     def _log_exception(self, label: str, exc: BaseException) -> None:
         self._controller.log_buffer.log("launcher", f"{label} failed: {exc}", stream="event")
@@ -272,7 +286,9 @@ class CodexLauncherApp(tk.Tk):
     def _run_checks_async(self) -> None:
         def _worker() -> None:
             try:
-                results = run_launch_checks()
+                results = run_launch_checks(
+                    mode_profile=str(getattr(self._controller.store.meta, "app_mode_profile", "") or ""),
+                )
             except Exception as exc:
                 results = [CodexLaunchCheck(name="launch-checks", ok=False, detail=str(exc))]
 
@@ -326,7 +342,7 @@ class CodexLauncherApp(tk.Tk):
         self._show_advanced_controls.set(bool(getattr(self._controller.store.meta, "show_advanced_controls", False)))
         self._apply_advanced_controls_visibility()
         self._unsaved_changes = False
-        self._set_status("Reverted")
+        self._set_status("Reverted to saved settings")
 
     def _exit_no_save(self) -> None:
         self._services_tab.dispose()

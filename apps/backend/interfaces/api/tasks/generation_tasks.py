@@ -14,15 +14,19 @@ When `CODEX_TRACE_CONTRACT=1`, emits prompt-redacted contract-trace JSONL events
 
 Symbols (top-level; keep in sync; no ghosts):
 - `encode_images` (function): Encode PIL images to base64 PNG payloads, optionally injecting PNG text metadata.
-- `build_engine_options` (function): Build `engine_options` dict from request extras + options snapshot (TE/VAE overrides, Z-Image variant, core streaming).
+- `build_engine_options` (function): Build `engine_options` dict from request extras + options snapshot (TE/VAE overrides, explicit checkpoint selectors, Z-Image variant, core streaming).
 - `resolve_request_smart_flags` (function): Parse/validate per-request smart flags (`smart_offload`/`smart_fallback`/`smart_cache`) as strict booleans.
 - `force_runtime_memory_cleanup` (function): Best-effort runtime cleanup used on worker error paths (orchestrator cache + memory manager + CUDA cache).
 - `_format_parameters_infotext` (function): Serializes generation `info` dicts into A1111-compatible infotext for PNG `parameters`.
 - `_build_png_metadata` (function): Builds PNG text chunks (`parameters` + provenance) for saved/API-encoded images.
+- `_PreparedImageExecutionResult` (dataclass): Encoded terminal image result produced by one prepared txt2img/img2img execution.
+- `_execute_prepared_image_request` (function): Runs one prepared txt2img/img2img request through the orchestrator and returns the encoded result payload.
 - `run_image_task` (function): Run a generic image task worker (txt2img/img2img) using a `prepare(payload)` callback and orchestrator event stream.
+- `run_image_automation_task` (function): Run a backend-owned image automation worker around the canonical txt2img/img2img request owners.
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import base64
 import contextlib
@@ -32,10 +36,16 @@ import json
 import logging
 import math
 import threading
+from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Optional
 
 from apps.backend.interfaces.api.inference_gate import acquire_inference_gate, release_inference_gate, single_flight_enabled
-from apps.backend.interfaces.api.public_errors import public_task_error_message
+from apps.backend.interfaces.api.public_errors import (
+    build_cancelled_task_error,
+    build_missing_result_task_error,
+    build_public_task_error,
+)
 from apps.backend.interfaces.api.task_registry import TaskCancelMode, TaskEntry, unregister_task
 from apps.backend.core.strict_values import parse_bool_value
 from apps.backend.runtime.diagnostics.contract_trace import error_meta
@@ -43,8 +53,12 @@ from apps.backend.runtime.diagnostics.contract_trace import emit_event as emit_c
 from apps.backend.runtime.diagnostics.contract_trace import hash_request_prompt
 from apps.backend.runtime.diagnostics.fallback_state import fallback_used as fallback_state_used
 from apps.backend.runtime.diagnostics.fallback_state import reset_fallback_state
+from apps.backend.runtime.load_authority import (
+    LoadAuthorityStage,
+    coordinator_load_permit,
+)
 
-logger = logging.getLogger("backend.api.tasks.generation")
+logger = get_backend_logger("backend.api.tasks.generation")
 
 
 def encode_images(images: Any, *, metadata: Optional[Mapping[str, str]] = None) -> list[dict[str, str]]:  # type: ignore[no-untyped-def]
@@ -101,7 +115,32 @@ def build_engine_options(*, req: Any, opts_snapshot: Callable[[], Any]) -> dict[
     vae_path_from_extras = extras.get("vae_path")
     if isinstance(vae_path_from_extras, str) and vae_path_from_extras.strip():
         engine_options["vae_path"] = vae_path_from_extras.strip()
-    engine_options["vae_source"] = "external" if "vae_path" in engine_options else "built_in"
+    vae_source_from_extras = extras.get("vae_source")
+    if vae_source_from_extras is None:
+        raise RuntimeError("Missing extras.vae_source.")
+    if not isinstance(vae_source_from_extras, str) or not vae_source_from_extras.strip():
+        raise RuntimeError("extras.vae_source must be 'built_in' or 'external'.")
+    normalized_vae_source = vae_source_from_extras.strip().lower()
+    if normalized_vae_source not in {"built_in", "external"}:
+        raise RuntimeError("extras.vae_source must be 'built_in' or 'external'.")
+    engine_options["vae_source"] = normalized_vae_source
+
+    checkpoint_core_only_from_extras = extras.get("checkpoint_core_only")
+    if checkpoint_core_only_from_extras is None:
+        raise RuntimeError("Missing extras.checkpoint_core_only.")
+    if not isinstance(checkpoint_core_only_from_extras, bool):
+        raise RuntimeError("extras.checkpoint_core_only must be a boolean.")
+    engine_options["checkpoint_core_only"] = checkpoint_core_only_from_extras
+
+    model_format_from_extras = extras.get("model_format")
+    if model_format_from_extras is None:
+        raise RuntimeError("Missing extras.model_format.")
+    if not isinstance(model_format_from_extras, str) or not model_format_from_extras.strip():
+        raise RuntimeError("extras.model_format must be one of: checkpoint, diffusers, gguf.")
+    normalized_model_format = model_format_from_extras.strip().lower()
+    if normalized_model_format not in {"checkpoint", "diffusers", "gguf"}:
+        raise RuntimeError("extras.model_format must be one of: checkpoint, diffusers, gguf.")
+    engine_options["model_format"] = normalized_model_format
 
     tenc_path_from_extras = extras.get("tenc_path")
     if isinstance(tenc_path_from_extras, str) and tenc_path_from_extras.strip():
@@ -130,7 +169,7 @@ def build_engine_options(*, req: Any, opts_snapshot: Callable[[], Any]) -> dict[
         default=False,
     )
     if core_streaming_enabled:
-        engine_options["codex_core_streaming"] = True
+        engine_options["core_streaming_enabled"] = True
 
     return engine_options
 
@@ -175,7 +214,11 @@ def force_runtime_memory_cleanup(*, reason: str, orch: Any | None = None) -> Non
         )
     else:
         try:
-            memory_state.manager.unload_all_models()
+            with coordinator_load_permit(
+                owner="api.tasks.generation.force_runtime_memory_cleanup",
+                stage=LoadAuthorityStage.CLEANUP,
+            ):
+                memory_state.manager.unload_all_models()
         except Exception as exc:
             cleanup_failures.append(f"unload_all_models:{exc}")
             logger.warning(
@@ -321,15 +364,15 @@ def _format_parameters_infotext(info_obj: object) -> str:
     if steps is not None and steps >= 0:
         add_kv("Steps", steps)
 
-    sampler = _as_text(info.get("sampler_name", "") or info.get("sampler", ""))
+    sampler = _as_text(info.get("sampler", ""))
     if sampler:
         add_kv("Sampler", sampler)
 
-    scheduler = _as_text(info.get("schedule_type", "") or info.get("scheduler", ""))
+    scheduler = _as_text(info.get("scheduler", ""))
     if scheduler:
         add_kv("Schedule type", scheduler)
 
-    cfg_scale = _format_number(info.get("cfg_scale", info.get("guidance_scale")))
+    cfg_scale = _format_number(info.get("guidance_scale"))
     if cfg_scale is not None:
         add_kv("CFG scale", cfg_scale)
 
@@ -346,11 +389,11 @@ def _format_parameters_infotext(info_obj: object) -> str:
     if model_hash:
         add_kv("Model hash", model_hash)
 
-    model_name = _as_text(info.get("model", "") or info.get("sd_model_checkpoint", ""))
+    model_name = _as_text(info.get("model", ""))
     if model_name:
         add_kv("Model", model_name)
 
-    vae_name = _as_text(info.get("vae", "") or info.get("vae_name", ""))
+    vae_name = _as_text(info.get("vae", ""))
     if vae_name:
         add_kv("VAE", vae_name)
 
@@ -358,13 +401,11 @@ def _format_parameters_infotext(info_obj: object) -> str:
     if clip_skip is not None and clip_skip >= 0:
         add_kv("Clip skip", clip_skip)
 
-    denoise = _format_number(
-        info.get("denoising_strength", info.get("denoise_strength", info.get("denoiseStrength")))
-    )
+    denoise = _format_number(info.get("denoising_strength"))
     if denoise is not None:
         add_kv("Denoising strength", denoise)
 
-    rng = _as_text(info.get("rng", "") or info.get("rng_source", ""))
+    rng = _as_text(info.get("rng", ""))
     if rng:
         add_kv("RNG", rng)
 
@@ -411,6 +452,180 @@ def _build_png_metadata(info_obj: object, *, generation_provenance: Mapping[str,
     return metadata
 
 
+@dataclass(frozen=True)
+class _PreparedImageExecutionResult:
+    result: dict[str, Any] | None
+    cancelled_immediate: bool
+
+
+def _merge_trace_meta(*parts: Mapping[str, Any] | None) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for part in parts:
+        if not isinstance(part, Mapping):
+            continue
+        merged.update(part)
+    return merged
+
+
+def _execute_prepared_image_request(
+    *,
+    task_id: str,
+    mode: str,
+    task_type: Any,
+    req: Any,
+    engine_key: str,
+    model_ref: str | None,
+    device: str,
+    entry: TaskEntry,
+    orch: Any,
+    live_preview: Any,
+    opts_get: Callable[..., Any],
+    opts_snapshot: Callable[[], Any],
+    generation_provenance: Mapping[str, str],
+    save_generated_images: Callable[..., Any],
+    push: Callable[[dict[str, Any]], None],
+    storage_dtype: object,
+    compute_dtype: object,
+    fallback_enabled: bool,
+    prompt_hash_value: str,
+    smart_offload: bool,
+    smart_fallback: bool,
+    smart_cache: bool,
+    trace_meta: Mapping[str, Any] | None = None,
+    on_immediate_cancel: Callable[[], None] | None = None,
+) -> _PreparedImageExecutionResult:
+    preview_cfg = live_preview.build_task_config(opts_get)
+    entry.last_preview_id_sent = 0
+    engine_options = build_engine_options(req=req, opts_snapshot=opts_snapshot)
+
+    from apps.backend.core.requests import ProgressEvent, ResultEvent
+    from apps.backend.core.state import state as backend_state
+    from apps.backend.runtime.memory.smart_offload import smart_runtime_overrides
+
+    def _fallback_used_now() -> bool:
+        return bool(fallback_enabled and fallback_state_used())
+
+    cancelled_immediate = False
+    result: dict[str, Any] | None = None
+    expected_progress_owner_token = f"task:{task_id}"
+    backend_state.clear_progress_snapshot()
+    with preview_cfg.runtime_overrides(), smart_runtime_overrides(
+        smart_offload=smart_offload,
+        smart_fallback=smart_fallback,
+        smart_cache=smart_cache,
+    ):
+        for ev in orch.run(
+            task_type,
+            engine_key,
+            req,
+            model_ref=model_ref,
+            engine_options=engine_options,
+        ):
+            if entry.cancel_requested and entry.cancel_mode is TaskCancelMode.IMMEDIATE:
+                if not cancelled_immediate and callable(on_immediate_cancel):
+                    on_immediate_cancel()
+                cancelled_immediate = True
+                continue
+
+            if isinstance(ev, ProgressEvent):
+                evt: dict[str, Any] = {
+                    "type": "progress",
+                    "stage": ev.stage,
+                    "percent": ev.percent,
+                    "step": ev.step,
+                    "total_steps": ev.total_steps,
+                    "eta_seconds": ev.eta_seconds,
+                }
+                if ev.message is not None:
+                    evt["message"] = str(ev.message)
+                if ev.data:
+                    evt["data"] = dict(ev.data)
+                live_preview.maybe_attach_to_progress_event(
+                    evt,
+                    entry,
+                    config=preview_cfg,
+                    expected_owner_token=expected_progress_owner_token,
+                )
+                push(evt)
+                emit_contract_trace(
+                    task_id=task_id,
+                    mode=mode,
+                    stage=str(ev.stage or "progress"),
+                    action="progress",
+                    component="orchestrator",
+                    device=device,
+                    storage_dtype=(str(storage_dtype) if storage_dtype is not None else None),
+                    compute_dtype=(str(compute_dtype) if compute_dtype is not None else None),
+                    strict=True,
+                    fallback_enabled=fallback_enabled,
+                    fallback_used=_fallback_used_now(),
+                    prompt_hash_value=prompt_hash_value,
+                    meta=_merge_trace_meta(
+                        {
+                            "step": ev.step,
+                            "total_steps": ev.total_steps,
+                            "percent": ev.percent,
+                        },
+                        trace_meta,
+                    ),
+                )
+                continue
+
+            if not isinstance(ev, ResultEvent):
+                continue
+
+            payload_obj = ev.payload or {}
+            info_raw = payload_obj.get("info", "{}")
+            try:
+                info_obj = json.loads(info_raw)
+            except Exception:
+                info_obj = info_raw
+            info_dict = info_obj if isinstance(info_obj, dict) else None
+            if isinstance(info_obj, dict):
+                for key, value in generation_provenance.items():
+                    info_obj.setdefault(key, value)
+            png_metadata = _build_png_metadata(info_obj, generation_provenance=generation_provenance)
+
+            if parse_bool_value(
+                opts_get("samples_save", True),
+                field="options.samples_save",
+                default=True,
+            ):
+                save_generated_images(
+                    payload_obj.get("images", []),
+                    task=task_type,
+                    info=info_dict,
+                    metadata=png_metadata,
+                )
+
+            result = {
+                "images": encode_images(payload_obj.get("images", []), metadata=png_metadata),
+                "info": info_obj,
+            }
+            emit_contract_trace(
+                task_id=task_id,
+                mode=mode,
+                stage="result",
+                action="emit",
+                component="orchestrator",
+                device=device,
+                storage_dtype=(str(storage_dtype) if storage_dtype is not None else None),
+                compute_dtype=(str(compute_dtype) if compute_dtype is not None else None),
+                strict=True,
+                fallback_enabled=fallback_enabled,
+                fallback_used=_fallback_used_now(),
+                prompt_hash_value=prompt_hash_value,
+                meta=_merge_trace_meta(
+                    {"image_count": len(payload_obj.get("images", []) or [])},
+                    trace_meta,
+                ),
+            )
+
+    if not cancelled_immediate and result is None:
+        raise RuntimeError("prepared image execution completed without result payload")
+    return _PreparedImageExecutionResult(result=result, cancelled_immediate=cancelled_immediate)
+
+
 def run_image_task(
     *,
     task_id: str,
@@ -448,7 +663,7 @@ def run_image_task(
             prompt_hash_value="",
             meta=error_meta(err),
         )
-        entry.error = public_task_error_message(err)
+        entry.error = build_public_task_error(err)
         entry.mark_finished(success=False)
         unregister_task(task_id)
         raise
@@ -507,7 +722,7 @@ def run_image_task(
                 should_cancel=lambda: bool(entry.cancel_requested),
             )
             if not acquired:
-                entry.error = "cancelled"
+                entry.error = build_cancelled_task_error()
                 emit_contract_trace(
                     task_id=task_id,
                     mode=mode,
@@ -545,143 +760,50 @@ def run_image_task(
                 meta={"single_flight_enabled": single_flight},
             )
 
-            preview_cfg = live_preview.build_task_config(opts_get)
-            entry.last_preview_id_sent = 0
-
-            engine_options = build_engine_options(req=req, opts_snapshot=opts_snapshot)
-
-            from apps.backend.core.requests import ProgressEvent, ResultEvent
-            from apps.backend.core.state import state as backend_state
-            from apps.backend.runtime.memory.smart_offload import smart_runtime_overrides
-
-            cancelled_immediate = False
-            backend_state.clear_progress_snapshot()
-            with preview_cfg.runtime_overrides(), smart_runtime_overrides(
+            prepared_result = _execute_prepared_image_request(
+                task_id=task_id,
+                mode=mode,
+                task_type=task_type,
+                req=req,
+                engine_key=engine_key,
+                model_ref=model_ref,
+                device=device,
+                entry=entry,
+                orch=orch,
+                live_preview=live_preview,
+                opts_get=opts_get,
+                opts_snapshot=opts_snapshot,
+                generation_provenance=generation_provenance,
+                save_generated_images=save_generated_images,
+                push=push,
+                storage_dtype=storage_dtype,
+                compute_dtype=compute_dtype,
+                fallback_enabled=fallback_enabled,
+                prompt_hash_value=prompt_hash_value,
                 smart_offload=smart_offload,
                 smart_fallback=smart_fallback,
                 smart_cache=smart_cache,
-            ):
-                for ev in orch.run(
-                    task_type,
-                    engine_key,
-                    req,
-                    model_ref=model_ref,
-                    engine_options=engine_options,
-                ):
-                    if entry.cancel_requested and entry.cancel_mode is TaskCancelMode.IMMEDIATE:
-                        if not cancelled_immediate:
-                            entry.error = "cancelled"
-                        cancelled_immediate = True
-                        # Keep draining orchestrator events so generator/use-case finalizers run
-                        # before this worker marks the task done and releases the inference gate.
-                        continue
-
-                    if isinstance(ev, ProgressEvent):
-                        evt: dict[str, Any] = {
-                            "type": "progress",
-                            "stage": ev.stage,
-                            "percent": ev.percent,
-                            "step": ev.step,
-                            "total_steps": ev.total_steps,
-                            "eta_seconds": ev.eta_seconds,
-                        }
-                        if ev.message is not None:
-                            evt["message"] = str(ev.message)
-                        if ev.data:
-                            evt["data"] = dict(ev.data)
-                        live_preview.maybe_attach_to_progress_event(evt, entry, config=preview_cfg)
-                        push(evt)
-                        emit_contract_trace(
-                            task_id=task_id,
-                            mode=mode,
-                            stage=str(ev.stage or "progress"),
-                            action="progress",
-                            component="orchestrator",
-                            device=device,
-                            storage_dtype=(str(storage_dtype) if storage_dtype is not None else None),
-                            compute_dtype=(str(compute_dtype) if compute_dtype is not None else None),
-                            strict=True,
-                            fallback_enabled=fallback_enabled,
-                            fallback_used=_fallback_used_now(),
-                            prompt_hash_value=prompt_hash_value,
-                            meta={
-                                "step": ev.step,
-                                "total_steps": ev.total_steps,
-                                "percent": ev.percent,
-                            },
-                        )
-                        continue
-
-                    if not isinstance(ev, ResultEvent):
-                        continue
-
-                    payload_obj = ev.payload or {}
-                    info_raw = payload_obj.get("info", "{}")
-                    try:
-                        info_obj = json.loads(info_raw)
-                    except Exception:
-                        info_obj = info_raw
-                    info_dict = info_obj if isinstance(info_obj, dict) else None
-                    if isinstance(info_obj, dict):
-                        for key, value in generation_provenance.items():
-                            info_obj.setdefault(key, value)
-                    png_metadata = _build_png_metadata(info_obj, generation_provenance=generation_provenance)
-
-                    if parse_bool_value(
-                        opts_get("samples_save", True),
-                        field="options.samples_save",
-                        default=True,
-                    ):
-                        save_generated_images(
-                            payload_obj.get("images", []),
-                            task=task_type,
-                            info=info_dict,
-                            metadata=png_metadata,
-                        )
-
-                    result = {
-                        "images": encode_images(payload_obj.get("images", []), metadata=png_metadata),
-                        "info": info_obj,
-                    }
-                    entry.result = {"status": "completed", "result": result}
-                    emit_contract_trace(
-                        task_id=task_id,
-                        mode=mode,
-                        stage="result",
-                        action="emit",
-                        component="orchestrator",
-                        device=device,
-                        storage_dtype=(str(storage_dtype) if storage_dtype is not None else None),
-                        compute_dtype=(str(compute_dtype) if compute_dtype is not None else None),
-                        strict=True,
-                        fallback_enabled=fallback_enabled,
-                        fallback_used=_fallback_used_now(),
-                        prompt_hash_value=prompt_hash_value,
-                        meta={"image_count": len(payload_obj.get("images", []) or [])},
-                    )
-
-            success = not cancelled_immediate
+                on_immediate_cancel=lambda: setattr(entry, "error", build_cancelled_task_error()),
+            )
+            if prepared_result.result is not None:
+                entry.result = {"status": "completed", "result": prepared_result.result}
+            success = not prepared_result.cancelled_immediate
         except Exception as err:  # pragma: no cover - surfaces runtime errors
+            engine_execution_error = False
             try:
-                from apps.backend.runtime.diagnostics.exception_hook import dump_exception as _dump_exc
+                from apps.backend.core.exceptions import EngineExecutionError, EngineLoadError
 
-                _dump_exc(type(err), err, err.__traceback__, where="generation_image_worker", context={"task_id": task_id})
+                engine_execution_error = isinstance(err, (EngineExecutionError, EngineLoadError))
             except Exception:
                 pass
-            try:
-                from apps.backend.core.exceptions import EngineExecutionError
 
-                if isinstance(err, EngineExecutionError):
-                    logger.error(
-                        "EngineExecutionError in generation_image_worker "
-                        "(task_id=%s mode=%s engine=%s): %s",
-                        task_id,
-                        mode,
-                        engine_key,
-                        err,
-                    )
-            except Exception:
-                pass
+            if not engine_execution_error:
+                try:
+                    from apps.backend.runtime.diagnostics.exception_hook import dump_exception as _dump_exc
+
+                    _dump_exc(type(err), err, err.__traceback__, where="generation_image_worker", context={"task_id": task_id})
+                except Exception:
+                    pass
 
             cleanup_err: Exception | None = None
             try:
@@ -700,7 +822,7 @@ def run_image_task(
                 )
             if cleanup_err is not None:
                 err = RuntimeError(f"{err} [runtime_cleanup_error: {cleanup_err}]")
-            entry.error = public_task_error_message(err)
+            entry.error = build_public_task_error(err)
             fallback_used = _fallback_used_now() or (fallback_enabled and ("fallback" in str(err).lower()))
             emit_contract_trace(
                 task_id=task_id,
@@ -723,7 +845,7 @@ def run_image_task(
                 result_obj = entry.result.get("result") if isinstance(entry.result, dict) else None
                 if not isinstance(result_obj, dict):
                     invariant_err = RuntimeError("task completed without result payload")
-                    entry.error = "engine error: task completed without result payload"
+                    entry.error = build_missing_result_task_error()
                     success = False
                     emit_contract_trace(
                         task_id=task_id,
@@ -769,3 +891,293 @@ def run_image_task(
                     )
 
     threading.Thread(target=worker, name=f"{task_type.value}-task-{task_id}", daemon=True).start()
+
+
+def run_image_automation_task(
+    *,
+    task_id: str,
+    request: Any,
+    entry: TaskEntry,
+    device: str,
+    prepare_txt2img: Callable[[dict[str, Any]], tuple[Any, str, Optional[str]]],
+    prepare_img2img: Callable[[dict[str, Any]], tuple[Any, str, Optional[str]]],
+    orch: Any,
+    ensure_default_engines_registered: Callable[[], None],
+    live_preview: Any,
+    opts_get: Callable[..., Any],
+    opts_snapshot: Callable[[], Any],
+    generation_provenance: Mapping[str, str],
+    save_generated_images: Callable[..., Any],
+) -> None:
+    from apps.backend.core.engine_interface import TaskType
+    from apps.backend.core.requests import ImageAutomationRequest
+    from apps.backend.use_cases.image_automation import (
+        ImageAutomationImmediateCancel,
+        run_image_automation,
+    )
+
+    if not isinstance(request, ImageAutomationRequest):
+        raise TypeError("run_image_automation_task requires ImageAutomationRequest")
+
+    mode = str(request.mode or "").strip()
+    if mode == "txt2img":
+        task_type = TaskType.TXT2IMG
+        prepare_iteration = prepare_txt2img
+    elif mode == "img2img":
+        task_type = TaskType.IMG2IMG
+        prepare_iteration = prepare_img2img
+    else:
+        raise ValueError(f"Unsupported image automation mode {request.mode!r}.")
+
+    def push(event: dict[str, Any]) -> None:
+        entry.push_event(event)
+
+    push({"type": "status", "stage": "queued"})
+    try:
+        ensure_default_engines_registered()
+    except Exception as err:
+        emit_contract_trace(
+            task_id=task_id,
+            mode=f"{mode}_automation",
+            stage="prepare",
+            action="error",
+            component="router",
+            device=device,
+            strict=True,
+            fallback_enabled=False,
+            fallback_used=False,
+            prompt_hash_value="",
+            meta=error_meta(err),
+        )
+        entry.error = build_public_task_error(err)
+        entry.mark_finished(success=False)
+        unregister_task(task_id)
+        raise
+
+    prompt_hash_value = hash_request_prompt(SimpleNamespace(**dict(request.template or {})))
+    single_flight = single_flight_enabled()
+
+    emit_contract_trace(
+        task_id=task_id,
+        mode=f"{mode}_automation",
+        stage="prepare",
+        action="ready",
+        component="router",
+        device=device,
+        strict=True,
+        fallback_enabled=False,
+        fallback_used=False,
+        prompt_hash_value=prompt_hash_value,
+        meta={
+            "mode": mode,
+            "loop_mode": request.loop.mode,
+            "loop_count": request.loop.count,
+            "single_flight_enabled": single_flight,
+        },
+    )
+
+    def worker() -> None:
+        acquired = False
+        success = False
+        reset_fallback_state()
+        try:
+            if single_flight:
+                push({"type": "status", "stage": "waiting_for_inference"})
+                emit_contract_trace(
+                    task_id=task_id,
+                    mode=f"{mode}_automation",
+                    stage="waiting_for_inference",
+                    action="wait",
+                    component="inference_gate",
+                    device=device,
+                    strict=True,
+                    fallback_enabled=False,
+                    fallback_used=False,
+                    prompt_hash_value=prompt_hash_value,
+                    meta={"single_flight_enabled": single_flight},
+                )
+
+            acquired = acquire_inference_gate(
+                should_cancel=lambda: bool(entry.cancel_requested),
+            )
+            if not acquired:
+                entry.error = build_cancelled_task_error()
+                emit_contract_trace(
+                    task_id=task_id,
+                    mode=f"{mode}_automation",
+                    stage="inference_gate",
+                    action="cancelled",
+                    component="inference_gate",
+                    device=device,
+                    strict=True,
+                    fallback_enabled=False,
+                    fallback_used=False,
+                    prompt_hash_value=prompt_hash_value,
+                    meta={"cancel_mode": str(entry.cancel_mode.value)},
+                )
+                return
+
+            push({"type": "status", "stage": "running"})
+            from apps.backend.interfaces.api.device_selection import apply_primary_device
+
+            apply_primary_device(device)
+            emit_contract_trace(
+                task_id=task_id,
+                mode=f"{mode}_automation",
+                stage="run",
+                action="start",
+                component="task",
+                device=device,
+                strict=True,
+                fallback_enabled=False,
+                fallback_used=False,
+                prompt_hash_value=prompt_hash_value,
+                meta={"mode": mode, "loop_mode": request.loop.mode},
+            )
+
+            iteration_counter = 0
+
+            def execute_iteration(iteration_payload: dict[str, Any]) -> dict[str, Any]:
+                nonlocal iteration_counter
+                iteration_counter += 1
+                req, engine_key, model_ref = prepare_iteration(iteration_payload)
+                smart_offload, smart_fallback, smart_cache = resolve_request_smart_flags(req)
+                prepared = _execute_prepared_image_request(
+                    task_id=task_id,
+                    mode=mode,
+                    task_type=task_type,
+                    req=req,
+                    engine_key=engine_key,
+                    model_ref=model_ref,
+                    device=device,
+                    entry=entry,
+                    orch=orch,
+                    live_preview=live_preview,
+                    opts_get=opts_get,
+                    opts_snapshot=opts_snapshot,
+                    generation_provenance=generation_provenance,
+                    save_generated_images=save_generated_images,
+                    push=push,
+                    storage_dtype=getattr(req, "core_dtype", None),
+                    compute_dtype=getattr(req, "core_compute_dtype", None),
+                    fallback_enabled=smart_fallback,
+                    prompt_hash_value=hash_request_prompt(req),
+                    smart_offload=smart_offload,
+                    smart_fallback=smart_fallback,
+                    smart_cache=smart_cache,
+                    trace_meta={
+                        "automation_iteration_index": iteration_counter,
+                        "automation_loop_mode": request.loop.mode,
+                    },
+                )
+                if prepared.cancelled_immediate:
+                    raise ImageAutomationImmediateCancel("cancelled")
+                if not isinstance(prepared.result, dict):
+                    raise RuntimeError("automation iteration completed without result payload")
+                return prepared.result
+
+            automation_result = run_image_automation(
+                request,
+                execute_iteration=execute_iteration,
+                emit_iteration=push,
+                emit_progress=push,
+                cancel_snapshot=lambda: (bool(entry.cancel_requested), entry.cancel_mode),
+            )
+            entry.flush_pending_callbacks()
+            final_result = dict(automation_result.last_result)
+            gallery_images = entry.recoverable_automation_gallery_images()
+            raw_info = final_result.get("info")
+            if isinstance(raw_info, dict):
+                info_payload = dict(raw_info)
+                info_payload["last_iteration_info"] = dict(raw_info)
+            else:
+                info_payload = {"last_iteration_info": raw_info}
+            info_payload["automation_summary"] = dict(automation_result.automation_summary)
+            final_result["info"] = info_payload
+            entry.result = {"status": "completed", "result": final_result}
+            if gallery_images:
+                entry.result["automation_gallery_images"] = gallery_images
+            success = True
+        except ImageAutomationImmediateCancel:
+            entry.error = build_cancelled_task_error()
+            success = False
+        except Exception as err:  # pragma: no cover - runtime surfaces
+            cleanup_err: Exception | None = None
+            try:
+                force_runtime_memory_cleanup(
+                    reason=f"{mode}_automation:worker_error",
+                    orch=orch,
+                )
+            except Exception as cleanup_exc:
+                cleanup_err = cleanup_exc
+                logger.error(
+                    "Runtime memory cleanup failed after automation worker error (task_id=%s mode=%s): %s",
+                    task_id,
+                    mode,
+                    cleanup_exc,
+                    exc_info=False,
+                )
+            if cleanup_err is not None:
+                err = RuntimeError(f"{err} [runtime_cleanup_error: {cleanup_err}]")
+            entry.error = build_public_task_error(err)
+            emit_contract_trace(
+                task_id=task_id,
+                mode=f"{mode}_automation",
+                stage="error",
+                action="error",
+                component="orchestrator",
+                device=device,
+                strict=True,
+                fallback_enabled=False,
+                fallback_used=False,
+                prompt_hash_value=prompt_hash_value,
+                meta=error_meta(err),
+            )
+            success = False
+        finally:
+            if success:
+                result_obj = entry.result.get("result") if isinstance(entry.result, dict) else None
+                if not isinstance(result_obj, dict):
+                    invariant_err = RuntimeError("automation task completed without result payload")
+                    entry.error = build_missing_result_task_error("automation task")
+                    success = False
+                    emit_contract_trace(
+                        task_id=task_id,
+                        mode=f"{mode}_automation",
+                        stage="error",
+                        action="error",
+                        component="task",
+                        device=device,
+                        strict=True,
+                        fallback_enabled=False,
+                        fallback_used=False,
+                        prompt_hash_value=prompt_hash_value,
+                        meta=error_meta(invariant_err),
+                    )
+            entry.mark_finished(success=success)
+            entry.schedule_cleanup(task_id)
+            emit_contract_trace(
+                task_id=task_id,
+                mode=f"{mode}_automation",
+                stage="end",
+                action="finish",
+                component="task",
+                device=device,
+                strict=True,
+                fallback_enabled=False,
+                fallback_used=False,
+                prompt_hash_value=prompt_hash_value,
+                meta={"success": success},
+            )
+            if acquired:
+                try:
+                    release_inference_gate()
+                except Exception as exc:
+                    logger.warning(
+                        "inference gate release failed in automation worker (task_id=%s): %s",
+                        task_id,
+                        exc,
+                        exc_info=False,
+                    )
+
+    threading.Thread(target=worker, name=f"{mode}-automation-task-{task_id}", daemon=True).start()

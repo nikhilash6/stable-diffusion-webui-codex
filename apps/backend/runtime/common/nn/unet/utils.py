@@ -20,6 +20,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 
@@ -30,7 +31,7 @@ import torch
 from einops import repeat
 from torch import nn
 
-_log = logging.getLogger("backend.runtime.common.nn.unet.utils")
+_log = get_backend_logger("backend.runtime.common.nn.unet.utils")
 
 
 def checkpoint(function, args, parameters, enable: bool = False):

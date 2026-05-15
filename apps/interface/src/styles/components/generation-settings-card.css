@@ -10,15 +10,9 @@
   .gen-card .cdx-res-presets { display: grid; grid-template-columns: repeat(2, max-content); gap: 0.4rem; justify-content: end; }
   .gen-card .two-up { display: flex; flex-wrap: wrap; gap: 1rem; }
   .gen-card .two-up > .field { flex: 1 1 12rem; min-width: 0; }
-  .gen-card .right-row { display: flex; gap: 0.8rem; flex-wrap: wrap; }
-  .gen-card .gc-seed { margin-top: 0.6rem; }
-  .gen-card .gc-footer { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 1rem; }
-  .gen-card .gc-footer > .field { flex: 1 1 18rem; min-width: 0; }
   .gen-card .field { display: flex; flex-direction: column; width: 100%; gap: 0.4rem; }
   .gen-card .row-split { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
   .gen-card .row-inline { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
-  .gen-card .slider-grow { flex: 1 1 auto; }
-  .gen-card .ml-steps { margin-left: 0.5rem; }
   .gen-card .ui-input-sm { height: var(--control-h-sm); }
   /* explicit widths by field */
   .gen-card .btn-swap { width: 2.25rem; height: 2rem; border-radius: 0.5rem; border: 0.0625rem solid hsla(0,0%,100%,0.18); background: hsla(0,0%,100%,0.08); }
@@ -26,17 +20,12 @@
   .gen-card .btn-swap.btn-swap--active { border-color: hsla(193, 92%, 66%, 0.75); background: hsla(193, 92%, 66%, 0.18); }
   .gen-card .btn-swap.btn-swap--active:hover { background: hsla(193, 92%, 66%, 0.24); }
   .gen-card .btn-swap-icon { display: inline-block; transform: rotate(90deg); }
-  .gen-card .seed-group { display: flex; flex-direction: column; gap: 0.35rem; }
-  .gen-card .seed-row { display: flex; align-items: center; gap: 0.4rem; }
   /* use shared .btn-icon base */
   .gen-card .number-with-controls { position: relative; display: inline-flex; align-items: center; }
   .gen-card .number-with-controls .pad-right { padding-right: 4.5rem; }
   .gen-card .number-with-controls .stepper { position: absolute; right: 0.375rem; top: 0; bottom: 0; margin-block: auto; height: max-content; display: inline-flex; align-items: center; gap: 0.375rem; }
   .gen-card .step-btn { width: 1.75rem; height: 1.75rem; border-radius: 0.375rem; border: 0.0625rem solid hsla(0,0%,100%,0.18); background: hsla(0,0%,100%,0.08); font-weight: 700; }
   .gen-card .step-btn:hover { background: hsla(0,0%,100%,0.16); }
-  .gen-card .field-right { display: contents; }
-  .gen-card .compact .ui-input-sm { height: var(--control-h-sm); }
-  .gen-card .cfg-field { margin-left: auto; width: 100% }
   .gen-card .cfg-advanced-row {
     margin-top: -0.35rem;
     padding-top: 0.5rem;

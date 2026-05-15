@@ -7,8 +7,8 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Settings panel for model search paths (`/api/paths`).
-Edits engine-specific checkpoint/VAE/LoRA/text-encoder roots (`sd15/sdxl/flux1/anima/wan22`) and persists them via the backend paths API,
-using `PathList` to manage per-key lists.
+Edits engine-specific checkpoint/VAE/LoRA/text-encoder/connectors roots (`sd15/sdxl/flux1/flux2/anima/ltx2/wan22`) plus dedicated IP-Adapter model/image-encoder roots,
+using `PathList` to manage per-key lists and persisting them via the backend paths API.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `SettingsPaths` (component): Settings panel for model and asset path roots.
@@ -86,6 +86,28 @@ Symbols (top-level; keep in sync; no ghosts):
     </div>
 
     <div class="panel-section">
+      <h3 class="label-muted">FLUX.2</h3>
+      <div class="space-y-2">
+        <div>
+          <label class="label-muted">Checkpoints</label>
+          <PathList v-model="paths.flux2.ckpt" />
+        </div>
+        <div>
+          <label class="label-muted">VAE</label>
+          <PathList v-model="paths.flux2.vae" />
+        </div>
+        <div>
+          <label class="label-muted">LoRA</label>
+          <PathList v-model="paths.flux2.loras" />
+        </div>
+        <div>
+          <label class="label-muted">Text Encoders</label>
+          <PathList v-model="paths.flux2.tenc" />
+        </div>
+      </div>
+    </div>
+
+    <div class="panel-section">
       <h3 class="label-muted">Anima</h3>
       <div class="space-y-2">
         <div>
@@ -103,6 +125,32 @@ Symbols (top-level; keep in sync; no ghosts):
         <div>
           <label class="label-muted">Text Encoders</label>
           <PathList v-model="paths.anima.tenc" />
+        </div>
+      </div>
+    </div>
+
+    <div class="panel-section">
+      <h3 class="label-muted">LTX 2.3</h3>
+      <div class="space-y-2">
+        <div>
+          <label class="label-muted">Checkpoints</label>
+          <PathList v-model="paths.ltx2.ckpt" />
+        </div>
+        <div>
+          <label class="label-muted">VAE</label>
+          <PathList v-model="paths.ltx2.vae" />
+        </div>
+        <div>
+          <label class="label-muted">Connectors</label>
+          <PathList v-model="paths.ltx2.connectors" />
+        </div>
+        <div>
+          <label class="label-muted">LoRA</label>
+          <PathList v-model="paths.ltx2.loras" />
+        </div>
+        <div>
+          <label class="label-muted">Text Encoders</label>
+          <PathList v-model="paths.ltx2.tenc" />
         </div>
       </div>
     </div>
@@ -129,6 +177,20 @@ Symbols (top-level; keep in sync; no ghosts):
       </div>
     </div>
 
+    <div class="panel-section">
+      <h3 class="label-muted">IP-Adapter</h3>
+      <div class="space-y-2">
+        <div>
+          <label class="label-muted">Models</label>
+          <PathList v-model="ipAdapterPaths.models" />
+        </div>
+        <div>
+          <label class="label-muted">Image Encoders</label>
+          <PathList v-model="ipAdapterPaths.imageEncoders" />
+        </div>
+      </div>
+    </div>
+
     <div class="settings-paths-actions">
       <button class="btn btn-md btn-outline" type="button" @click="reload">Reload</button>
       <button class="btn btn-md btn-primary" type="button" @click="save">Save</button>
@@ -141,17 +203,25 @@ import { onMounted, reactive } from 'vue'
 import { fetchPaths, updatePaths } from '../../api/client'
 import PathList from './widgets/PathList.vue'
 
-type EngineId = 'sd15' | 'sdxl' | 'flux1' | 'anima' | 'wan22'
-type EnginePaths = { ckpt: string[]; vae: string[]; loras: string[]; tenc: string[] }
+type EngineId = 'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'anima' | 'ltx2' | 'wan22'
+type EnginePaths = { ckpt: string[]; vae: string[]; loras: string[]; tenc: string[]; connectors: string[] }
 type EnginePathsState = Record<EngineId, EnginePaths>
+type IpAdapterPaths = { models: string[]; imageEncoders: string[] }
 type RawPaths = Record<string, string[]>
 
 const paths = reactive<EnginePathsState>({
-  sd15: { ckpt: [], vae: [], loras: [], tenc: [] },
-  sdxl: { ckpt: [], vae: [], loras: [], tenc: [] },
-  flux1: { ckpt: [], vae: [], loras: [], tenc: [] },
-  anima: { ckpt: [], vae: [], loras: [], tenc: [] },
-  wan22: { ckpt: [], vae: [], loras: [], tenc: [] },
+  sd15: { ckpt: [], vae: [], loras: [], tenc: [], connectors: [] },
+  sdxl: { ckpt: [], vae: [], loras: [], tenc: [], connectors: [] },
+  flux1: { ckpt: [], vae: [], loras: [], tenc: [], connectors: [] },
+  flux2: { ckpt: [], vae: [], loras: [], tenc: [], connectors: [] },
+  anima: { ckpt: [], vae: [], loras: [], tenc: [], connectors: [] },
+  ltx2: { ckpt: [], vae: [], loras: [], tenc: [], connectors: [] },
+  wan22: { ckpt: [], vae: [], loras: [], tenc: [], connectors: [] },
+})
+
+const ipAdapterPaths = reactive<IpAdapterPaths>({
+  models: [],
+  imageEncoders: [],
 })
 
 const rawPaths = reactive<RawPaths>({})
@@ -189,15 +259,31 @@ async function reload(): Promise<void> {
     paths.flux1.loras = getList(loaded, 'flux1_loras')
     paths.flux1.tenc = getList(loaded, 'flux1_tenc')
 
+    paths.flux2.ckpt = getList(loaded, 'flux2_ckpt')
+    paths.flux2.vae = getList(loaded, 'flux2_vae')
+    paths.flux2.loras = getList(loaded, 'flux2_loras')
+    paths.flux2.tenc = getList(loaded, 'flux2_tenc')
+
     paths.anima.ckpt = getList(loaded, 'anima_ckpt')
     paths.anima.vae = getList(loaded, 'anima_vae')
     paths.anima.loras = getList(loaded, 'anima_loras')
     paths.anima.tenc = getList(loaded, 'anima_tenc')
+    paths.anima.connectors = []
+
+    paths.ltx2.ckpt = getList(loaded, 'ltx2_ckpt')
+    paths.ltx2.vae = getList(loaded, 'ltx2_vae')
+    paths.ltx2.loras = getList(loaded, 'ltx2_loras')
+    paths.ltx2.tenc = getList(loaded, 'ltx2_tenc')
+    paths.ltx2.connectors = getList(loaded, 'ltx2_connectors')
 
     paths.wan22.ckpt = getList(loaded, 'wan22_ckpt')
     paths.wan22.vae = getList(loaded, 'wan22_vae')
     paths.wan22.loras = getList(loaded, 'wan22_loras')
     paths.wan22.tenc = getList(loaded, 'wan22_tenc')
+    paths.wan22.connectors = []
+
+    ipAdapterPaths.models = getList(loaded, 'ip_adapter_models')
+    ipAdapterPaths.imageEncoders = getList(loaded, 'ip_adapter_image_encoders')
   } catch {
     // Keep existing state on failure; errors are surfaced elsewhere.
   }
@@ -227,15 +313,29 @@ async function save(): Promise<void> {
   next.flux1_loras = [...paths.flux1.loras]
   next.flux1_tenc = [...paths.flux1.tenc]
 
+  next.flux2_ckpt = [...paths.flux2.ckpt]
+  next.flux2_vae = [...paths.flux2.vae]
+  next.flux2_loras = [...paths.flux2.loras]
+  next.flux2_tenc = [...paths.flux2.tenc]
+
   next.anima_ckpt = [...paths.anima.ckpt]
   next.anima_vae = [...paths.anima.vae]
   next.anima_loras = [...paths.anima.loras]
   next.anima_tenc = [...paths.anima.tenc]
 
+  next.ltx2_ckpt = [...paths.ltx2.ckpt]
+  next.ltx2_vae = [...paths.ltx2.vae]
+  next.ltx2_loras = [...paths.ltx2.loras]
+  next.ltx2_tenc = [...paths.ltx2.tenc]
+  next.ltx2_connectors = [...paths.ltx2.connectors]
+
   next.wan22_ckpt = [...paths.wan22.ckpt]
   next.wan22_vae = [...paths.wan22.vae]
   next.wan22_loras = [...paths.wan22.loras]
   next.wan22_tenc = [...paths.wan22.tenc]
+
+  next.ip_adapter_models = [...ipAdapterPaths.models]
+  next.ip_adapter_image_encoders = [...ipAdapterPaths.imageEncoders]
 
   await updatePaths(next)
 }

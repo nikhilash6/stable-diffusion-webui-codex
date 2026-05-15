@@ -7,10 +7,13 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: LoRA tensor parsing into runtime patch specs (LoRA/LoHa/LoKr/GLORA/DIFF/SET).
-Parses adapter tensors into typed `PatchSpec` entries for the runtime adapter pipeline, supporting multiple LoRA conventions and optional metadata keys (alpha/dora_scale), and logs missing keys for diagnostics.
-Patch targets may be plain parameter names or `(parameter, offset)` tuples for slice patches (e.g. fused-QKV text encoders).
+Parses adapter tensors into typed `PatchSpec` entries for the runtime adapter pipeline, supporting multiple LoRA conventions,
+optional metadata keys (alpha/dora_scale), WAN modulation DIFF tensors (`*.diff_m` when the logical target is modulation),
+and logs missing keys for diagnostics. Patch targets may be plain parameter names or `(parameter, offset)` tuples for slice
+patches (e.g. fused-QKV text encoders).
 
 Symbols (top-level; keep in sync; no ghosts):
+- `STANDARD_LORA_TENSOR_CANDIDATES` (constant): Supported standard LoRA up/down[/mid] tensor suffix families, in parser priority order.
 - `_bias_target_for` (function): Derives a bias patch target from a weight patch target (preserving offset slices when present).
 - `_tensor_item` (function): Converts scalar tensors (alpha/dora_scale) into Python floats.
 - `_maybe_convert_bfl_control` (function): Normalizes certain BFL/Control-style tensor key patterns into Codex naming.
@@ -24,9 +27,11 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
-from typing import Dict, Iterable, List, Mapping, Tuple
+import re
+from typing import Dict, Iterable, List, Mapping, Tuple, TypeVar
 
 import torch
 
@@ -40,8 +45,18 @@ from apps.backend.runtime.adapters.lora.types import (
     SetWeights,
     make_spec,
 )
+from apps.backend.runtime.state_dict.views import KeyspaceLookupView
 
-LOGGER = logging.getLogger(__name__)
+LOGGER = get_backend_logger(__name__)
+_TensorValueT = TypeVar("_TensorValueT")
+_RX_BLOCK_MODULATION_LOGICAL_KEY = re.compile(r"^blocks_(?P<idx>\d+)_modulation$")
+STANDARD_LORA_TENSOR_CANDIDATES = (
+    (".lora_up.weight", ".lora_down.weight", ".lora_mid.weight"),
+    ("_lora.up.weight", "_lora.down.weight", None),
+    (".lora_B.weight", ".lora_A.weight", None),
+    (".lora.up.weight", ".lora.down.weight", None),
+    (".lora_linear_layer.up.weight", ".lora_linear_layer.down.weight", None),
+)
 
 
 def _bias_target_for(target: PatchTarget) -> PatchTarget:
@@ -63,14 +78,23 @@ def _tensor_item(value: torch.Tensor | None) -> float | None:
     return float(value.item())
 
 
-def _maybe_convert_bfl_control(tensors: Mapping[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+def _maybe_convert_bfl_control(tensors: Mapping[str, _TensorValueT]) -> Mapping[str, _TensorValueT]:
     if "img_in.lora_A.weight" not in tensors or "single_blocks.0.norm.key_norm.scale" not in tensors:
-        return dict(tensors)
-    converted: Dict[str, torch.Tensor] = {}
-    for key, value in tensors.items():
+        return tensors
+    converted_lookup: dict[str, str] = {}
+    for key in tensors.keys():
+        if not isinstance(key, str):
+            raise RuntimeError(f"LoRA tensor map keys must be strings, got {type(key).__name__}.")
         new_key = key.replace(".lora_B.bias", ".diff_b").replace("_norm.scale", "_norm.scale.set_weight")
-        converted[f"diffusion_model.{new_key}"] = value
-    return converted
+        mapped_key = f"diffusion_model.{new_key}"
+        previous = converted_lookup.get(mapped_key)
+        if previous is not None and previous != key:
+            raise RuntimeError(
+                "BFL/Control LoRA key conversion collided after explicit mapping: "
+                f"dst={mapped_key!r} srcs={previous!r},{key!r}"
+            )
+        converted_lookup[mapped_key] = key
+    return KeyspaceLookupView(tensors, converted_lookup)
 
 
 def _select_first_present(tensors: Mapping[str, torch.Tensor], names: Iterable[str]) -> Tuple[str | None, torch.Tensor | None]:
@@ -80,22 +104,29 @@ def _select_first_present(tensors: Mapping[str, torch.Tensor], names: Iterable[s
     return None, None
 
 
+def _modulation_tensor_name_candidates(logical_key: str) -> Tuple[str, ...]:
+    if logical_key in {"head.modulation", "head_modulation"}:
+        return ("head.diff_m",)
+    if logical_key.endswith(".modulation"):
+        return (f"{logical_key[:-len('.modulation')]}.diff_m",)
+    match = _RX_BLOCK_MODULATION_LOGICAL_KEY.match(logical_key)
+    if match:
+        return (f"blocks.{match.group('idx')}.diff_m",)
+    return ()
+
+
 def _extract_lora(
     logical_key: str,
     target_param: PatchTarget,
     tensors: Mapping[str, torch.Tensor],
     loaded: set[str],
 ) -> PatchSpec | None:
-    candidates = [
-        (f"{logical_key}.lora_up.weight", f"{logical_key}.lora_down.weight", f"{logical_key}.lora_mid.weight"),
-        (f"{logical_key}_lora.up.weight", f"{logical_key}_lora.down.weight", None),
-        (f"{logical_key}.lora_B.weight", f"{logical_key}.lora_A.weight", None),
-        (f"{logical_key}.lora.up.weight", f"{logical_key}.lora.down.weight", None),
-        (f"{logical_key}.lora_linear_layer.up.weight", f"{logical_key}.lora_linear_layer.down.weight", None),
-    ]
     A = B = mid = None
     a_name = b_name = m_name = None
-    for up_name, down_name, mid_name in candidates:
+    for up_suffix, down_suffix, mid_suffix in STANDARD_LORA_TENSOR_CANDIDATES:
+        up_name = f"{logical_key}{up_suffix}"
+        down_name = f"{logical_key}{down_suffix}"
+        mid_name = f"{logical_key}{mid_suffix}" if mid_suffix is not None else None
         if up_name in tensors and down_name in tensors:
             a_name, b_name = up_name, down_name
             A, B = tensors[up_name], tensors[down_name]
@@ -236,6 +267,12 @@ def _extract_diff(logical_key: str, target_param: PatchTarget, tensors: Mapping[
     if diff is not None:
         loaded.add(f"{logical_key}.diff")
         specs.append(make_spec(target_param, PatchKind.DIFF, DiffWeights(weight=diff)))
+    modulation_name, modulation_diff = _select_first_present(tensors, _modulation_tensor_name_candidates(logical_key))
+    if modulation_diff is not None:
+        if modulation_name is None:
+            raise RuntimeError(f"Internal error: missing tensor name for modulation diff on {logical_key!r}")
+        loaded.add(modulation_name)
+        specs.append(make_spec(target_param, PatchKind.DIFF, DiffWeights(weight=modulation_diff)))
     bias_key = f"{logical_key}.diff_b"
     if bias_key in tensors:
         bias_target = _bias_target_for(target_param)

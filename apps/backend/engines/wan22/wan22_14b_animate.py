@@ -6,13 +6,12 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: WAN 2.2 Animate 14B video engine implementation for the GGUF runtime.
-Implements vid2vid by dispatching to the canonical WAN22 use-case runner with strict GGUF asset validation
-and lazy runtime materialization.
+Purpose: WAN 2.2 Animate 14B video engine placeholder for the GGUF runtime.
+Preserves animate-lane img2vid while keeping vid2vid explicitly parked with strict GGUF asset validation and lazy runtime materialization.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `Wan22Animate14BEngine` (class): `BaseVideoEngine` implementation for WAN22 14B animate lane;
-  runs vid2vid via progress-streamed use-case dispatch and enforces GGUF-only model loading.
+  runs img2vid while parking vid2vid and enforces GGUF-only model loading.
 """
 
 from __future__ import annotations
@@ -27,7 +26,6 @@ from apps.backend.engines.common.base_video import BaseVideoEngine
 from apps.backend.engines.wan22.wan22_common import WanComponents, unload_wan_components
 from apps.backend.runtime.memory import memory_management
 from apps.backend.use_cases.img2vid import run_img2vid as _run_i2v
-from apps.backend.use_cases.vid2vid import run_vid2vid as _run_v2v
 
 
 class Wan22Animate14BEngine(BaseVideoEngine):
@@ -42,7 +40,7 @@ class Wan22Animate14BEngine(BaseVideoEngine):
     def capabilities(self) -> EngineCapabilities:  # type: ignore[override]
         return EngineCapabilities(
             engine_id=self.engine_id,
-            tasks=(TaskType.VID2VID,),
+            tasks=(TaskType.IMG2VID,),
             model_types=self.model_types,
             precision=("fp16", "bf16", "fp32"),
             extras={"notes": self.runtime_note},
@@ -126,12 +124,8 @@ class Wan22Animate14BEngine(BaseVideoEngine):
         self.mark_unloaded()
 
     def vid2vid(self, request: Vid2VidRequest, **kwargs: Any) -> Iterator[InferenceEvent]:  # type: ignore[override]
-        self._logger.debug("[%s] before vid2vid()", self.engine_id)
-        self.ensure_loaded()
-        assert self._comp is not None
-        yield from _run_v2v(engine=self, comp=self._comp, request=request)
-        self._logger.debug("[%s] after vid2vid()", self.engine_id)
-        return
+        del request, kwargs
+        raise NotImplementedError("wan vid2vid not yet implemented")
 
     def img2vid(self, request: Img2VidRequest, **kwargs: Any) -> Iterator[InferenceEvent]:  # type: ignore[override]
         self._logger.debug("[%s] before img2vid()", self.engine_id)

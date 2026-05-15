@@ -14,6 +14,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import json
 import logging
@@ -31,7 +32,7 @@ class BaseVideoEngine(BaseInferenceEngine):
 
     def __init__(self) -> None:
         super().__init__()
-        self._logger = logging.getLogger(self.__class__.__name__)
+        self._logger = get_backend_logger(__name__)
 
     # Subclasses should implement: load(), unload(), capabilities(), txt2vid(), img2vid().
 
@@ -59,11 +60,13 @@ class BaseVideoEngine(BaseInferenceEngine):
         options: Optional[Dict[str, Any]] = None,
         task: str = "video",
         extra_metadata: Optional[Dict[str, Any]] = None,
+        audio_source_path: str | None = None,
     ) -> Optional[Dict[str, Any]]:
         """Export frames to disk when requested.
 
         Uses the ffmpeg exporter to write a video file under `CODEX_ROOT/output`
-        when `save_output` is enabled.
+        when `save_output` is enabled, optionally muxing audio from
+        `audio_source_path`.
         """
         from apps.backend.video.export.ffmpeg_exporter import VideoExportError, export_video
 
@@ -86,6 +89,7 @@ class BaseVideoEngine(BaseInferenceEngine):
                 fps=int(fps),
                 options=opts,
                 task=str(task or "video"),
+                audio_source_path=audio_source_path,
                 extra_metadata=extra_metadata,
             )
         except VideoExportError as exc:
@@ -105,4 +109,5 @@ class BaseVideoEngine(BaseInferenceEngine):
             "reason": getattr(result, "reason", None),
             "fps": getattr(result, "fps", int(fps)),
             "frames": getattr(result, "frame_count", len(frames_list)),
+            "has_audio": bool(getattr(result, "has_audio", False)),
         }

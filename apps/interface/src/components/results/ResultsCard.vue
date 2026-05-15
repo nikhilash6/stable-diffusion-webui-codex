@@ -10,7 +10,7 @@ Purpose: Shared Results panel wrapper with a standard header layout.
 Provides a consistent Results card header (left/center/right slots with an optional Generate button and optional center-adjacent slot content) and a body slot used by generation views.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `ResultsCard` (component): Results panel wrapper with header slots and optional Generate button.
+- `ResultsCard` (component): Results panel wrapper with header slots, optional Generate button, and a `bodyClass` hook for body-level styling.
 -->
 
 <template>
@@ -42,22 +42,19 @@ Symbols (top-level; keep in sync; no ghosts):
       </div>
     </div>
 
-    <div class="panel-body" :class="props.bodyClass" :style="props.bodyStyle">
+    <div class="panel-body" :class="props.bodyClass">
       <slot />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import type { StyleValue } from 'vue'
-
 const props = withDefaults(defineProps<{
   title?: string
   headerClass?: string
   headerCenterClass?: string
   headerRightClass?: string
   bodyClass?: string
-  bodyStyle?: StyleValue
   showGenerate?: boolean
   generateId?: string
   generateButtonClass?: string
@@ -72,10 +69,9 @@ const props = withDefaults(defineProps<{
   headerCenterClass: '',
   headerRightClass: '',
   bodyClass: '',
-  bodyStyle: undefined,
   showGenerate: true,
   generateId: '',
-  generateButtonClass: 'btn btn-md btn-primary results-generate',
+  generateButtonClass: 'btn btn-md btn-primary',
   generateLabel: 'Generate',
   runningLabel: 'Running…',
   generateDisabled: false,

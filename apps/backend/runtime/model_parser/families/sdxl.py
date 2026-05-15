@@ -35,12 +35,13 @@ from ..quantization import validate_component_dtypes
 
 def build_plan(signature: ModelSignature) -> ParserPlanBundle:
     is_refiner = signature.family is ModelFamily.SDXL_REFINER
+    is_core_only = bool(signature.extras.get("core_only"))
     if is_refiner:
         plan = ParserPlan(
             splits=[
                 SplitSpec(name="unet", prefixes=("model.diffusion_model.",)),
                 SplitSpec(name="vae", prefixes=("first_stage_model.", "vae."), required=False),
-                SplitSpec(name="text_encoder", prefixes=("conditioner.embedders.0.model.",)),
+                SplitSpec(name="text_encoder", prefixes=("conditioner.embedders.0.model.",), required=not is_core_only),
             ],
             converters=(),
             validations=(
@@ -55,8 +56,16 @@ def build_plan(signature: ModelSignature) -> ParserPlanBundle:
         splits=[
             SplitSpec(name="unet", prefixes=("model.diffusion_model.",)),
             SplitSpec(name="vae", prefixes=("first_stage_model.", "vae."), required=False),
-            SplitSpec(name="text_encoder", prefixes=("conditioner.embedders.0.model.", "conditioner.embedders.0.")),
-            SplitSpec(name="text_encoder_2", prefixes=("conditioner.embedders.1.model.", "conditioner.embedders.1.")),
+            SplitSpec(
+                name="text_encoder",
+                prefixes=("conditioner.embedders.0.model.", "conditioner.embedders.0."),
+                required=not is_core_only,
+            ),
+            SplitSpec(
+                name="text_encoder_2",
+                prefixes=("conditioner.embedders.1.model.", "conditioner.embedders.1."),
+                required=not is_core_only,
+            ),
         ],
         converters=(),
         validations=(
@@ -76,13 +85,29 @@ def _register_base_text_encoders(context) -> None:
 def _validate_unet_channels(context):
     unet = context.require("unet").tensors
     key = "input_blocks.0.0.weight"
-    weight = unet.get(key)
-    if not isinstance(weight, torch.Tensor):
-        raise ValidationError(f"Expected '{key}' in UNet state dict", component="unet")
-    expected = context.signature.core.channels_in
-    if weight.shape[1] != expected:
+    shape_getter = getattr(unet, "shape_of", None)
+    weight_shape: tuple[int, ...] | None = None
+    if callable(shape_getter):
+        try:
+            shape_raw = shape_getter(key)
+            if shape_raw is not None:
+                weight_shape = tuple(int(v) for v in shape_raw)
+        except Exception:
+            weight_shape = None
+    if weight_shape is None:
+        weight = unet.get(key)
+        if not isinstance(weight, torch.Tensor):
+            raise ValidationError(f"Expected '{key}' in UNet state dict", component="unet")
+        weight_shape = tuple(int(v) for v in weight.shape)
+    if len(weight_shape) < 2:
         raise ValidationError(
-            f"UNet channels_in mismatch: expected {expected}, found {weight.shape[1]}",
+            f"UNet weight shape for '{key}' is invalid: {weight_shape}",
+            component="unet",
+        )
+    expected = context.signature.core.channels_in
+    if int(weight_shape[1]) != expected:
+        raise ValidationError(
+            f"UNet channels_in mismatch: expected {expected}, found {int(weight_shape[1])}",
             component="unet",
         )
 

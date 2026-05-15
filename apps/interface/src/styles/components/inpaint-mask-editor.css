@@ -33,6 +33,7 @@
   }
 
   .inpaint-mask-editor-base-image,
+  .inpaint-mask-editor-preview-canvas,
   .inpaint-mask-editor-mask-canvas {
     position: absolute;
     inset: 0;
@@ -46,9 +47,19 @@
     pointer-events: none;
   }
 
+  .inpaint-mask-editor-preview-canvas,
   .inpaint-mask-editor-mask-canvas {
     image-rendering: pixelated;
     pointer-events: none;
+  }
+
+  .inpaint-mask-editor-crop-box {
+    position: absolute;
+    box-sizing: border-box;
+    pointer-events: none;
+    border: 0.0625rem solid var(--cdx-inpaint-preview-crop-border);
+    background: var(--cdx-inpaint-preview-crop-fill);
+    box-shadow: var(--cdx-inpaint-preview-crop-shadow);
   }
 
   .inpaint-mask-editor-cursor {
@@ -95,6 +106,12 @@
     grid-template-columns: 1fr auto;
     align-items: center;
     gap: 0.5rem;
+  }
+
+  .inpaint-mask-editor-toolbar__param-sliders {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
   }
 
   .inpaint-mask-editor-toolbar__shortcuts {

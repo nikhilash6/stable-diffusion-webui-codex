@@ -16,6 +16,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import emit_backend_message, get_backend_logger
 
 import logging
 from typing import Optional, TYPE_CHECKING
@@ -30,7 +31,7 @@ from .controller import WanCoreController
 if TYPE_CHECKING:
     from apps.backend.runtime.families.wan22.model import WanTransformer2DModel
 
-logger = logging.getLogger("backend.runtime.wan22.streaming.wrapper")
+logger = get_backend_logger("backend.runtime.wan22.streaming.wrapper")
 
 
 class StreamedWanTransformer(nn.Module):
@@ -64,10 +65,11 @@ class StreamedWanTransformer(nn.Module):
         self.n_heads = base_model.n_heads
         self.n_blocks = base_model.n_blocks
 
-        logger.info(
-            "StreamedWanTransformer initialized: %d segments, %d blocks",
-            len(execution_plan),
-            execution_plan.block_count,
+        emit_backend_message(
+            "StreamedWanTransformer initialized",
+            logger=logger.name,
+            segments=len(execution_plan),
+            blocks=execution_plan.block_count,
         )
 
     @property
@@ -165,13 +167,13 @@ class StreamedWanTransformer(nn.Module):
         for segment in self._plan:
             segment.to_device(self._controller.storage_device)
         self._controller.evict_all()
-        logger.info("All segments moved to storage device")
+        emit_backend_message("All segments moved to storage device", logger=logger.name)
 
     def move_all_to_compute(self) -> None:
         """Move all segments to compute device (disable streaming)."""
         for segment in self._plan:
             segment.to_device(self._controller.compute_device)
-        logger.info("All segments moved to compute device (streaming disabled)")
+        emit_backend_message("All segments moved to compute device (streaming disabled)", logger=logger.name)
 
 
 def wrap_for_streaming(

@@ -6,8 +6,9 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Sampler registry helpers mapping UI/API sampler names to validated sampler specifications.
-Enforces scheduler compatibility before sampling context creation.
+Purpose: Sampler registry helpers mapping UI/API sampler names to validated executable sampler specifications.
+Enforces scheduler compatibility before sampling context creation, fails loud on supported-row metadata drift (unsupported scheduler declarations,
+empty allowed-scheduler sets, default-scheduler mismatches, missing `SamplerKind` coverage), and excludes sampler rows that are not currently executable.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `SamplerSpec` (dataclass): Canonical sampler specification (kind, default scheduler, allowed schedulers).
@@ -47,26 +48,41 @@ def _build_specs() -> Dict[str, SamplerSpec]:
     specs: Dict[str, SamplerSpec] = {}
 
     for entry in SAMPLER_OPTIONS:
+        if not bool(entry.get("supported", True)):
+            continue
         name = str(entry["name"])
-        raw_allowed: Iterable[str] = entry.get("schedulers", SUPPORTED_SCHEDULERS)
-        allowed_canonical: Set[str] = set()
-        for sched in raw_allowed:
-            canonical = str(sched)
-            if canonical in SUPPORTED_SCHEDULERS:
+        raw_allowed: Iterable[str] | None = entry.get("schedulers")
+        if raw_allowed is None:
+            allowed_canonical: Set[str] = set(SUPPORTED_SCHEDULERS)
+        else:
+            allowed_canonical = set()
+            for sched in raw_allowed:
+                canonical = str(sched)
+                if canonical not in SUPPORTED_SCHEDULERS:
+                    raise RuntimeError(
+                        f"Sampler '{name}' declares unsupported scheduler '{canonical}'. "
+                        f"Valid schedulers: {sorted(SUPPORTED_SCHEDULERS)}"
+                    )
                 allowed_canonical.add(canonical)
+            if not allowed_canonical:
+                raise RuntimeError(f"Sampler '{name}' must declare at least one allowed scheduler")
         default_scheduler = SAMPLER_DEFAULT_SCHEDULER.get(name)
         if not default_scheduler:
             raise RuntimeError(f"Sampler '{name}' is missing a default scheduler mapping")
+        if default_scheduler not in allowed_canonical:
+            raise RuntimeError(
+                f"Sampler '{name}' default scheduler '{default_scheduler}' is not in allowed schedulers "
+                f"{sorted(allowed_canonical)}"
+            )
         try:
             kind = SamplerKind.from_string(name)
-        except Exception:
-            # Keep unknown kinds for future porting but skip active registry
-            continue
+        except Exception as exc:
+            raise RuntimeError(f"Supported sampler '{name}' is missing SamplerKind enum coverage") from exc
         specs[name] = SamplerSpec(
             name=name,
             kind=kind,
             default_scheduler=default_scheduler,
-            allowed_schedulers=allowed_canonical or set(SUPPORTED_SCHEDULERS),
+            allowed_schedulers=allowed_canonical,
         )
     return specs
 

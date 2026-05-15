@@ -6,14 +6,15 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Unified video generation composable for WAN (txt2vid/img2vid).
+Purpose: WAN 2.2 14B video generation composable (txt2vid/img2vid).
 Owns per-tab video generation state (progress/frames/video result/history/queue), builds typed WAN payloads, starts tasks, and consumes task SSE events
-to update UI state and fetch final results. Every start payload includes `settings_revision`, and stale-revision conflicts (`409` + `current_revision`)
+to update UI state and fetch final results. Delegates the shared task-stream/resume/history shell to `useTaskRunLifecycle.ts`, while keeping
+WAN 2.2 14B-specific queueing, summary/snapshot builders, and result shaping local. Every start payload includes `settings_revision`, and stale-revision conflicts (`409` + `current_revision`)
 trigger revision refresh + manual-retry UX. Persists a minimal resume marker to `localStorage` and auto-reattaches to in-flight tasks after reload
-via SSE replay (`after` / `lastEventId`) and snapshot refresh on `gap`. Uses stage-owned prompts (`high/low`) in validation/snapshots, deriving top-level
-mode prompt fields from the High stage in payload builders for backend compatibility. Includes compact output pass-through (`format`/`pixFmt`/`crf`/`loopCount`/
-`pingpong`/`returnFrames`), interpolation target FPS (`0` disables; payload computes backend interpolation factor from target/base FPS), and stage `flowShift`
-pass-through in common WAN payload input. Also snapshots and forwards optional SeedVR2 upscaling controls as `video_upscaling`.
+via SSE replay (`after` / `lastEventId`) and snapshot refresh on `gap`. WAN payload ownership is explicit: top-level core owners (`prompt`, `negativePrompt`,
+`sampler`, `scheduler`, `steps`, `cfgScale`, `seed`) stay top-level in the typed builder input, while `wan_high` carries only model/Lora/flow overrides and
+`wan_low` keeps the live low-stage prompt/sampler fields. Includes compact output pass-through (`format`/`pixFmt`/`crf`/`loopCount`/`pingpong`/`returnFrames`),
+interpolation target FPS (`0` disables; payload computes backend interpolation factor from target/base FPS), and optional SeedVR2 upscaling controls as `video_upscaling`.
 Img2vid temporal payload fields are gated by `img2vidMode` (`solo|sliding|svi2|svi2_pro`), and WAN prompt `<lora:...>` tags are parsed client-side into
 stage-level LoRA arrays (`wan_high/wan_low.loras[]` with `sha+weight`) before payload dispatch. Start failures now log structured diagnostics to the browser console (status/detail/body/message + mode/tab)
 before surfacing UI error text.
@@ -40,13 +41,13 @@ Symbols (top-level; keep in sync; no ghosts):
 - `parseResumeMode` (function): Strict parser for persisted WAN resume mode (`txt2vid|img2vid`), returns null for unsupported/legacy modes.
 - `assertRunPayloadObject` (function): Runtime invariant guard that fails loud when a prepared run carries a non-object payload.
 - `assertNeverMode` (function): Exhaustiveness guard for prepared-run dispatch by `mode`.
-- `useVideoGeneration` (function): Main composable API; wires payload building, task start/cancel, SSE handling, queued runs, and history updates
+- `useVideoGeneration` (function): Main 14B composable API; wires payload building, task start/cancel, SSE handling, queued runs, and history updates
   (contains nested handlers for events, queue progression, and per-mode payload assembly).
 */
 
 import { computed, ref } from 'vue'
 
-import { cancelTask, fetchTaskResult, getApiErrorStatus, startImg2Vid, startTxt2Vid, subscribeTask } from '../api/client'
+import { cancelTask, fetchTaskResult, getApiErrorStatus, startImg2Vid, startTxt2Vid } from '../api/client'
 import { formatZodError } from '../api/payloads'
 import {
   buildWanImg2VidPayload,
@@ -56,10 +57,11 @@ import {
   type WanTxt2VidPayload,
   type WanVideoCommonInput,
 } from '../api/payloads_video'
-import type { GeneratedImage, TaskEvent } from '../api/types'
+import type { GeneratedImage, TaskErrorCode, TaskEvent } from '../api/types'
 import { useModelTabsStore, type TabByType, type WanAssetsParams, type WanStageParams, type WanVideoParams } from '../stores/model_tabs'
 import { useQuicksettingsStore } from '../stores/quicksettings'
 import { formatSettingsRevisionConflictMessage, resolveSettingsRevisionConflict } from './settings_revision_conflict'
+import { useTaskRunLifecycle } from './useTaskRunLifecycle'
 import { isWanWindowedImg2VidMode, normalizeWanImg2VidMode } from '../utils/wan_img2vid_temporal'
 import { normalizeWanImg2VidImageScale } from '../utils/wan_img2vid_frame_projection'
 
@@ -75,6 +77,7 @@ export interface VideoRunHistoryItem {
   summary: string
   promptPreview: string
   paramsSnapshot: Record<string, unknown>
+  initImageData?: string
   thumbnail?: GeneratedImage | null
   errorMessage?: string
 }
@@ -94,6 +97,7 @@ export type PreparedWanRun =
       summary: string
       promptPreview: string
       paramsSnapshot: Record<string, unknown>
+      initImageData: string
       payload: WanImg2VidPayload
     }
 
@@ -269,7 +273,7 @@ function defaultStage(): WanStageParams {
     prompt: '',
     negativePrompt: '',
     sampler: '',
-    scheduler: '',
+    scheduler: 'simple',
     steps: 30,
     cfgScale: 7,
     seed: -1,
@@ -343,6 +347,10 @@ function normalizeGuideOffset(rawValue: unknown): number {
   return numeric
 }
 
+function resolveBooleanWithDefault(rawValue: unknown, fallback: boolean): boolean {
+  return typeof rawValue === 'boolean' ? rawValue : fallback
+}
+
 export function useVideoGeneration(tabId: string) {
   const modelTabs = useModelTabsStore()
   const quicksettings = useQuicksettingsStore()
@@ -350,12 +358,14 @@ export function useVideoGeneration(tabId: string) {
   const state = ref(getTabState(tabId))
   const resumeNotice = ref('')
 
-  const tab = computed<TabByType<'wan'> | null>(() => {
+  type WanTab = TabByType<'wan22_14b'>
+
+  const tab = computed<WanTab | null>(() => {
     const candidate = modelTabs.tabs.find((entry) => entry.id === tabId) || null
-    if (!candidate || candidate.type !== 'wan') return null
-    return candidate as TabByType<'wan'>
+    if (!candidate || candidate.type !== 'wan22_14b') return null
+    return candidate as WanTab
   })
-  const params = computed<TabByType<'wan'>['params'] | null>(() => tab.value?.params || null)
+  const params = computed<WanTab['params'] | null>(() => tab.value?.params || null)
 
   const video = computed<WanVideoParams>(() => params.value?.video || defaultVideo())
   const high = computed<WanStageParams>(() => params.value?.high || defaultStage())
@@ -418,6 +428,12 @@ export function useVideoGeneration(tabId: string) {
     if (!quicksettings.resolveWanGgufSha(lo.modelDir)) {
       return 'WAN Low model must resolve to a sha256. Click Refresh and re-select the Low model.'
     }
+    if (quicksettings.resolveWanGgufVariant(hi.modelDir) !== 'wan22_14b') {
+      return 'WAN High model must resolve to a structurally 14B GGUF. Click Refresh and re-select the High model.'
+    }
+    if (quicksettings.resolveWanGgufVariant(lo.modelDir) !== 'wan22_14b') {
+      return 'WAN Low model must resolve to a structurally 14B GGUF. Click Refresh and re-select the Low model.'
+    }
 
     const teLabel = String(assets.value.textEncoder || '').trim()
     if (!teLabel) {
@@ -434,6 +450,10 @@ export function useVideoGeneration(tabId: string) {
     if (!quicksettings.resolveVaeSha(vaeLabel)) {
       return 'WAN VAE must resolve to a sha256. Click Refresh and re-select the VAE.'
     }
+    const device = String(quicksettings.currentDevice || 'cpu').trim().toLowerCase()
+    if (device !== 'cpu' && device !== 'cuda') {
+      return `WAN video currently supports only cpu or cuda. Switch QuickSettings device from '${quicksettings.currentDevice}' to a supported backend.`
+    }
     return ''
   }
 
@@ -445,10 +465,7 @@ export function useVideoGeneration(tabId: string) {
   }
 
   function stopStream(): void {
-    const unsub = unsubscribers.get(tabId)
-    if (!unsub) return
-    unsub()
-    unsubscribers.delete(tabId)
+    taskLifecycle.stopStream()
   }
 
   function resetProgress(): void {
@@ -462,6 +479,36 @@ export function useVideoGeneration(tabId: string) {
 
   function setErrorMessage(message: string): void {
     state.value.errorMessage = message
+  }
+
+  const taskLifecycle = useTaskRunLifecycle({
+    tabId,
+    state,
+    resumeKey: resumeKey(tabId),
+    unsubscribers,
+    resumeAttempts,
+    loadResumeState,
+    saveResumeState,
+    clearResumeState,
+    updateResumeEventId,
+    onTaskEvent: onTaskEvent,
+    isSnapshotRunning: (snapshot) => snapshot.status === 'running',
+    onResumeRunning: handleResumedRunningSnapshot,
+    onResumeTerminal: handleResumeTerminalSnapshot,
+    onResumeLoadError: (message) => {
+      resumeNotice.value = message
+    },
+    onHistoryLoaded: handleHistorySnapshot,
+    onHistoryLoadError: (_taskId, error) => {
+      setError(error instanceof Error ? error.message : String(error))
+    },
+    resumeNotice,
+    resumeToastShown,
+  })
+
+  function resolveVideoRunStatus(code?: TaskErrorCode, message?: string): VideoRunStatus {
+    if (code === 'cancelled') return 'cancelled'
+    return String(message || '').trim().toLowerCase() === 'cancelled' ? 'cancelled' : 'error'
   }
 
   function logRunStartError(run: PreparedWanRun, err: unknown): void {
@@ -547,8 +594,8 @@ export function useVideoGeneration(tabId: string) {
         pixFmt: v.pixFmt,
         crf: v.crf,
         loopCount: v.loopCount,
-        pingpong: v.pingpong,
-        returnFrames: v.returnFrames,
+        pingpong: resolveBooleanWithDefault(v.pingpong, false),
+        returnFrames: resolveBooleanWithDefault(v.returnFrames, false),
       },
       interpolation: {
         targetFps: v.interpolationFps,
@@ -679,16 +726,16 @@ export function useVideoGeneration(tabId: string) {
       height: v.height,
       fps: v.fps,
       frames: v.frames,
+      prompt: parsedHighStage.prompt,
+      negativePrompt: parsedHighStage.negativePrompt,
+      sampler: hi.sampler,
+      scheduler: hi.scheduler,
+      steps: hi.steps,
+      cfgScale: hi.cfgScale,
+      seed: hi.seed,
       attentionMode: v.attentionMode,
       high: {
         modelSha: hiSha,
-        prompt: parsedHighStage.prompt,
-        negativePrompt: parsedHighStage.negativePrompt,
-        sampler: hi.sampler,
-        scheduler: hi.scheduler,
-        steps: hi.steps,
-        cfgScale: hi.cfgScale,
-        seed: hi.seed,
         loras: mergedHighLoras,
         flowShift: hi.flowShift,
       },
@@ -715,8 +762,8 @@ export function useVideoGeneration(tabId: string) {
         pixFmt: v.pixFmt,
         crf: v.crf,
         loopCount: v.loopCount,
-        pingpong: v.pingpong,
-        returnFrames: v.returnFrames,
+        pingpong: resolveBooleanWithDefault(v.pingpong, false),
+        returnFrames: resolveBooleanWithDefault(v.returnFrames, false),
       },
       interpolation: {
         targetFps: v.interpolationFps,
@@ -770,7 +817,7 @@ export function useVideoGeneration(tabId: string) {
         ...img2vidGuideInput,
         ...img2vidTemporalInput,
       })
-      return { mode: 'img2vid', createdAtMs, summary, promptPreview, paramsSnapshot, payload }
+      return { mode: 'img2vid', createdAtMs, summary, promptPreview, paramsSnapshot, initImageData: v.initImageData, payload }
     }
 
     const payload = buildWanTxt2VidPayload(common)
@@ -814,10 +861,10 @@ export function useVideoGeneration(tabId: string) {
         summary: run.summary,
         promptPreview: run.promptPreview,
         paramsSnapshot: run.paramsSnapshot,
+        initImageData: run.mode === 'img2vid' ? run.initImageData : '',
         thumbnail: null,
       }
-      const key = resumeKey(tabId)
-      saveResumeState(key, {
+      taskLifecycle.saveResume({
         taskId: task_id,
         lastEventId: 0,
         createdAtMs: run.createdAtMs,
@@ -826,12 +873,7 @@ export function useVideoGeneration(tabId: string) {
         promptPreview: run.promptPreview,
         paramsSnapshot: run.paramsSnapshot,
       })
-      const unsub = subscribeTask(task_id, onTaskEvent, undefined, {
-        onMeta: ({ eventId }) => {
-          if (typeof eventId === 'number') updateResumeEventId(key, eventId)
-        },
-      })
-      unsubscribers.set(tabId, unsub)
+      taskLifecycle.attachStream(task_id)
     } catch (err) {
       logRunStartError(run, err)
       clearResumeState(resumeKey(tabId))
@@ -861,7 +903,7 @@ export function useVideoGeneration(tabId: string) {
       setError(`useVideoGeneration: tab '${tabId}' not found or not available.`)
       return
     }
-    if (tab.value.type !== 'wan') {
+    if (tab.value.type !== 'wan22_14b') {
       setError(`useVideoGeneration: unsupported tab type '${String(tab.value.type)}'`)
       return
     }
@@ -903,7 +945,7 @@ export function useVideoGeneration(tabId: string) {
         if (state.value.taskId) void refreshTaskSnapshot(state.value.taskId)
         break
       case 'result':
-        state.value.frames = event.images
+        state.value.frames = Array.isArray(event.images) ? event.images : []
         state.value.info = event.info ?? null
         state.value.video = event.video ?? null
         state.value.status = 'done'
@@ -915,18 +957,20 @@ export function useVideoGeneration(tabId: string) {
         }
         break
       case 'error':
-        setError(event.message)
+        const terminalStatus = resolveVideoRunStatus(event.code, event.message)
+        state.value.status = 'error'
+        state.value.errorMessage = event.message
+        state.value.frames = []
+        state.value.info = null
+        state.value.video = null
         clearResumeState(key)
         if (state.value.currentRun && state.value.currentRun.taskId) {
-          state.value.currentRun.status = state.value.cancelRequested ? 'cancelled' : 'error'
+          state.value.currentRun.status = terminalStatus
           state.value.currentRun.errorMessage = event.message
         }
         break
       case 'end':
         clearResumeState(key)
-        if (state.value.cancelRequested && state.value.currentRun && state.value.currentRun.taskId) {
-          state.value.currentRun.status = 'cancelled'
-        }
         if (state.value.status !== 'error') state.value.status = 'done'
         if (state.value.currentRun && state.value.currentRun.taskId) {
           pushHistory(state.value.currentRun)
@@ -959,84 +1003,49 @@ export function useVideoGeneration(tabId: string) {
     }
   }
 
-  async function tryAutoResume(): Promise<void> {
-    if (resumeAttempts.has(tabId)) return
-    resumeAttempts.add(tabId)
-
-    const key = resumeKey(tabId)
-    const loaded = loadResumeState(key)
-    const saved = loaded.state
-    if (!saved) {
-      if (loaded.error) {
-        clearResumeState(key)
-        resumeNotice.value = loaded.error
-      }
-      return
+  function handleResumedRunningSnapshot(saved: ResumeState, res: Awaited<ReturnType<typeof fetchTaskResult>>): void {
+    if (res.status !== 'running') return
+    state.value.status = 'running'
+    state.value.taskId = saved.taskId
+    state.value.errorMessage = ''
+    state.value.frames = []
+    state.value.info = null
+    state.value.video = null
+    resetProgress()
+    state.value.cancelRequested = false
+    state.value.currentRun = {
+      taskId: saved.taskId,
+      mode: saved.mode,
+      createdAtMs: saved.createdAtMs,
+      status: 'completed',
+      summary: saved.summary,
+      promptPreview: saved.promptPreview,
+      paramsSnapshot: saved.paramsSnapshot,
+      thumbnail: null,
     }
 
-    let res
-    try {
-      res = await fetchTaskResult(saved.taskId)
-    } catch {
-      clearResumeState(key)
-      return
+    if (typeof res.stage === 'string' && res.stage.trim()) state.value.progress.stage = res.stage
+    const progressPayload = res.progress
+    if (progressPayload && typeof progressPayload === 'object') {
+      state.value.progress = {
+        stage: String(progressPayload.stage ?? state.value.progress.stage),
+        percent: progressPayload.percent ?? null,
+        etaSeconds: progressPayload.eta_seconds ?? null,
+        step: progressPayload.step ?? null,
+        totalSteps: progressPayload.total_steps ?? null,
+      }
     }
+  }
 
-    if (res.status === 'running') {
-      stopStream()
-      state.value.status = 'running'
-      state.value.taskId = saved.taskId
-      state.value.errorMessage = ''
-      state.value.frames = []
-      state.value.info = null
-      state.value.video = null
-      resetProgress()
-      state.value.cancelRequested = false
-      state.value.currentRun = {
-        taskId: saved.taskId,
-        mode: saved.mode,
-        createdAtMs: saved.createdAtMs,
-        status: 'completed',
-        summary: saved.summary,
-        promptPreview: saved.promptPreview,
-        paramsSnapshot: saved.paramsSnapshot,
-        thumbnail: null,
-      }
-
-      if (typeof res.stage === 'string' && res.stage.trim()) state.value.progress.stage = res.stage
-      const p = res.progress
-      if (p && typeof p === 'object') {
-        state.value.progress = {
-          stage: String(p.stage ?? state.value.progress.stage),
-          percent: p.percent ?? null,
-          etaSeconds: p.eta_seconds ?? null,
-          step: p.step ?? null,
-          totalSteps: p.total_steps ?? null,
-        }
-      }
-
-      const unsub = subscribeTask(saved.taskId, onTaskEvent, undefined, {
-        after: saved.lastEventId,
-        onMeta: ({ eventId }) => {
-          if (typeof eventId === 'number') updateResumeEventId(key, eventId)
-        },
-      })
-      unsubscribers.set(tabId, unsub)
-
-      if (!resumeToastShown.has(saved.taskId)) {
-        resumeNotice.value = 'Reconnected (resumed task).'
-        resumeToastShown.add(saved.taskId)
-      }
-      return
-    }
-
-    clearResumeState(key)
-
+  function handleResumeTerminalSnapshot(saved: ResumeState, res: Awaited<ReturnType<typeof fetchTaskResult>>): void {
     if (res.status === 'completed' && res.result) {
-      state.value.frames = res.result.images
+      state.value.frames = Array.isArray(res.result.images) ? res.result.images : []
       state.value.info = res.result.info ?? null
       state.value.video = res.result.video ?? null
+      state.value.errorMessage = ''
       state.value.status = 'done'
+      state.value.taskId = saved.taskId
+      state.value.cancelRequested = false
       pushHistory({
         taskId: saved.taskId,
         mode: saved.mode,
@@ -1048,16 +1057,23 @@ export function useVideoGeneration(tabId: string) {
         thumbnail: Array.isArray(res.result.images) && res.result.images.length > 0 ? res.result.images[0] : null,
       })
       state.value.selectedTaskId = saved.taskId
+      state.value.currentRun = null
       return
     }
     if (res.status === 'error') {
+      const terminalStatus = resolveVideoRunStatus(res.error_code, String(res.error || 'Task failed.'))
       state.value.status = 'error'
       state.value.errorMessage = String(res.error || 'Task failed.')
+      state.value.frames = []
+      state.value.info = null
+      state.value.video = null
+      state.value.taskId = saved.taskId
+      state.value.cancelRequested = false
       pushHistory({
         taskId: saved.taskId,
         mode: saved.mode,
         createdAtMs: saved.createdAtMs,
-        status: 'error',
+        status: terminalStatus,
         summary: saved.summary,
         promptPreview: saved.promptPreview,
         paramsSnapshot: saved.paramsSnapshot,
@@ -1065,10 +1081,37 @@ export function useVideoGeneration(tabId: string) {
         errorMessage: String(res.error || 'Task failed.'),
       })
       state.value.selectedTaskId = saved.taskId
+      state.value.currentRun = null
     }
   }
 
-  void tryAutoResume()
+  function handleHistorySnapshot(taskId: string, result: Awaited<ReturnType<typeof fetchTaskResult>>): void {
+    if (result.status === 'error') {
+      state.value.status = 'error'
+      state.value.errorMessage = result.error || 'Task failed.'
+      state.value.frames = []
+      state.value.info = null
+      state.value.video = null
+      state.value.taskId = taskId
+      state.value.selectedTaskId = taskId
+      state.value.currentRun = null
+      return
+    }
+    if (result.status === 'completed' && result.result) {
+      state.value.frames = Array.isArray(result.result.images) ? result.result.images : []
+      state.value.info = result.result.info ?? null
+      state.value.video = result.result.video ?? null
+      state.value.errorMessage = ''
+      state.value.status = 'done'
+      state.value.taskId = taskId
+      state.value.selectedTaskId = taskId
+      state.value.currentRun = null
+      return
+    }
+    setError('Task is still running.')
+  }
+
+  void taskLifecycle.tryAutoResume()
 
   async function cancel(mode: 'immediate' | 'after_current' = 'immediate'): Promise<void> {
     const taskId = state.value.taskId
@@ -1099,34 +1142,10 @@ export function useVideoGeneration(tabId: string) {
     state.value.queue = []
   }
 
-  async function loadHistory(taskId: string): Promise<void> {
-    if (!taskId || state.value.status === 'running') return
-    state.value.historyLoadingTaskId = taskId
-    try {
-      const result = await fetchTaskResult(taskId)
-      if (result.status === 'error') {
-        setError(result.error || 'Task failed.')
-        return
-      }
-      if (result.status === 'completed' && result.result) {
-        state.value.frames = result.result.images
-        state.value.info = result.result.info ?? null
-        state.value.video = result.result.video ?? null
-        state.value.status = 'done'
-        state.value.selectedTaskId = taskId
-        return
-      }
-      setError('Task is still running.')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      state.value.historyLoadingTaskId = ''
-    }
-  }
+  const loadHistory = taskLifecycle.loadHistory
 
   function clearHistory(): void {
-    state.value.history = []
-    state.value.selectedTaskId = ''
+    taskLifecycle.clearHistory()
   }
 
   function outputUrl(relPath: string): string {

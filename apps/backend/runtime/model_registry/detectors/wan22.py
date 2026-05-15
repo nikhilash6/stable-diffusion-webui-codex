@@ -8,23 +8,27 @@ Required Notice: see NOTICE
 
 Purpose: WAN 2.2 model detector for the Codex model registry.
 Matches WAN22 checkpoints by key suffixes and tensor shapes, infers patch/latent dimensions, detects embedded VAE/text-encoder components,
-and returns a `ModelSignature` describing the WAN core transformer and assets.
+and exposes reusable structural metadata inspection for header-safe WAN GGUF inventory detection before returning a `ModelSignature`.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `WAN_HEAD_KEY` (constant): Suffix used to locate the WAN modulation head in a state dict.
+- `Wan22StructuralMetadata` (dataclass): Reusable structural WAN22 inspection result (prefix/model_type/family/repo_hint/core dims).
 - `Wan22Detector` (class): Detector that matches WAN22 bundles and builds a `ModelSignature` (core dims + TE/VAE signatures).
+- `inspect_wan22_bundle` (function): Returns authoritative WAN22 structural metadata from a `SignalBundle` or fails loud.
+- `inspect_wan22_gguf_path` (function): Returns authoritative WAN22 structural metadata from a GGUF path via header-only inspection.
 - `_collect_text_encoders` (function): Collects embedded text encoder signatures (UMT5-XXL, CLIP-L) when present.
 - `_tensor_last_dim` (function): Returns the last dimension of a tensor/shape (used for TE expected dims).
 - `_find_key` (function): Finds the shortest matching key by suffix (optional prefix filtering).
 - `_detect_model_type` (function): Heuristically classifies WAN variant (t2v/i2v/ti2v/vace/s2v/animate).
+- `_repo_hint_for_model_type` (function): Resolves the authoritative WAN repo hint for a detected WAN22 model type.
 - `_family_for_model_type` (function): Resolves explicit WAN22 model family (`WAN22_5B`/`WAN22_14B`/`WAN22_ANIMATE`) from detected model type.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from typing import Optional
-
-import torch
 
 from apps.backend.runtime.model_registry.detectors.base import ModelDetector, REGISTRY
 from apps.backend.runtime.model_registry.signals import SignalBundle, count_blocks
@@ -41,8 +45,6 @@ from apps.backend.runtime.model_registry.specs import (
     VAESignature,
 )
 from apps.backend.runtime.families.wan22.inference import infer_wan22_latent_channels, infer_wan22_patch_embedding
-from apps.backend.quantization.tensor import CodexParameter
-
 
 WAN_HEAD_KEY = "head.modulation"
 _WAN22_REPO_HINT_BY_MODEL_TYPE = {
@@ -50,7 +52,52 @@ _WAN22_REPO_HINT_BY_MODEL_TYPE = {
     "i2v": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
     "ti2v": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
     "animate": "Wan-AI/Wan2.2-Animate-14B-Diffusers",
+    "s2v": "Wan-AI/Wan2.2-S2V-14B",
 }
+
+
+@dataclass(frozen=True)
+class Wan22StructuralMetadata:
+    prefix: str
+    model_type: str
+    family: ModelFamily
+    repo_hint: str
+    in_channels: int
+    model_dim: int
+    patch_size: tuple[int, int, int]
+    latent_channels: int
+    num_layers: int
+
+
+@dataclass(frozen=True)
+class _GGUFHeaderTensorRef:
+    shape: tuple[int, ...]
+
+
+class _GGUFHeaderStateDict(Mapping[str, _GGUFHeaderTensorRef]):
+    def __init__(self, gguf_path: str) -> None:
+        from apps.backend.quantization.gguf import GGUFReader
+
+        reader = GGUFReader(gguf_path)
+        self._tensors = {
+            tensor.name: _GGUFHeaderTensorRef(tuple(int(v) for v in reversed(tensor.shape.tolist())))
+            for tensor in reader.tensors
+        }
+        self.filepath = gguf_path
+        self.source_format = "gguf"
+
+    def __getitem__(self, key: str) -> _GGUFHeaderTensorRef:
+        return self._tensors[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._tensors)
+
+    def __len__(self) -> int:
+        return len(self._tensors)
+
+    def shape_of(self, key: str) -> tuple[int, ...] | None:
+        tensor = self._tensors.get(key)
+        return None if tensor is None else tensor.shape
 
 
 class Wan22Detector(ModelDetector):
@@ -65,27 +112,8 @@ class Wan22Detector(ModelDetector):
         return bool(patch and len(patch) == 5)
 
     def build_signature(self, bundle: SignalBundle) -> ModelSignature:  # type: ignore[override]
-        is_gguf = any(isinstance(v, CodexParameter) and v.qtype is not None for v in bundle.state_dict.values())
-
-        key = _find_key(bundle, WAN_HEAD_KEY)
-        assert key is not None
-        prefix = key[: -len(WAN_HEAD_KEY)]
-
-        patch_shape = bundle.shape(f"{prefix}patch_embedding.weight")
-        assert patch_shape is not None and len(patch_shape) == 5
-        in_channels, model_dim, patch_size = infer_wan22_patch_embedding(patch_shape)
-
-        head_shape = bundle.shape(f"{prefix}head.head.weight")
-        assert head_shape is not None
-        latent_channels = infer_wan22_latent_channels(
-            head_shape,
-            patch_size=patch_size,
-            default_latent_channels=in_channels,
-        )
-
-        num_layers = count_blocks(bundle.keys, f"{prefix}blocks.{{}}.")
-
-        model_type = _detect_model_type(bundle, prefix, in_channels)
+        is_gguf = bundle.is_gguf_quantized()
+        metadata = inspect_wan22_bundle(bundle)
 
         vae_sig: Optional[VAESignature] = None
         vae_key = _find_key(bundle, "decoder.conv_out.weight", search_prefix="vae.")
@@ -95,33 +123,32 @@ class Wan22Detector(ModelDetector):
                 vae_sig = VAESignature(key_prefix="vae.", latent_channels=int(vae_shape[1]))
 
         extras = {
-            "model_type": model_type,
-            "patch_size": patch_size,
-            "blocks": num_layers,
-            "channels_in": in_channels,
+            "model_type": metadata.model_type,
+            "patch_size": metadata.patch_size,
+            "blocks": metadata.num_layers,
+            "channels_in": metadata.in_channels,
         }
 
-        text_encoders = _collect_text_encoders(bundle, prefix)
+        text_encoders = _collect_text_encoders(bundle, metadata.prefix)
 
         quantization = (
             QuantizationHint(kind=QuantizationKind.GGUF, detail="parameter_gguf") if is_gguf else QuantizationHint()
         )
-        repo_hint = _WAN22_REPO_HINT_BY_MODEL_TYPE.get(model_type, "Wan-AI/Wan2.2-T2V-A14B-Diffusers")
 
         return ModelSignature(
-            family=_family_for_model_type(model_type),
-            repo_hint=repo_hint,
+            family=metadata.family,
+            repo_hint=metadata.repo_hint,
             prediction=PredictionKind.FLOW,
             latent_format=LatentFormat.WAN22,
             quantization=quantization,
             core=CodexCoreSignature(
                 architecture=CodexCoreArchitecture.DIT,
-                channels_in=in_channels,
-                channels_out=latent_channels,
-                context_dim=model_dim,
+                channels_in=metadata.in_channels,
+                channels_out=metadata.latent_channels,
+                context_dim=metadata.model_dim,
                 temporal=True,
-                depth=num_layers,
-                key_prefixes=[prefix],
+                depth=metadata.num_layers,
+                key_prefixes=[metadata.prefix],
             ),
             text_encoders=text_encoders,
             vae=vae_sig,
@@ -158,8 +185,9 @@ def _tensor_last_dim(bundle: SignalBundle, key: str) -> Optional[int]:
     if shape:
         return int(shape[-1])
     tensor = bundle.state_dict.get(key)
-    if isinstance(tensor, torch.Tensor):
-        return int(tensor.shape[-1])
+    tensor_shape = getattr(tensor, "shape", None)
+    if tensor_shape:
+        return int(tensor_shape[-1])
     return None
 
 
@@ -184,9 +212,21 @@ def _detect_model_type(bundle: SignalBundle, prefix: str, in_channels: int) -> s
             return model_type
     if in_channels >= 48:
         return "ti2v"
-    if f"{prefix}img_emb.proj.0.bias" in bundle.state_dict:
+    # Local WAN22 I2V base checkpoints use the 36-channel concat surface
+    # (`lat16 + mask4 + img16 -> patch_embedding`) and do not store a separate
+    # `img_emb` branch. Older/upstream i2v checkpoints may still expose
+    # `img_emb.proj.*`, so keep that as an auxiliary positive signal.
+    if in_channels == 36 or f"{prefix}img_emb.proj.0.bias" in bundle.state_dict:
         return "i2v"
     return "t2v"
+
+
+def _repo_hint_for_model_type(model_type: str) -> str:
+    normalized = str(model_type or "").strip().lower()
+    repo_hint = _WAN22_REPO_HINT_BY_MODEL_TYPE.get(normalized)
+    if repo_hint is None:
+        raise NotImplementedError(f"wan22 repo_hint for model_type {normalized} not yet implemented")
+    return repo_hint
 
 
 def _family_for_model_type(model_type: str) -> ModelFamily:
@@ -196,6 +236,53 @@ def _family_for_model_type(model_type: str) -> ModelFamily:
     if normalized == "animate":
         return ModelFamily.WAN22_ANIMATE
     return ModelFamily.WAN22_14B
+
+
+def inspect_wan22_bundle(bundle: SignalBundle) -> Wan22StructuralMetadata:
+    key = _find_key(bundle, WAN_HEAD_KEY)
+    if key is None:
+        raise RuntimeError("WAN22 structural inspection requires head.modulation")
+    prefix = key[: -len(WAN_HEAD_KEY)]
+
+    patch_shape = bundle.shape(f"{prefix}patch_embedding.weight")
+    if patch_shape is None or len(patch_shape) != 5:
+        raise RuntimeError(
+            "WAN22 structural inspection requires patch_embedding.weight with 5 dimensions "
+            f"(got {patch_shape!r} for prefix {prefix!r})"
+        )
+    in_channels, model_dim, patch_size = infer_wan22_patch_embedding(patch_shape)
+
+    head_shape = bundle.shape(f"{prefix}head.head.weight")
+    if head_shape is None:
+        raise RuntimeError(f"WAN22 structural inspection requires {prefix}head.head.weight")
+    latent_channels = infer_wan22_latent_channels(
+        head_shape,
+        patch_size=patch_size,
+        default_latent_channels=in_channels,
+    )
+
+    model_type = _detect_model_type(bundle, prefix, in_channels)
+    family = _family_for_model_type(model_type)
+    repo_hint = _repo_hint_for_model_type(model_type)
+    num_layers = count_blocks(bundle.keys, f"{prefix}blocks.{{}}.")
+
+    return Wan22StructuralMetadata(
+        prefix=prefix,
+        model_type=model_type,
+        family=family,
+        repo_hint=repo_hint,
+        in_channels=in_channels,
+        model_dim=model_dim,
+        patch_size=patch_size,
+        latent_channels=latent_channels,
+        num_layers=num_layers,
+    )
+
+
+def inspect_wan22_gguf_path(gguf_path: str) -> Wan22StructuralMetadata:
+    from apps.backend.runtime.model_registry.signals import build_bundle
+
+    return inspect_wan22_bundle(build_bundle(_GGUFHeaderStateDict(gguf_path)))
 
 
 REGISTRY.register(Wan22Detector())

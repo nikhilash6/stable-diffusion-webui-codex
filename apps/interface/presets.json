@@ -5,22 +5,19 @@
       "id": "sdxl",
       "title": "SDXL",
       "tabs": ["txt2img", "img2img"],
-      "model_select": { "type": "pattern", "value": "sdxl" },
-      "options": {}
+      "model_select": { "type": "pattern", "value": "sdxl" }
     },
     {
       "id": "flux1",
       "title": "FLUX.1",
       "tabs": ["txt2img"],
-      "model_select": { "type": "pattern", "value": "flux.1" },
-      "options": {}
+      "model_select": { "type": "pattern", "value": "flux.1" }
     },
     {
       "id": "wan22",
       "title": "WAN 2.2",
       "tabs": ["txt2vid", "img2vid"],
-      "model_select": { "type": "pattern", "value": "wan" },
-      "options": {}
+      "model_select": { "type": "pattern", "value": "wan" }
     }
   ]
 }

@@ -7,16 +7,20 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Launcher service specs and process supervision (API + UI).
-Defines service specs/handles, spawns subprocesses with environment overrides, streams logs into a shared buffer, and performs strict port
-availability checks (IPv4/IPv6) before starting the API.
+Defines service specs/handles, spawns subprocesses with environment overrides, streams logs into a shared buffer, performs strict port
+availability checks (IPv4/IPv6), resolves launcher-owned API fallback ports before spawning the backend child, and captures live browser host
+truth on running service handles for launcher endpoint resolution.
 Maps launcher env toggles to backend CLI flags, including main/mount/offload bootstrap device flags, with offload defaulting to CPU when unset,
 plus trace/profiler diagnostics toggles.
+App startup mode is explicit via mode profiles (`dev_service` or `embedded`) with fail-loud preflight gates before mode activation.
 When `CODEX_CUDA_MALLOC=1`, validates/ensures `PYTORCH_CUDA_ALLOC_CONF` includes `backend:cudaMallocAsync` before spawning the API process.
+Launcher-owned frontend dev boot policy selects `npm run dev:fast` or `npm run dev:typecheck` for the UI service without introducing a new
+runtime env var.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `ServiceStatus` (enum): Launcher service lifecycle status.
 - `CodexServiceSpec` (dataclass): Static service definition (command/cwd/env + external-terminal policy).
-- `CodexServiceHandle` (dataclass): Runtime service handle; spawns/monitors subprocess and forwards stdout/stderr to a log buffer.
+- `CodexServiceHandle` (dataclass): Runtime service handle; spawns/monitors subprocess, forwards stdout/stderr to a log buffer, and tracks live endpoint truth.
 - `_codex_root` (function): Resolves the repo root used for service working directories.
 - `default_services` (function): Builds default API+UI service handles with ports/env derived from the environment.
 - `_env_truthy` (function): Normalizes launcher env booleans (`1/true/yes/on`) for CLI flag forwarding.
@@ -24,6 +28,10 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_parse_pytorch_cuda_alloc_conf` (function): Parses `PYTORCH_CUDA_ALLOC_CONF` entries into strict `key:value` pairs.
 - `_ensure_cuda_malloc_async_allocator_env` (function): Enforces allocator backend `cudaMallocAsync` when `CODEX_CUDA_MALLOC=1`.
 - `_api_backend_args_from_env` (function): Builds backend CLI args for the API service from launcher env settings (device defaults, attention backend/SDPA policy, LoRA/runtime toggles; offload defaults to CPU when unset).
+- `_parse_port_like_value` (function): Parses a port-like value into a valid TCP port or returns `None`.
+- `_api_port_candidate_chain` (function): Returns the launcher/API fallback chain for a requested/base API port.
+- `_resolve_api_runtime_port` (function): Resolves the effective launcher-owned API port before spawn and reports whether fallback was used.
+- `build_ui_dev_service_command` (function): Builds the UI dev-service command from the launcher-owned frontend typecheck toggle.
 - `_extract_cli_port` (function): Extracts a `--port` value from a command list.
 - `_port_free_everywhere` (function): Validates a port is bindable on common IPv4/IPv6 local hosts.
 - `_windows_no_activate` (function): Windows startupinfo helper to open consoles without stealing focus.
@@ -33,6 +41,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import signal
 import subprocess
 import sys
@@ -48,6 +57,14 @@ from queue import Empty, Queue
 from typing import Dict, Iterator, List, Mapping, MutableMapping, Optional
 
 from .log_buffer import CodexLogBuffer
+from .profiles import (
+    CODEX_APP_MODE_PROFILE_ENV_KEY,
+    DEFAULT_LAUNCHER_MODE_PROFILE,
+    LAUNCHER_MODE_PROFILE_CHOICES,
+    LAUNCHER_MODE_PROFILE_DEV_SERVICE,
+    LAUNCHER_MODE_PROFILE_EMBEDDED,
+    normalize_mode_profile,
+)
 from .settings import DEVICE_CHOICES
 from apps.backend.infra.config.repo_root import get_repo_root
 
@@ -72,6 +89,30 @@ class CodexServiceSpec:
     allow_external_terminal: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class LauncherModeProfile:
+    key: str
+    api_frontend_mode: str
+    requires_ui_service: bool
+    description: str
+
+
+_MODE_PROFILE_MAP: dict[str, LauncherModeProfile] = {
+    LAUNCHER_MODE_PROFILE_DEV_SERVICE: LauncherModeProfile(
+        key=LAUNCHER_MODE_PROFILE_DEV_SERVICE,
+        api_frontend_mode=LAUNCHER_MODE_PROFILE_DEV_SERVICE,
+        requires_ui_service=True,
+        description="Dual-process mode (API + Vite UI dev service).",
+    ),
+    LAUNCHER_MODE_PROFILE_EMBEDDED: LauncherModeProfile(
+        key=LAUNCHER_MODE_PROFILE_EMBEDDED,
+        api_frontend_mode=LAUNCHER_MODE_PROFILE_EMBEDDED,
+        requires_ui_service=False,
+        description="Embedded mode (API serves built SPA from apps/interface/dist).",
+    ),
+}
+
+
 @dataclass
 class CodexServiceHandle:
     spec: CodexServiceSpec
@@ -82,6 +123,9 @@ class CodexServiceHandle:
     started_at: Optional[float] = None
     last_exit_code: int | None = None
     process_group_id: int | None = None
+    effective_port: int | None = None
+    effective_host: str | None = None
+    launch_token: str | None = None
     _stop_requested: bool = False
     _stop_reason: str | None = None
     _stdout_thread: Optional[threading.Thread] = None
@@ -106,29 +150,31 @@ class CodexServiceHandle:
         _sanitize_allocator_env_contract(env, scope_label=self.spec.name)
 
         command = list(self.spec.command)
-        if self.spec.name.upper() == "API":
+        normalized_service_name = self.spec.name.upper()
+        resolved_api_port: int | None = None
+        resolved_browser_host: str | None = None
+        resolved_launch_token: str | None = None
+        if normalized_service_name == "API":
+            resolved_mode = _resolve_requested_mode_profile(preferred_profile=None, env=env)
+            _assert_mode_preflight(resolved_mode, self.spec.cwd)
             if _env_truthy(env.get("CODEX_CUDA_MALLOC")):
                 _ensure_cuda_malloc_async_allocator_env(env)
             command.extend(_api_backend_args_from_env(env))
-            port = _extract_cli_port(command)
-            if port is None:
-                raw_env_port = env.get("API_PORT_OVERRIDE") or env.get("API_PORT")
-                if raw_env_port is not None:
-                    try:
-                        port = int(str(raw_env_port).strip())
-                    except Exception:
-                        port = None
-            if port is not None:
-                ok, blocked = _port_free_everywhere(port)
-                if not ok:
-                    hint = (
-                        f"API port {port} is busy ({blocked}). "
-                        "You may already have Codex running (WSL/Windows) or another service bound on IPv4/IPv6 localhost. "
-                        "Stop the other instance or set API_PORT_OVERRIDE/WEB_PORT to a free pair."
-                    )
-                    if self.log_buffer:
-                        self.log_buffer.log("launcher", hint)
-                    raise RuntimeError(hint)
+            resolved_api_port, requested_api_port, used_fallback = _resolve_api_runtime_port(command=command, env=env)
+            env["API_PORT_OVERRIDE"] = str(resolved_api_port)
+            raw_host = str(env.get("API_HOST", "localhost")).strip() or "localhost"
+            resolved_browser_host = "localhost" if raw_host in {"0.0.0.0", "::", "[::]"} else raw_host
+            if used_fallback:
+                fallback_message = (
+                    f"API port {requested_api_port} is busy; using fallback {resolved_api_port}."
+                )
+                if self.log_buffer:
+                    self.log_buffer.log("launcher", fallback_message)
+        elif normalized_service_name == "UI":
+            raw_host = str(env.get("SERVER_HOST", "localhost")).strip() or "localhost"
+            resolved_browser_host = "localhost" if raw_host in {"0.0.0.0", "::", "[::]"} else raw_host
+            resolved_launch_token = secrets.token_hex(16)
+            env["CODEX_LAUNCHER_UI_INSTANCE_TOKEN"] = resolved_launch_token
         flags = 0
         startupinfo = None
         use_external = external_terminal and self.spec.allow_external_terminal
@@ -155,6 +201,9 @@ class CodexServiceHandle:
             self._stop_reason = None
             self.last_exit_code = None
             self.process_group_id = None
+            self.effective_port = resolved_api_port
+            self.effective_host = resolved_browser_host
+            self.launch_token = resolved_launch_token
         try:
             popen_kwargs: dict[str, object] = {}
             if os.name != "nt" and not use_external:
@@ -177,6 +226,9 @@ class CodexServiceHandle:
                 self.status = ServiceStatus.ERROR
                 self.pid = None
                 self.process = None
+                self.effective_port = None
+                self.effective_host = None
+                self.launch_token = None
             LOGGER.error("Failed to start %s: %s", self.spec.name, exc)
             raise
 
@@ -205,6 +257,9 @@ class CodexServiceHandle:
                 self.process = None
                 self.process_group_id = None
                 self.started_at = None
+                self.effective_port = None
+                self.effective_host = None
+                self.launch_token = None
                 return
             LOGGER.info("Stopping service %s", self.spec.name)
             self._stop_requested = True
@@ -244,6 +299,9 @@ class CodexServiceHandle:
                     self.process = None
                     self.process_group_id = None
                     self.started_at = None
+                    self.effective_port = None
+                    self.effective_host = None
+                    self.launch_token = None
             if self.log_buffer and exit_code is not None:
                 self.log_buffer.log(self.spec.name, f"{reason} (code {exit_code})", stream="event")
 
@@ -256,6 +314,9 @@ class CodexServiceHandle:
                 self.process = None
                 self.process_group_id = None
                 self.started_at = None
+                self.effective_port = None
+                self.effective_host = None
+                self.launch_token = None
                 return
             LOGGER.warning("Killing service %s", self.spec.name)
             self._stop_requested = True
@@ -283,6 +344,9 @@ class CodexServiceHandle:
                     self.process = None
                     self.process_group_id = None
                     self.started_at = None
+                    self.effective_port = None
+                    self.effective_host = None
+                    self.launch_token = None
             if self.log_buffer and exit_code is not None:
                 self.log_buffer.log(self.spec.name, f"{reason} (code {exit_code})", stream="event")
 
@@ -344,6 +408,9 @@ class CodexServiceHandle:
             self.process = None
             self.process_group_id = None
             self.started_at = None
+            self.effective_port = None
+            self.effective_host = None
+            self.launch_token = None
         if self.log_buffer and not self._stop_requested:
             self.log_buffer.log(self.spec.name, message, stream="event")
 
@@ -352,11 +419,147 @@ def _codex_root() -> Path:
     return get_repo_root()
 
 
-def default_services(log_buffer: CodexLogBuffer | None = None) -> Dict[str, CodexServiceHandle]:
+def _resolve_mode_profile(raw_value: str, *, source_label: str) -> LauncherModeProfile:
+    normalized = normalize_mode_profile(raw_value, source=source_label)
+    profile = _MODE_PROFILE_MAP.get(normalized)
+    if profile is None:
+        allowed = ", ".join(LAUNCHER_MODE_PROFILE_CHOICES)
+        raise RuntimeError(
+            f"Unsupported launcher mode profile {normalized!r}. Allowed values: {allowed}."
+        )
+    return profile
+
+
+def _resolve_requested_mode_profile(
+    *,
+    preferred_profile: str | None,
+    env: Mapping[str, str],
+) -> LauncherModeProfile:
+    env_value = str(env.get(CODEX_APP_MODE_PROFILE_ENV_KEY, "") or "").strip()
+    if env_value:
+        return _resolve_mode_profile(
+            env_value,
+            source_label=f"env {CODEX_APP_MODE_PROFILE_ENV_KEY}",
+        )
+    if preferred_profile is not None and str(preferred_profile).strip():
+        return _resolve_mode_profile(
+            str(preferred_profile),
+            source_label="launcher meta app_mode_profile",
+        )
+    return _resolve_mode_profile(
+        DEFAULT_LAUNCHER_MODE_PROFILE,
+        source_label="default launcher app mode profile",
+    )
+
+
+def _assert_embedded_packaging_contract(root: Path) -> None:
+    dist_dir = root / "apps" / "interface" / "dist"
+    index_path = dist_dir / "index.html"
+    assets_dir = dist_dir / "assets"
+    if not dist_dir.is_dir():
+        raise RuntimeError(
+            "Embedded app mode requires a built frontend package at "
+            f"{dist_dir}. Run 'npm run build' in apps/interface."
+        )
+    if not index_path.is_file():
+        raise RuntimeError(
+            "Embedded app mode packaging contract violation: missing "
+            f"{index_path}."
+        )
+    if not assets_dir.is_dir():
+        raise RuntimeError(
+            "Embedded app mode packaging contract violation: missing assets directory "
+            f"{assets_dir}."
+        )
+    js_assets = sorted(assets_dir.glob("*.js"))
+    css_assets = sorted(assets_dir.glob("*.css"))
+    if not js_assets:
+        raise RuntimeError(
+            "Embedded app mode packaging contract violation: no JavaScript bundle found under "
+            f"{assets_dir}."
+        )
+    if not css_assets:
+        raise RuntimeError(
+            "Embedded app mode packaging contract violation: no CSS bundle found under "
+            f"{assets_dir}."
+        )
+
+    try:
+        index_html = index_path.read_text(encoding="utf-8")
+    except Exception as exc:
+        raise RuntimeError(
+            f"Embedded app mode packaging contract violation: failed reading {index_path}: {exc}"
+        ) from exc
+
+    missing_refs: list[str] = []
+    for asset in (js_assets[0].name, css_assets[0].name):
+        if f"assets/{asset}" not in index_html:
+            missing_refs.append(asset)
+    if missing_refs:
+        raise RuntimeError(
+            "Embedded app mode packaging contract violation: index.html does not reference "
+            f"asset(s): {', '.join(missing_refs)}."
+        )
+
+
+def _assert_dev_service_requirements(root: Path) -> None:
+    interface_dir = root / "apps" / "interface"
+    package_json = interface_dir / "package.json"
+    node_modules = interface_dir / "node_modules"
+    vite_pkg = node_modules / "vite" / "package.json"
+    if not interface_dir.is_dir():
+        raise RuntimeError(
+            "Dev-service app mode requires frontend workspace at "
+            f"{interface_dir}."
+        )
+    if not package_json.is_file():
+        raise RuntimeError(
+            "Dev-service app mode requires frontend package manifest: "
+            f"{package_json}."
+        )
+    if not node_modules.is_dir():
+        raise RuntimeError(
+            "Dev-service app mode requires installed frontend dependencies: "
+            f"{node_modules}. Run 'npm install' in apps/interface."
+        )
+    if not vite_pkg.is_file():
+        raise RuntimeError(
+            "Dev-service app mode requires Vite dependency at "
+            f"{vite_pkg}. Run 'npm install' in apps/interface."
+        )
+
+
+def _assert_mode_preflight(profile: LauncherModeProfile, root: Path) -> None:
+    if profile.key == LAUNCHER_MODE_PROFILE_EMBEDDED:
+        _assert_embedded_packaging_contract(root)
+        return
+    if profile.key == LAUNCHER_MODE_PROFILE_DEV_SERVICE:
+        _assert_dev_service_requirements(root)
+        return
+    raise RuntimeError(f"Unhandled launcher mode profile {profile.key!r}.")
+
+
+def build_ui_dev_service_command(*, frontend_dev_typecheck: bool) -> List[str]:
+    npm_cmd = "npm.cmd" if os.name == "nt" else "npm"
+    script_name = "dev:typecheck" if frontend_dev_typecheck else "dev:fast"
+    return [npm_cmd, "run", script_name, "--", "--host"]
+
+
+def default_services(
+    log_buffer: CodexLogBuffer | None = None,
+    *,
+    mode_profile: str | None = None,
+    frontend_dev_typecheck: bool = False,
+) -> Dict[str, CodexServiceHandle]:
     root = _codex_root()
     py_exe = Path(sys.executable)
     api_port = os.getenv("API_PORT_OVERRIDE", "7850")
     web_port = os.getenv("WEB_PORT", "7860")
+    resolved_mode = _resolve_requested_mode_profile(
+        preferred_profile=mode_profile,
+        env=os.environ,
+    )
+    _assert_mode_preflight(resolved_mode, root)
     api_spec = CodexServiceSpec(
         name="API",
         command=[
@@ -364,27 +567,32 @@ def default_services(log_buffer: CodexLogBuffer | None = None) -> Dict[str, Code
             str(root / "apps" / "backend" / "interfaces" / "api" / "run_api.py"),
         ],
         cwd=root,
-        base_env={"PYTHONUNBUFFERED": "1", "API_PORT_OVERRIDE": str(api_port)},
+        base_env={
+            "PYTHONUNBUFFERED": "1",
+            "API_PORT_OVERRIDE": str(api_port),
+            CODEX_APP_MODE_PROFILE_ENV_KEY: resolved_mode.api_frontend_mode,
+        },
         allow_external_terminal=True,
     )
-    npm_cmd = "npm.cmd" if os.name == "nt" else "npm"
-    ui_spec = CodexServiceSpec(
-        name="UI",
-        command=[npm_cmd, "run", "dev", "--", "--host"],
-        cwd=root / "apps" / "interface",
-        base_env={
-            "FORCE_COLOR": "1",
-            "API_HOST": "localhost",
-            "API_PORT": str(api_port),
-            "WEB_PORT": str(web_port),
-            "SERVER_HOST": "localhost",
-        },
-        allow_external_terminal=os.name == "nt",
-    )
-    return {
+    services: Dict[str, CodexServiceHandle] = {
         "API": CodexServiceHandle(api_spec, log_buffer=log_buffer),
-        "UI": CodexServiceHandle(ui_spec, log_buffer=log_buffer),
     }
+    if resolved_mode.requires_ui_service:
+        ui_spec = CodexServiceSpec(
+            name="UI",
+            command=build_ui_dev_service_command(frontend_dev_typecheck=frontend_dev_typecheck),
+            cwd=root / "apps" / "interface",
+            base_env={
+                "FORCE_COLOR": "1",
+                "API_HOST": "localhost",
+                "API_PORT": str(api_port),
+                "WEB_PORT": str(web_port),
+                "SERVER_HOST": "localhost",
+            },
+            allow_external_terminal=os.name == "nt",
+        )
+        services["UI"] = CodexServiceHandle(ui_spec, log_buffer=log_buffer)
+    return services
 
 
 def _env_truthy(value: object) -> bool:
@@ -572,6 +780,49 @@ def _extract_cli_port(command: List[str]) -> int | None:
             except Exception:
                 return None
     return None
+
+
+def _parse_port_like_value(raw_value: object) -> int | None:
+    try:
+        parsed = int(str(raw_value or "").strip())
+    except (TypeError, ValueError):
+        return None
+    if parsed < 1 or parsed > 65535:
+        return None
+    return int(parsed)
+
+
+def _api_port_candidate_chain(base_port: int) -> tuple[int, int, int]:
+    normalized_base = int(base_port)
+    return (
+        normalized_base,
+        normalized_base + 10000,
+        normalized_base + 20000,
+    )
+
+
+def _resolve_api_runtime_port(*, command: List[str], env: Mapping[str, str]) -> tuple[int, int, bool]:
+    requested_port = _extract_cli_port(command)
+    if requested_port is None:
+        requested_port = _parse_port_like_value(env.get("API_PORT_OVERRIDE") or env.get("API_PORT"))
+    if requested_port is None:
+        requested_port = 7850
+    blocked_details: list[str] = []
+    for index, candidate in enumerate(_api_port_candidate_chain(requested_port)):
+        if candidate < 1 or candidate > 65535:
+            blocked_details.append(f"{candidate} (out_of_range)")
+            continue
+        ok, blocked = _port_free_everywhere(candidate)
+        if ok:
+            return int(candidate), int(requested_port), bool(index != 0)
+        blocked_details.append(f"{candidate} ({blocked or 'busy'})")
+    blocked_summary = ", ".join(blocked_details)
+    raise RuntimeError(
+        "No free API port in launcher fallback chain. "
+        f"Tried: {blocked_summary}. "
+        "You may already have Codex running (WSL/Windows) or another service bound on IPv4/IPv6 localhost. "
+        "Stop the other instance or set API_PORT_OVERRIDE/WEB_PORT to a free pair."
+    )
 
 
 def _port_free_everywhere(port: int) -> tuple[bool, str]:

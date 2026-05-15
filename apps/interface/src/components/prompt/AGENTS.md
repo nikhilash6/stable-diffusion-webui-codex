@@ -1,7 +1,7 @@
 <!-- tags: prompt, components, tiptap -->
 # apps/interface/src/components/prompt Overview
 Date: 2025-12-03
-Last Review: 2026-02-28
+Last Review: 2026-04-08
 Status: Active
 
 ## Purpose
@@ -9,6 +9,7 @@ Status: Active
 
 ## Notes
 - PromptEditor is built on Tiptap StarterKit plus the custom `PromptToken` node.
+- `PromptToken` is an inline atomic node rendered through `PromptTokenChip`/`VueNodeViewRenderer`; keep its `renderHTML()` leaf-safe and never expose a ProseMirror content hole/contentDOM for that node.
 - Serialization supports both ProseMirror JSON and Node shapes; validate prompt-token changes with `cd apps/interface && npm run typecheck` plus manual prompt round-trip checks in the UI.
 - 2025-12-17: `PromptBox.vue` hides the char-count badge when empty (`0 chars`) to reduce visual noise in the WAN tab.
 - 2025-12-22: `PromptBox.vue` badge now shows whitespace token count (`tok`) instead of raw character count.
@@ -18,3 +19,4 @@ Status: Active
 - 2026-01-03: Added standardized file header blocks to prompt components (non-test files) as part of the rollout (doc-only change).
 - 2026-02-17: `PromptTokenChip.vue` now resolves the live ProseMirror node from `tr.doc.nodeAt(getPos())` before toggle/weight/remove mutations, fixing stale chip-state updates that previously required view switching.
 - 2026-03-02: `PromptCard.vue` now accepts `hideNegative` as an explicit override (in addition to capability-driven hiding), so callers can suppress Negative Prompt fields when CFG semantics require it.
+- 2026-04-08: `PromptCard.vue` still owns which prompt asset tools are exposed, but LoRA/TI modal chrome now comes from `components/modals/PromptAssetInsertModal.vue`; when `hideNegative` is active, the LoRA modal also hides its Negative target action instead of offering a dead insert path.

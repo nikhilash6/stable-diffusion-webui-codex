@@ -18,6 +18,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import datetime as _datetime
 import logging
@@ -30,7 +31,7 @@ from typing import Any, Iterable, Iterator, Mapping, Optional
 from apps.backend.infra.config.env_flags import env_flag, env_int
 from apps.backend.infra.config.repo_root import get_repo_root
 
-_log = logging.getLogger("backend.profiler")
+_log = get_backend_logger("backend.profiler")
 
 
 @dataclass(frozen=True, slots=True)

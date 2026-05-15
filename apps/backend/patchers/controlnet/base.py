@@ -17,6 +17,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -30,7 +31,7 @@ from apps.backend.runtime.memory import memory_management
 from apps.backend.runtime.memory.config import DeviceRole
 from .weighting import merge_control_signals
 
-logger = logging.getLogger("backend.patchers.controlnet.base")
+logger = get_backend_logger("backend.patchers.controlnet.base")
 
 
 @dataclass(frozen=True, slots=True)

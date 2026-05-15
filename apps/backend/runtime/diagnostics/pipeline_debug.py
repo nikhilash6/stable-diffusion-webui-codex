@@ -18,6 +18,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 import os
@@ -25,7 +26,7 @@ from functools import wraps
 from typing import Any, Callable, TypeVar, cast
 
 
-logger = logging.getLogger("backend.pipeline.debug")
+logger = get_backend_logger("backend.pipeline.debug")
 
 PIPELINE_DEBUG_ENABLED = False
 

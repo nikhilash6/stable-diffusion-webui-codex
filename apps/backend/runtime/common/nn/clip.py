@@ -9,20 +9,30 @@ Required Notice: see NOTICE
 Purpose: CLIP wrapper module used to integrate transformer backbones with optional text projection.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `_MatmulProjection` (class): Projection head with matmul-oriented weight semantics (`x @ weight`).
+- `_MatmulProjection` (class): Projection head with matmul-oriented weight semantics (`x @ weight`) that honors Codex manual-cast runtime precision.
 - `IntegratedCLIP` (class): Wraps a CLIP-like transformer and exposes HF-style forward outputs.
 """
 
 import torch
 
+from apps.backend.runtime.ops.operations import get_operation_context, main_stream_worker, weights_manual_cast
+
 
 class _MatmulProjection(torch.nn.Module):
     def __init__(self, embed_dim: int):
         super().__init__()
-        self.weight = torch.nn.Parameter(torch.empty((embed_dim, embed_dim)))
+        ctx = get_operation_context()
+        dtype = ctx.dtype or torch.float32
+        self.weight = torch.nn.Parameter(torch.empty((embed_dim, embed_dim), device=ctx.device, dtype=dtype))
+        self.bias = None
+        self.parameters_manual_cast = ctx.manual_cast_enabled
         torch.nn.init.normal_(self.weight, std=embed_dim ** -0.5)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.parameters_manual_cast:
+            weight, _bias, signal = weights_manual_cast(self, hidden_states)
+            with main_stream_worker(weight, None, signal):
+                return hidden_states @ weight
         return hidden_states @ self.weight
 
 

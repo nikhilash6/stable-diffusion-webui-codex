@@ -63,7 +63,7 @@ Symbols (top-level; keep in sync; no ghosts):
       <slot />
     </div>
 
-    <LoraModal v-if="enableAssets" v-model="showLora" @insert="onInsertToken" />
+    <LoraModal v-if="enableAssets" v-model="showLora" :show-negative-target="!hideNegative" @insert="onInsertToken" />
     <TextualInversionModal v-if="enableAssets" v-model="showTI" @insert="onInsertToken" />
     <StyleEditorModal v-if="enableStyles" v-model="showStyle" @saved="onStyleSaved" />
   </div>

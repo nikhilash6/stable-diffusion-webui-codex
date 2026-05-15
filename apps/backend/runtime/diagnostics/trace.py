@@ -17,6 +17,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 import os
@@ -26,7 +27,7 @@ from typing import Any
 
 import torch
 
-_log = logging.getLogger("backend.trace")
+_log = get_backend_logger("backend.trace")
 _enabled: bool = False
 _limit: int = 500
 _events: int = 0

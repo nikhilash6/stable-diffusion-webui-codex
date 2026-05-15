@@ -8,20 +8,20 @@ Required Notice: see NOTICE
 
 Purpose: PNG Info infotext parsing + send-to mapping helpers.
 Parses common A1111/Forge-style `parameters` infotext into structured fields (including legacy JSON fallback) and maps sampler/scheduler
-strings into Codex canonical names.
+strings into Codex canonical names with truthful partial-mapping warnings when only one side is recognized.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `ParsedInfotext` (interface): Structured subset of parsed infotext fields.
 - `ModelLike` (interface): Minimal model entry used to resolve checkpoints from infotext.
 - `ComfyParseResult` (interface): Parsed ComfyUI prompt JSON result (extracted fields + graph + warnings).
-- `SamplerLike` (interface): Minimal sampler entry used for name + allowlist mapping.
+- `SamplerLike` (interface): Minimal sampler entry used for name + scheduler-compatibility mapping.
 - `SchedulerLike` (interface): Minimal scheduler entry used for name matching.
 - `parseInfotext` (function): Parses infotext into structured fields + raw kv map.
 - `tokenizeKvParts` (function): Tokenizes `Steps:` KV blocks while preserving quoted/bracketed comma values.
 - `parseLegacyJsonInfotext` (function): Parses legacy JSON metadata blobs into `ParsedInfotext`.
 - `parseComfyPromptJson` (function): Parses ComfyUI prompt JSON and extracts common generation fields when unambiguous.
 - `mapCheckpointTitle` (function): Resolves a checkpoint title from parsed infotext against a models list.
-- `mapSamplerScheduler` (function): Maps raw sampler/scheduler strings to canonical names with allowlist validation.
+- `mapSamplerScheduler` (function): Maps raw sampler/scheduler strings to canonical names with sampler/scheduler compatibility validation.
 */
 
 export interface ParsedInfotext {
@@ -657,8 +657,7 @@ export function mapSamplerScheduler(
   }
 
   const resolveScheduler = (value: string): string | null => {
-    let key = normalizeComparable(value)
-    if (key === 'normal') key = 'simple'
+    const key = normalizeComparable(value)
     const found = schedulerMap.get(key)
     return found ?? null
   }
@@ -669,11 +668,11 @@ export function mapSamplerScheduler(
   // Heuristic: when schedule type isn't present, it may be appended to sampler name
   // e.g. "DPM++ 2M Karras" → sampler="dpm++ 2m", scheduler="karras".
   if (scheduler === null && rawScheduler && normalizeComparable(rawScheduler) === 'automatic') {
-    warnings.push("Scheduler is 'Automatic' (not reproducible); leaving sampler/scheduler unchanged.")
+    warnings.push("Scheduler is 'Automatic' (not reproducible); leaving scheduler unchanged.")
   }
 
   if (scheduler === null && rawScheduler && normalizeComparable(rawScheduler) !== 'automatic') {
-    warnings.push(`Scheduler '${rawScheduler}' not recognized; leaving sampler/scheduler unchanged.`)
+    warnings.push(`Scheduler '${rawScheduler}' not recognized; leaving scheduler unchanged.`)
   }
 
   if ((sampler === null || scheduler === null) && rawSampler) {
@@ -693,19 +692,20 @@ export function mapSamplerScheduler(
   }
 
   if (sampler === null && rawSampler) {
-    warnings.push(`Sampler '${rawSampler}' not recognized; leaving sampler/scheduler unchanged.`)
+    warnings.push(`Sampler '${rawSampler}' not recognized; leaving sampler unchanged.`)
   }
 
-  if (!sampler || !scheduler) {
-    return { warnings }
+  if (sampler && scheduler) {
+    const samplerEntry = samplers.find(s => s.name === sampler) ?? null
+    const allowed = samplerEntry?.allowed_schedulers ?? []
+    if (Array.isArray(allowed) && allowed.length > 0 && !allowed.includes(scheduler)) {
+      warnings.push(`Sampler/scheduler pair '${sampler}' / '${scheduler}' is not supported; leaving unchanged.`)
+      return { warnings }
+    }
   }
 
-  const samplerEntry = samplers.find(s => s.name === sampler) ?? null
-  const allowed = samplerEntry?.allowed_schedulers ?? []
-  if (Array.isArray(allowed) && allowed.length > 0 && !allowed.includes(scheduler)) {
-    warnings.push(`Sampler/scheduler pair '${sampler}' / '${scheduler}' is not supported; leaving unchanged.`)
-    return { warnings }
-  }
-
-  return { sampler, scheduler, warnings }
+  const result: { sampler?: string; scheduler?: string; warnings: string[] } = { warnings }
+  if (sampler) result.sampler = sampler
+  if (scheduler) result.scheduler = scheduler
+  return result
 }

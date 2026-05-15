@@ -41,7 +41,8 @@ Environment overrides:
   - CODEX_CORE_DEVICE (auto|cuda|cpu|mps|xpu|directml; required when no saved setting exists)
   - CODEX_TE_DEVICE (auto|cuda|cpu|mps|xpu|directml; required when no saved setting exists)
   - CODEX_VAE_DEVICE (auto|cuda|cpu|mps|xpu|directml; required when no saved setting exists)
-  - CODEX_LORA_APPLY_MODE (merge|online; default: merge)
+  - CODEX_LORA_APPLY_MODE (default: online)
+    Accepted values: 'merge' or 'online'
   - CODEX_LORA_ONLINE_MATH (weight_merge|activation; default: weight_merge)
   - CODEX_LORA_MERGE_MODE (fast|precise; default: fast)
   - CODEX_LORA_REFRESH_SIGNATURE (structural|content_sha256; default: content_sha256)

@@ -7,7 +7,9 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: In-process task registry for API jobs.
-Tracks task status, bounded SSE replay buffers, cancellation requests, and running progress snapshots (including progress message/data metadata) for API endpoints.
+Tracks task status, bounded SSE replay buffers, cancellation requests, running progress snapshots (including progress message/data metadata),
+and one canonical public terminal error envelope for API endpoints. Automation-gallery recovery is derived from the same bounded replay window,
+so reconnect snapshots never outgrow the task-event buffer contract.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `tasks` (constant): In-memory task registry mapping task_id -> TaskEntry.
@@ -38,6 +40,8 @@ from collections import deque
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Deque, Dict, Optional, Tuple
+
+from apps.backend.interfaces.api.public_errors import PublicTaskError
 
 tasks: Dict[str, "TaskEntry"] = {}
 tasks_lock = threading.Lock()
@@ -77,6 +81,7 @@ TASK_EVENT_BUFFER_MAX_BYTES = _parse_int_env(
 class TaskEventType(StrEnum):
     STATUS = "status"
     PROGRESS = "progress"
+    AUTOMATION_ITERATION = "automation_iteration"
     RESULT = "result"
     ERROR = "error"
     END = "end"
@@ -94,7 +99,13 @@ class TaskStatusStage(StrEnum):
     RUNNING = "running"
 
 
-_NON_TERMINAL_EVENT_TYPES = frozenset({TaskEventType.STATUS, TaskEventType.PROGRESS})
+_NON_TERMINAL_EVENT_TYPES = frozenset(
+    {
+        TaskEventType.STATUS,
+        TaskEventType.PROGRESS,
+        TaskEventType.AUTOMATION_ITERATION,
+    }
+)
 
 
 def parse_task_cancel_mode(raw_mode: Any) -> TaskCancelMode:
@@ -119,7 +130,8 @@ def normalize_task_event(event: Dict[str, Any]) -> tuple[TaskEventType, Dict[str
     except ValueError as exc:
         raise ValueError(
             f"Unsupported task event type {raw_type!r}; "
-            f"allowed non-terminal types are: {TaskEventType.STATUS.value}, {TaskEventType.PROGRESS.value}."
+            "allowed non-terminal types are: "
+            f"{TaskEventType.STATUS.value}, {TaskEventType.PROGRESS.value}, {TaskEventType.AUTOMATION_ITERATION.value}."
         ) from exc
 
     if event_type not in _NON_TERMINAL_EVENT_TYPES:
@@ -145,11 +157,30 @@ def normalize_task_event(event: Dict[str, Any]) -> tuple[TaskEventType, Dict[str
         normalized["stage"] = stage.value
         return event_type, normalized
 
-    raw_stage = event.get("stage")
-    stage_text = str(raw_stage or "").strip()
-    if not stage_text:
-        raise ValueError("progress event requires a non-empty stage")
-    normalized["stage"] = stage_text
+    if event_type is TaskEventType.PROGRESS:
+        raw_stage = event.get("stage")
+        stage_text = str(raw_stage or "").strip()
+        if not stage_text:
+            raise ValueError("progress event requires a non-empty stage")
+        normalized["stage"] = stage_text
+        return event_type, normalized
+
+    iteration_index = event.get("iteration_index")
+    if isinstance(iteration_index, bool) or not isinstance(iteration_index, int) or iteration_index < 1:
+        raise ValueError("automation_iteration event requires integer iteration_index >= 1")
+    images = event.get("images")
+    if not isinstance(images, list):
+        raise ValueError("automation_iteration event requires images list")
+    prompt_preview = event.get("prompt_preview")
+    if not isinstance(prompt_preview, str):
+        raise ValueError("automation_iteration event requires prompt_preview string")
+    source_label = event.get("source_label")
+    if source_label is not None and not isinstance(source_label, str):
+        raise ValueError("automation_iteration event source_label must be string or null")
+    normalized["iteration_index"] = iteration_index
+    normalized["images"] = list(images)
+    normalized["prompt_preview"] = prompt_preview
+    normalized["source_label"] = source_label
     return event_type, normalized
 
 
@@ -185,7 +216,7 @@ class TaskEntry:
         self._started_at_ms: int | None = None
         self._finished_at_ms: int | None = None
         self.result: Dict[str, Any] | None = None
-        self.error: Optional[str] = None
+        self.error: PublicTaskError | None = None
         self.done: asyncio.Future[bool] = loop.create_future()
         self.cleanup_handle: Optional[asyncio.TimerHandle] = None
         self.cancel_requested: bool = False
@@ -235,6 +266,21 @@ class TaskEntry:
 
         self.loop.call_soon_threadsafe(self._push_event_nowait, event_type, dict(normalized_event))
 
+    def flush_pending_callbacks(self) -> None:
+        """Block until previously queued loop-thread callbacks for this entry have run."""
+
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+
+        if running is self.loop:
+            return
+
+        barrier = threading.Event()
+        self.loop.call_soon_threadsafe(barrier.set)
+        barrier.wait()
+
     def _push_event_nowait(self, event_type: TaskEventType, event: Dict[str, Any]) -> None:
         if self.done.done():
             raise RuntimeError("Cannot push events to a finished task.")
@@ -276,7 +322,6 @@ class TaskEntry:
                     self._preview_step = int(preview_step)
                 except Exception:
                     pass
-
         payload = json.dumps(event)
         byte_len = len(payload.encode("utf-8", errors="replace"))
 
@@ -345,7 +390,27 @@ class TaskEntry:
             out["preview_image"] = dict(self._preview_image)
         if self._preview_step is not None:
             out["preview_step"] = int(self._preview_step)
+        gallery_images = self.recoverable_automation_gallery_images()
+        if gallery_images:
+            out["automation_gallery_images"] = gallery_images
         return out
+
+    def recoverable_automation_gallery_images(self) -> list[dict[str, Any]]:
+        gallery_images: list[dict[str, Any]] = []
+        for event in self._events:
+            if event.event_type is not TaskEventType.AUTOMATION_ITERATION:
+                continue
+            try:
+                payload = json.loads(event.json_payload)
+            except Exception:
+                continue
+            images = payload.get("images")
+            if not isinstance(images, list) or not images:
+                continue
+            for image in images:
+                if isinstance(image, dict):
+                    gallery_images.append(dict(image))
+        return gallery_images
 
     def terminal_event_ids(self) -> Tuple[int, int] | None:
         """Return (terminal_primary_id, terminal_end_id) when finished."""

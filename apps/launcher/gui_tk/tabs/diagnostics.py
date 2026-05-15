@@ -7,12 +7,10 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Diagnostics tab for the Tk launcher.
-Shows environment preflight checks and exposes debug/logging/profiling env flags used by the backend.
-Includes advanced performance toggles (e.g. CFG batch mode) intended for profiling and troubleshooting.
-Includes contract-trace/profiler launcher toggles (`CODEX_TRACE_CONTRACT`, `CODEX_TRACE_PROFILER`) for runtime diagnostics bootstrap.
+Shows launcher environment preflight checks plus backend debug, trace, profiler, and log-level controls grouped by troubleshooting purpose.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `DiagnosticsTab` (class): Diagnostics tab (checks + debug flags + log levels).
+- `DiagnosticsTab` (class): Diagnostics tab controller for checks and debug/logging/profiling settings.
 """
 
 from __future__ import annotations
@@ -47,7 +45,6 @@ class DiagnosticsTab:
         self._canvas_bg = str(canvas_bg)
 
         self.frame: ttk.Frame | None = None
-
         self._checks_tree: ttk.Treeview | None = None
 
         self._debug_flags: Dict[str, tk.BooleanVar] = {}
@@ -74,127 +71,125 @@ class DiagnosticsTab:
         checks_box = ttk.LabelFrame(body, text="  Environment Checks  ", padding=14)
         checks_box.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
         checks_box.columnconfigure(0, weight=1)
+        checks_box.rowconfigure(0, weight=1)
 
-        tree = ttk.Treeview(checks_box, columns=("name", "ok", "detail"), show="headings", height=5)
+        tree_frame = ttk.Frame(checks_box)
+        tree_frame.grid(row=0, column=0, sticky="ew")
+        tree_frame.columnconfigure(0, weight=1)
+        tree = ttk.Treeview(tree_frame, columns=("name", "ok", "detail"), show="headings", height=6)
         tree.heading("name", text="Check")
         tree.heading("ok", text="OK")
         tree.heading("detail", text="Detail")
-        tree.column("name", width=160, anchor="w")
-        tree.column("ok", width=60, anchor="center")
-        tree.column("detail", width=600, anchor="w")
+        tree.column("name", width=170, minwidth=140, anchor="w", stretch=False)
+        tree.column("ok", width=64, minwidth=64, anchor="center", stretch=False)
+        tree.column("detail", width=680, minwidth=320, anchor="w", stretch=True)
         tree.grid(row=0, column=0, sticky="ew")
-        ttk.Button(checks_box, text="↻ Re-run checks", command=self._run_checks_async).grid(row=1, column=0, sticky="e", pady=(10, 0))
+        xscroll = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
+        xscroll.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        tree.configure(xscrollcommand=xscroll.set)
         self._checks_tree = tree
 
-        diag = ttk.LabelFrame(body, text="  Debug + Logging  ", padding=14)
-        diag.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
-        diag.columnconfigure(0, weight=1)
-        diag.columnconfigure(1, weight=1)
+        checks_actions = ttk.Frame(checks_box)
+        checks_actions.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        checks_actions.columnconfigure(0, weight=1)
+        ttk.Label(
+            checks_actions,
+            text="These checks validate launcher prerequisites only; service runtime failures still show up in Logs.",
+            style="Muted.TLabel",
+            justify="left",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(checks_actions, text="↻ Re-run checks", command=self._run_checks_async).grid(row=0, column=1, sticky="e")
 
-        dbg_col = ttk.Frame(diag)
-        dbg_col.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
-        ttk.Label(dbg_col, text="Debug Flags", style="TLabelframe.Label").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        sampling_box = ttk.LabelFrame(body, text="  Sampling + Pipeline  ", padding=14)
+        sampling_box.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
+        sampling_box.columnconfigure(0, weight=1)
 
-        debug_flags = [
-            ("CODEX_DEBUG_COND", "Conditioning Debug"),
-            ("CODEX_LOG_SAMPLER", "Sampler Verbose Logs"),
-            ("CODEX_LOG_CFG_DELTA", "CFG Delta Logs (requires Sampler Verbose Logs)"),
-            ("CODEX_LOG_SIGMAS", "Sigma Ladder Logs"),
-            ("CODEX_TRACE_INFERENCE_DEBUG", "Trace Debug: Inference"),
-            ("CODEX_TRACE_LOAD_PATCH_DEBUG", "Trace Debug: Load/Patch"),
-            ("CODEX_TRACE_CALL_DEBUG", "Trace Debug: Call Trace"),
-            ("CODEX_PIPELINE_DEBUG", "Pipeline Debug"),
-            ("CODEX_DUMP_LATENTS", "Dump Latents"),
-            ("CODEX_TIMELINE", "Timeline Tracer (TVA-style execution timeline)"),
-            ("CODEX_TRACE_CONTRACT", "Contract Trace (JSONL in logs/contract-trace)"),
-            ("CODEX_TRACE_PROFILER", "Contract Profiler Toggle (maps to --trace-profiler)"),
-            ("CODEX_PROFILE", "Global Profiler (torch.profiler)"),
-            ("CODEX_PROFILE_TRACE", "Profiler: export Perfetto trace"),
-            ("CODEX_PROFILE_RECORD_SHAPES", "Profiler: record shapes"),
-            ("CODEX_PROFILE_PROFILE_MEMORY", "Profiler: profile memory"),
-            ("CODEX_PROFILE_WITH_STACK", "Profiler: include stacks (very heavy)"),
+        trace_box = ttk.LabelFrame(body, text="  Deep Traces + Contract  ", padding=14)
+        trace_box.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 8))
+        trace_box.columnconfigure(0, weight=1)
+
+        profiler_box = ttk.LabelFrame(body, text="  Profiler  ", padding=14)
+        profiler_box.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 8))
+        profiler_box.columnconfigure(0, weight=1)
+
+        logging_box = ttk.LabelFrame(body, text="  Logging  ", padding=14)
+        logging_box.grid(row=4, column=0, sticky="ew", padx=8, pady=(0, 8))
+        logging_box.columnconfigure(0, weight=1)
+
+        sampling_flags = [
+            ("CODEX_DEBUG_COND", "Conditioning Debug", False),
+            ("CODEX_LOG_SAMPLER", "Sampler Verbose Logs", False),
+            ("CODEX_LOG_CFG_DELTA", "CFG Delta Logs (requires Sampler Verbose Logs)", False),
+            ("CODEX_LOG_SIGMAS", "Sigma Ladder Logs", False),
+            ("CODEX_PIPELINE_DEBUG", "Pipeline Debug", True),
+            ("CODEX_DUMP_LATENTS", "Dump Latents", True),
+            ("CODEX_TIMELINE", "Timeline Trace (TVA-style execution timeline)", True),
         ]
-        advanced_debug_keys = {
-            "CODEX_TRACE_INFERENCE_DEBUG",
-            "CODEX_TRACE_LOAD_PATCH_DEBUG",
-            "CODEX_TRACE_CALL_DEBUG",
-            "CODEX_PIPELINE_DEBUG",
-            "CODEX_DUMP_LATENTS",
-            "CODEX_TIMELINE",
-            "CODEX_TRACE_CONTRACT",
-            "CODEX_TRACE_PROFILER",
-            "CODEX_PROFILE",
-            "CODEX_PROFILE_TRACE",
-            "CODEX_PROFILE_RECORD_SHAPES",
-            "CODEX_PROFILE_PROFILE_MEMORY",
-            "CODEX_PROFILE_WITH_STACK",
-        }
-        r = 1
-        for key, label in debug_flags:
-            var = tk.BooleanVar(value=BoolSetting(key, default=False).get(self._controller.store.env))
-            self._debug_flags[key] = var
-            checkbox = ttk.Checkbutton(
-                dbg_col,
-                text=label,
-                variable=var,
-                command=lambda k=key: self._set_bool(k, self._debug_flags[k].get()),
-                style="Toggle.TCheckbutton",
-            )
-            checkbox.grid(row=r, column=0, sticky="w", pady=2)
-            if key in advanced_debug_keys:
-                self._register_advanced(checkbox)
-            r += 1
-
-        # Debug numeric/text
-        self._var_cfg_delta_n.set(str(self._controller.store.env.get("CODEX_LOG_CFG_DELTA_N", "2") or "2"))
-        self._var_cfg_batch_mode.set(
-            ChoiceSetting("CODEX_CFG_BATCH_MODE", default="fused", choices=CFG_BATCH_MODE_CHOICES).get(self._controller.store.env)
-        )
-        self._var_trace_max.set(
-            str(self._controller.store.env.get("CODEX_TRACE_CALL_DEBUG_MAX_PER_FUNC", TRACE_DEBUG_DEFAULT) or TRACE_DEBUG_DEFAULT)
-        )
-        self._var_dump_path.set(str(self._controller.store.env.get("CODEX_DUMP_LATENTS_PATH", "") or ""))
-        self._var_profile_top_n.set(str(self._controller.store.env.get("CODEX_PROFILE_TOP_N", "25") or "25"))
-        self._var_profile_max_steps.set(str(self._controller.store.env.get("CODEX_PROFILE_MAX_STEPS", "0") or "0"))
-
-        r = self._add_entry(
-            dbg_col,
-            r + 1,
+        row = 0
+        for key, label, advanced in sampling_flags:
+            row = self._add_flag_toggle(sampling_box, row, key=key, label=label, advanced=advanced)
+        row = self._add_entry(
+            sampling_box,
+            row,
             label="CFG Delta Steps (N):",
             var=self._var_cfg_delta_n,
             width=10,
             on_change=lambda: self._set_text("CODEX_LOG_CFG_DELTA_N", self._var_cfg_delta_n.get()),
         )
-        r = self._add_choice(
-            dbg_col,
-            r,
+        _ = self._add_choice(
+            sampling_box,
+            row,
             label="CFG Cond+Uncond Batch Mode:",
             var=self._var_cfg_batch_mode,
             choices=CFG_BATCH_MODE_CHOICES,
             on_change=lambda: self._set_text("CODEX_CFG_BATCH_MODE", self._var_cfg_batch_mode.get()),
             advanced=True,
         )
-        r = self._add_entry(
-            dbg_col,
-            r,
+
+        trace_flags = [
+            ("CODEX_TRACE_INFERENCE_DEBUG", "Trace Debug: Inference"),
+            ("CODEX_TRACE_LOAD_PATCH_DEBUG", "Trace Debug: Load/Patch"),
+            ("CODEX_TRACE_CALL_DEBUG", "Trace Debug: Call Trace"),
+            ("CODEX_TRACE_CONTRACT", "Contract Trace (JSONL in logs/contract-trace)"),
+            ("CODEX_TRACE_PROFILER", "Contract Profiler Toggle (maps to --trace-profiler)"),
+        ]
+        self._register_advanced(trace_box)
+        row = 0
+        for key, label in trace_flags:
+            row = self._add_flag_toggle(trace_box, row, key=key, label=label, advanced=True)
+        row = self._add_entry(
+            trace_box,
+            row,
             label="Call trace max / func (0=unlimited):",
             var=self._var_trace_max,
             width=10,
             on_change=lambda: self._set_text("CODEX_TRACE_CALL_DEBUG_MAX_PER_FUNC", self._var_trace_max.get()),
             advanced=True,
         )
-        r = self._add_entry(
-            dbg_col,
-            r,
+        _ = self._add_entry(
+            trace_box,
+            row,
             label="Dump latents path:",
             var=self._var_dump_path,
-            width=36,
+            width=40,
             on_change=lambda: self._set_text("CODEX_DUMP_LATENTS_PATH", self._var_dump_path.get()),
             advanced=True,
         )
-        r = self._add_entry(
-            dbg_col,
-            r,
+
+        profiler_flags = [
+            ("CODEX_PROFILE", "Global Profiler (torch.profiler)"),
+            ("CODEX_PROFILE_TRACE", "Profiler: export Perfetto trace"),
+            ("CODEX_PROFILE_RECORD_SHAPES", "Profiler: record shapes"),
+            ("CODEX_PROFILE_PROFILE_MEMORY", "Profiler: profile memory"),
+            ("CODEX_PROFILE_WITH_STACK", "Profiler: include stacks (very heavy)"),
+        ]
+        self._register_advanced(profiler_box)
+        row = 0
+        for key, label in profiler_flags:
+            row = self._add_flag_toggle(profiler_box, row, key=key, label=label, advanced=True)
+        row = self._add_entry(
+            profiler_box,
+            row,
             label="Profiler top ops (N):",
             var=self._var_profile_top_n,
             width=10,
@@ -202,8 +197,8 @@ class DiagnosticsTab:
             advanced=True,
         )
         _ = self._add_entry(
-            dbg_col,
-            r,
+            profiler_box,
+            row,
             label="Profiler max steps (0=all):",
             var=self._var_profile_max_steps,
             width=10,
@@ -211,47 +206,42 @@ class DiagnosticsTab:
             advanced=True,
         )
 
-        log_col = ttk.Frame(diag)
-        log_col.grid(row=0, column=1, sticky="nsew")
-        ttk.Label(log_col, text="Log Levels", style="TLabelframe.Label").grid(row=0, column=0, sticky="w", pady=(0, 6))
-
         log_defaults = {
             "CODEX_LOG_DEBUG": False,
             "CODEX_LOG_INFO": True,
             "CODEX_LOG_WARNING": True,
             "CODEX_LOG_ERROR": True,
         }
-        r = 1
-        for key, label, default in (
-            ("CODEX_LOG_DEBUG", "DEBUG (verbose)", log_defaults["CODEX_LOG_DEBUG"]),
-            ("CODEX_LOG_INFO", "INFO", log_defaults["CODEX_LOG_INFO"]),
-            ("CODEX_LOG_WARNING", "WARNING", log_defaults["CODEX_LOG_WARNING"]),
-            ("CODEX_LOG_ERROR", "ERROR", log_defaults["CODEX_LOG_ERROR"]),
+        row = 0
+        for key, label in (
+            ("CODEX_LOG_DEBUG", "DEBUG (verbose)"),
+            ("CODEX_LOG_INFO", "INFO"),
+            ("CODEX_LOG_WARNING", "WARNING"),
+            ("CODEX_LOG_ERROR", "ERROR"),
         ):
-            var = tk.BooleanVar(value=BoolSetting(key, default=bool(default)).get(self._controller.store.env))
+            var = tk.BooleanVar(value=BoolSetting(key, default=bool(log_defaults[key])).get(self._controller.store.env))
             self._log_levels[key] = var
             checkbox = ttk.Checkbutton(
-                log_col,
+                logging_box,
                 text=label,
                 variable=var,
                 command=lambda k=key: self._set_bool(k, self._log_levels[k].get()),
                 style="Toggle.TCheckbutton",
             )
-            checkbox.grid(row=r, column=0, sticky="w", pady=2)
-            r += 1
+            checkbox.grid(row=row, column=0, sticky="w", pady=2)
+            row += 1
 
         self._var_log_file.set(bool(str(self._controller.store.env.get("CODEX_LOG_FILE", "") or "").strip()))
         log_file_toggle = ttk.Checkbutton(
-            log_col,
+            logging_box,
             text="Write to log file (logs/codex-*.log)",
             variable=self._var_log_file,
             command=self._toggle_log_file,
             style="Toggle.TCheckbutton",
         )
-        log_file_toggle.grid(row=r + 1, column=0, sticky="w", pady=(10, 2))
+        log_file_toggle.grid(row=row, column=0, sticky="w", pady=(10, 2))
 
-        self._install_cfg_delta_guard()
-        self._apply_advanced_visibility()
+        self.reload()
         self.frame = frame
         return frame
 
@@ -259,6 +249,7 @@ class DiagnosticsTab:
         env = self._controller.store.env
         for key, var in self._debug_flags.items():
             var.set(BoolSetting(key, default=False).get(env))
+
         log_defaults = {
             "CODEX_LOG_DEBUG": False,
             "CODEX_LOG_INFO": True,
@@ -288,7 +279,20 @@ class DiagnosticsTab:
         for chk in checks:
             tree.insert("", "end", values=(chk.name, "yes" if chk.ok else "no", chk.detail))
 
-    # ------------------------------------------------------------------ env setters
+    def _add_flag_toggle(self, parent: ttk.LabelFrame, row: int, *, key: str, label: str, advanced: bool) -> int:
+        var = tk.BooleanVar(value=BoolSetting(key, default=False).get(self._controller.store.env))
+        self._debug_flags[key] = var
+        checkbox = ttk.Checkbutton(
+            parent,
+            text=label,
+            variable=var,
+            command=lambda k=key: self._set_bool(k, self._debug_flags[k].get()),
+            style="Toggle.TCheckbutton",
+        )
+        checkbox.grid(row=row, column=0, sticky="w", pady=2)
+        if advanced:
+            self._register_advanced(checkbox)
+        return row + 1
 
     def _set_bool(self, key: str, enabled: bool) -> None:
         BoolSetting(key, default=False).set(self._controller.store.env, enabled)
@@ -300,7 +304,7 @@ class DiagnosticsTab:
 
     def _add_entry(
         self,
-        parent: ttk.Frame,
+        parent: ttk.LabelFrame,
         row: int,
         *,
         label: str,
@@ -312,7 +316,7 @@ class DiagnosticsTab:
         label_widget = ttk.Label(parent, text=label)
         label_widget.grid(row=row, column=0, sticky="w", pady=8)
         entry = ttk.Entry(parent, textvariable=var, width=width)
-        entry.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=8)
+        entry.grid(row=row, column=1, sticky="w", padx=(10, 0), pady=8)
         entry.bind("<KeyRelease>", lambda _e: on_change())
         if advanced:
             self._register_advanced(label_widget, entry)
@@ -320,7 +324,7 @@ class DiagnosticsTab:
 
     def _add_choice(
         self,
-        parent: ttk.Frame,
+        parent: ttk.LabelFrame,
         row: int,
         *,
         label: str,
@@ -331,15 +335,13 @@ class DiagnosticsTab:
     ) -> int:
         label_widget = ttk.Label(parent, text=label)
         label_widget.grid(row=row, column=0, sticky="w", pady=8)
-        combo = ttk.Combobox(parent, textvariable=var, width=18, state="readonly")
+        combo = ttk.Combobox(parent, textvariable=var, width=20, state="readonly")
         combo["values"] = list(choices)
-        combo.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=8)
+        combo.grid(row=row, column=1, sticky="w", padx=(10, 0), pady=8)
         combo.bind("<<ComboboxSelected>>", lambda _e: on_change())
         if advanced:
             self._register_advanced(label_widget, combo)
         return row + 1
-
-    # ------------------------------------------------------------------ dependency guards
 
     def _register_advanced(self, *widgets: tk.Widget) -> None:
         self._advanced_widgets.extend(widgets)
@@ -420,8 +422,6 @@ class DiagnosticsTab:
             except KeyError:
                 pass
             self._mark_changed()
-
-    # ------------------------------------------------------------------ validation hooks (used by app save)
 
     def validate_int_settings(self) -> None:
         env = self._controller.store.env

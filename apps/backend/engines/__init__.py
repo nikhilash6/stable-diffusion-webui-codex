@@ -8,7 +8,8 @@ Required Notice: see NOTICE
 
 Purpose: Engine package facade and default registration entry points.
 Exposes `register_default_engines(...)` and lazily resolves optional/large engine classes to avoid heavy imports during startup.
-Includes the Anima engine facade (registered under engine id `anima`).
+Includes the Anima, FLUX.2, and LTX2 engine facades; parked placeholder families such as `netflix_void`
+remain importable by name but are not part of default runtime registration.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `EngineLoadError` (class): Error raised when an engine fails to load required resources.
@@ -34,6 +35,9 @@ if TYPE_CHECKING:
     # which may rely on optional deps and/or heavy import graphs.
     from typing import Any as Chroma
     from typing import Any as Flux
+    from typing import Any as Flux2Engine
+    from typing import Any as Ltx2Engine
+    from typing import Any as NetflixVoidEngine
     from typing import Any as Kontext
     from typing import Any as StableDiffusion
     from typing import Any as StableDiffusion2
@@ -69,6 +73,8 @@ def register_default_engines(*, registry: EngineRegistry | None = None, replace:
     _maybe_register("sd15", registration.register_sd15)
     _maybe_register("sdxl", registration.register_sdxl)
     _maybe_register("flux1", registration.register_flux)
+    _maybe_register("flux2", registration.register_flux2)
+    _maybe_register("ltx2", registration.register_ltx2)
     _maybe_register("flux1_kontext", registration.register_kontext)
     _maybe_register("flux1_chroma", registration.register_chroma)
     _maybe_register("sd20", registration.register_sd20)
@@ -90,6 +96,9 @@ __all__ = [
     "StableDiffusionXL",
     "StableDiffusionXLRefiner",
     "Flux",
+    "Flux2Engine",
+    "Ltx2Engine",
+    "NetflixVoidEngine",
     "Kontext",
     "Chroma",
     "ZImageEngine",
@@ -106,6 +115,9 @@ _ENGINE_EXPORTS = {
     "StableDiffusionXL": ("apps.backend.engines.sd.sdxl", "StableDiffusionXL"),
     "StableDiffusionXLRefiner": ("apps.backend.engines.sd.sdxl", "StableDiffusionXLRefiner"),
     "Flux": ("apps.backend.engines.flux.flux", "Flux"),
+    "Flux2Engine": ("apps.backend.engines.flux2.flux2", "Flux2Engine"),
+    "Ltx2Engine": ("apps.backend.engines.ltx2.ltx2", "Ltx2Engine"),
+    "NetflixVoidEngine": ("apps.backend.engines.netflix_void.netflix_void", "NetflixVoidEngine"),
     "Kontext": ("apps.backend.engines.flux.kontext", "Kontext"),
     "Chroma": ("apps.backend.engines.flux.chroma", "Chroma"),
     "ZImageEngine": ("apps.backend.engines.zimage.zimage", "ZImageEngine"),

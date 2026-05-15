@@ -8,6 +8,8 @@ Required Notice: see NOTICE
 
 Purpose: SUPIR control network (GLVControl).
 Produces a list of per-block control tensors that the SUPIR UNet consumes.
+Keeps the official SUPIR control checkpoint owner shape, including the nested sequential `label_emb` path used by
+`num_classes='sequential'`.
 
 This is a SUPIR-specific module and is not a generic ControlNet implementation.
 
@@ -99,9 +101,11 @@ class GLVControl(nn.Module):
                 if adm_in_channels is None:
                     raise ValueError("GLVControl: adm_in_channels is required when num_classes='sequential'")
                 self.label_emb = nn.Sequential(
-                    nn.Linear(int(adm_in_channels), time_embed_dim),
-                    nn.SiLU(),
-                    nn.Linear(time_embed_dim, time_embed_dim),
+                    nn.Sequential(
+                        nn.Linear(int(adm_in_channels), time_embed_dim),
+                        nn.SiLU(),
+                        nn.Linear(time_embed_dim, time_embed_dim),
+                    )
                 )
             else:
                 raise ValueError(f"GLVControl: unsupported num_classes={self.num_classes!r}")

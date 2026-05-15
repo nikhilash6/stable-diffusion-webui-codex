@@ -11,10 +11,7 @@
         { "key": "video.pix_fmt", "label": "Pixel Format", "type": "select", "options": ["yuv420p", "yuv444p", "yuv422p"], "default": "yuv420p", "bind": { "txt2vid": "videoPixFormat", "img2vid": "videoPixFormat" } },
         { "key": "video.crf", "label": "CRF", "type": "number", "min": 0, "max": 51, "default": 15, "bind": { "txt2vid": "videoCrf", "img2vid": "videoCrf" } },
         { "key": "video.loop_count", "label": "Loop Count", "type": "number", "min": 0, "max": 100, "default": 0, "bind": { "txt2vid": "videoLoopCount", "img2vid": "videoLoopCount" } },
-        { "key": "video.pingpong", "label": "Ping-pong", "type": "checkbox", "default": false, "bind": { "txt2vid": "videoPingpong", "img2vid": "videoPingpong" } },
-        { "key": "video.save_metadata", "label": "Save metadata", "type": "checkbox", "default": true, "bind": { "txt2vid": "videoSaveMetadata", "img2vid": "videoSaveMetadata" } },
-        { "key": "video.save_output", "label": "Save output", "type": "checkbox", "default": true, "bind": { "txt2vid": "videoSaveOutput", "img2vid": "videoSaveOutput" } },
-        { "key": "video.trim_to_audio", "label": "Trim to audio", "type": "checkbox", "default": false, "bind": { "txt2vid": "videoTrimToAudio", "img2vid": "videoTrimToAudio" } }
+        { "key": "video.pingpong", "label": "Ping-pong", "type": "checkbox", "default": false, "bind": { "txt2vid": "videoPingpong", "img2vid": "videoPingpong" } }
       ]
     },
     {

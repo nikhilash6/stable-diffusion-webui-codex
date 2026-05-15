@@ -21,6 +21,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 
@@ -32,7 +33,7 @@ from apps.backend.runtime import utils
 from apps.backend.runtime.misc.autocast import autocast_disabled
 from .geometry import apply_rotary_embeddings
 
-logger = logging.getLogger("backend.runtime.flux")
+logger = get_backend_logger("backend.runtime.flux")
 
 
 class RMSNorm(nn.Module):

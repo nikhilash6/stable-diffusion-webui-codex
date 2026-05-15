@@ -1,0 +1,37 @@
+@layer components {
+  .cdx-image-source-block {
+    display: grid;
+    gap: 1rem;
+  }
+
+  .cdx-image-source-fields {
+    display: grid;
+    gap: 0.9rem;
+  }
+
+  .cdx-image-source-block__controls {
+    margin: 0;
+  }
+
+  .cdx-image-source-fields__row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.9rem;
+    align-items: flex-end;
+  }
+
+  .cdx-image-source-fields__row > .field {
+    flex: 1 1 15rem;
+    min-width: 0;
+  }
+
+  .cdx-image-source-fields__toggle-field,
+  .cdx-image-source-fields__count-field,
+  .cdx-image-source-fields__sort-field {
+    flex: 0 0 auto;
+  }
+
+  .cdx-image-source-block__mode-field {
+    flex: 0 0 auto;
+  }
+}

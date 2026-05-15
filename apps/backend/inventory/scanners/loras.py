@@ -7,7 +7,8 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: LoRA file discovery policy used by backend inventories and registries.
-Defines the default roots and per-family overrides (paths.json keys, including Anima) and yields LoRA weight files in stable order.
+Defines the default roots and per-family overrides (paths.json keys, including Flux.2, LTX2, and Anima) and yields LoRA weight files in
+stable order.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `LORA_EXTS` (constant): Recognized LoRA weight file extensions.
@@ -31,7 +32,7 @@ def list_lora_roots(models_root: str | None = None) -> list[str]:
     roots: list[str] = []
 
     # Per-family roots from apps/paths.json.
-    for key in ("sd15_loras", "sdxl_loras", "flux1_loras", "anima_loras", "wan22_loras", "zimage_loras"):
+    for key in ("sd15_loras", "sdxl_loras", "flux1_loras", "flux2_loras", "ltx2_loras", "anima_loras", "wan22_loras", "zimage_loras"):
         for p in get_paths_for(key):
             if os.path.isdir(p) or (os.path.isfile(p) and p.lower().endswith(LORA_EXTS)):
                 roots.append(p)

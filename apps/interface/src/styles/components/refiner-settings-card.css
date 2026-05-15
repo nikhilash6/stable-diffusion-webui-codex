@@ -16,6 +16,10 @@
     align-items: start;
   }
 
+  .refiner-card .rf-col {
+    min-width: 0;
+  }
+
   .refiner-card .rf-row--advanced {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }

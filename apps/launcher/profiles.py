@@ -11,7 +11,9 @@ Implements the profile store used by the TUI/GUI launchers to load/save settings
 expose a mapping-like interface for editing environment variables with per-area routing and migrations.
 Defines defaults for performance-related env keys (GGUF dequant-cache/LoRA knobs, CFG batching, profiling flags) and task/runtime safety knobs (single-flight,
 task cancel mode, task SSE buffer caps, safeweights), plus attention/bootstrap device policy keys (`CODEX_MAIN_DEVICE`, `CODEX_MOUNT_DEVICE`, `CODEX_OFFLOAD_DEVICE`) with CPU offload default, so runs are reproducible.
-Also stores API-only manual env overlay settings (`manual_api_env_enabled`, `manual_api_env_text`) and validates overlay text parsing for fail-loud startup.
+LoRA apply-mode profile defaults resolve unset launcher config to `online` while preserving explicit `merge` values.
+Also stores API-only manual env overlay settings (`manual_api_env_enabled`, `manual_api_env_text`) plus launcher-owned frontend dev boot policy, and
+validates overlay text parsing for fail-loud startup.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_default_area_env` (function): Builds default per-area env maps (debug/log/profiling flags + device defaults + GGUF dequant-cache/LoRA runtime knobs; default offload target is CPU).
@@ -20,9 +22,13 @@ Symbols (top-level; keep in sync; no ghosts):
 - `DEFAULT_PYTORCH_CUDA_ALLOC_CONF` (constant): Default `PYTORCH_CUDA_ALLOC_CONF` applied by launchers when unset.
 - `ENABLE_DEFAULT_PYTORCH_CUDA_ALLOC_CONF_KEY` (constant): Env key toggling default allocator config injection when `PYTORCH_CUDA_ALLOC_CONF` is unset.
 - `CODEX_CUDA_MALLOC_KEY` (constant): Env key toggling backend `--cuda-malloc` forwarding in launcher-managed runs.
+- `CODEX_APP_MODE_PROFILE_ENV_KEY` (constant): Env key selecting launcher app mode profile (`dev_service|embedded`).
+- `LAUNCHER_MODE_PROFILE_CHOICES` (constant): Allowed launcher app mode profiles.
+- `normalize_mode_profile` (function): Strict parser/validator for launcher app mode profile values.
 - `DEFAULT_MANUAL_API_ENV_TEXT` (constant): Suggested manual API env overlay text prefilled in launcher metadata.
 - `parse_manual_api_env_text` (function): Parses manual API env text (`KEY=VALUE` per line) with strict, line-numbered validation.
-- `LauncherMeta` (dataclass): Persisted launcher UI metadata (active model, tab index, terminal preference, sdpa policy, manual API env overlay).
+- `LauncherMeta` (dataclass): Persisted launcher UI metadata (active model, tab index, terminal preference, sdpa policy, manual API env overlay,
+  frontend dev boot policy).
 - `_EnvironmentView` (class): `MutableMapping` view that routes env reads/writes into the underlying profile store (areas/models).
 - `LauncherProfileStore` (dataclass): Main profile store; loads/saves meta/env maps, resolves key routing, and provides lookup helpers
   (contains nested helpers for container resolution and file IO).
@@ -103,7 +109,7 @@ def _default_area_env() -> Dict[str, Dict[str, str]]:
         "CODEX_ATTENTION_BACKEND": "pytorch",
         "CODEX_ATTENTION_SDPA_POLICY": "auto",
         "CODEX_WAN22_IMG2VID_CHUNK_BUFFER_MODE": os.getenv("CODEX_WAN22_IMG2VID_CHUNK_BUFFER_MODE", "hybrid"),
-        "CODEX_LORA_APPLY_MODE": "merge",
+        "CODEX_LORA_APPLY_MODE": "online",
         "CODEX_LORA_ONLINE_MATH": "weight_merge",
         ENABLE_DEFAULT_PYTORCH_CUDA_ALLOC_CONF_KEY: "1",
         CODEX_CUDA_MALLOC_KEY: "0",
@@ -115,12 +121,30 @@ DEFAULT_MODEL_NAME = "default"
 DEFAULT_PYTORCH_CUDA_ALLOC_CONF = "max_split_size_mb:256,garbage_collection_threshold:0.8"
 ENABLE_DEFAULT_PYTORCH_CUDA_ALLOC_CONF_KEY = "CODEX_ENABLE_DEFAULT_PYTORCH_CUDA_ALLOC_CONF"
 CODEX_CUDA_MALLOC_KEY = "CODEX_CUDA_MALLOC"
+CODEX_APP_MODE_PROFILE_ENV_KEY = "CODEX_APP_MODE_PROFILE"
+LAUNCHER_MODE_PROFILE_DEV_SERVICE = "dev_service"
+LAUNCHER_MODE_PROFILE_EMBEDDED = "embedded"
+LAUNCHER_MODE_PROFILE_CHOICES: tuple[str, ...] = (
+    LAUNCHER_MODE_PROFILE_DEV_SERVICE,
+    LAUNCHER_MODE_PROFILE_EMBEDDED,
+)
+DEFAULT_LAUNCHER_MODE_PROFILE = LAUNCHER_MODE_PROFILE_DEV_SERVICE
 DEFAULT_MANUAL_API_ENV_TEXT = "TORCH_CUDA_ARCH_LIST=8.6\nMAX_JOBS=4"
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _default_external_terminal_enabled() -> bool:
     return os.name == "nt"
+
+
+def normalize_mode_profile(raw_value: str, *, source: str) -> str:
+    normalized = str(raw_value or "").strip().lower()
+    if normalized in LAUNCHER_MODE_PROFILE_CHOICES:
+        return normalized
+    allowed = ", ".join(LAUNCHER_MODE_PROFILE_CHOICES)
+    raise ValueError(
+        f"Invalid {source}: {raw_value!r}. Allowed values: {allowed}."
+    )
 
 
 def parse_manual_api_env_text(raw_text: str) -> Dict[str, str]:
@@ -170,6 +194,8 @@ class LauncherMeta:
     active_model: str = DEFAULT_MODEL_NAME
     window_geometry: str = ""
     show_advanced_controls: bool = False
+    app_mode_profile: str = DEFAULT_LAUNCHER_MODE_PROFILE
+    frontend_dev_typecheck: bool = False
     manual_api_env_enabled: bool = False
     manual_api_env_text: str = DEFAULT_MANUAL_API_ENV_TEXT
 
@@ -333,6 +359,8 @@ class LauncherProfileStore:
             changed = self._ensure_consistency()
             if changed:
                 LOGGER.warning("Launcher profile normalized at save; writing canonical env maps to %s", self.root)
+            if bool(getattr(self.meta, "manual_api_env_enabled", False)):
+                self.build_manual_api_env_overlay()
             _write_meta(self.root, self.meta)
             _write_env_maps(self.root / "areas", self.areas)
             _write_env_maps(self.root / "models", self.models)
@@ -348,6 +376,13 @@ class LauncherProfileStore:
 
     def _ensure_consistency(self) -> bool:
         changed = False
+        normalized_mode_profile = normalize_mode_profile(
+            str(getattr(self.meta, "app_mode_profile", DEFAULT_LAUNCHER_MODE_PROFILE) or DEFAULT_LAUNCHER_MODE_PROFILE),
+            source="launcher meta app_mode_profile",
+        )
+        if getattr(self.meta, "app_mode_profile", None) != normalized_mode_profile:
+            self.meta.app_mode_profile = normalized_mode_profile
+            changed = True
         # Legacy migration: when old profiles only have component device keys,
         # seed CODEX_MAIN_DEVICE from core device before defaults are merged.
         for container in list(self.areas.values()):
@@ -548,6 +583,14 @@ def _load_meta(root: Path) -> LauncherMeta:
     except Exception as exc:
         raise RuntimeError(f"Failed to read launcher meta {meta_path}: {exc}") from exc
     external_terminal_default = _default_external_terminal_enabled()
+    raw_mode_profile = str(data.get("app_mode_profile", DEFAULT_LAUNCHER_MODE_PROFILE) or DEFAULT_LAUNCHER_MODE_PROFILE)
+    try:
+        app_mode_profile = normalize_mode_profile(
+            raw_mode_profile,
+            source=f"{meta_path} app_mode_profile",
+        )
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
     return LauncherMeta(
         external_terminal=bool(data["external_terminal"]) if "external_terminal" in data else external_terminal_default,
         sdpa_policy=str(data.get("sdpa_policy", "auto")),
@@ -555,6 +598,8 @@ def _load_meta(root: Path) -> LauncherMeta:
         active_model=str(data.get("active_model", DEFAULT_MODEL_NAME)),
         window_geometry=str(data.get("window_geometry", "") or ""),
         show_advanced_controls=bool(data.get("show_advanced_controls", False)),
+        app_mode_profile=app_mode_profile,
+        frontend_dev_typecheck=bool(data.get("frontend_dev_typecheck", False)),
         manual_api_env_enabled=bool(data.get("manual_api_env_enabled", False)),
         manual_api_env_text=str(data.get("manual_api_env_text", DEFAULT_MANUAL_API_ENV_TEXT) or ""),
     )
@@ -568,6 +613,11 @@ def _write_meta(root: Path, meta: LauncherMeta) -> None:
         "tab_index": meta.tab_index,
         "active_model": meta.active_model,
         "show_advanced_controls": bool(getattr(meta, "show_advanced_controls", False)),
+        "app_mode_profile": normalize_mode_profile(
+            str(getattr(meta, "app_mode_profile", DEFAULT_LAUNCHER_MODE_PROFILE) or DEFAULT_LAUNCHER_MODE_PROFILE),
+            source="launcher meta app_mode_profile",
+        ),
+        "frontend_dev_typecheck": bool(getattr(meta, "frontend_dev_typecheck", False)),
         "manual_api_env_enabled": bool(getattr(meta, "manual_api_env_enabled", False)),
         "manual_api_env_text": str(getattr(meta, "manual_api_env_text", DEFAULT_MANUAL_API_ENV_TEXT) or ""),
     }

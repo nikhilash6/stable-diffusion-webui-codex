@@ -9,14 +9,16 @@ Required Notice: see NOTICE
 Purpose: Checkpoint/VAE discovery with sha256 and layout-metadata caching.
 Scans configured model roots (via `apps/paths.json` accessors) for checkpoint and VAE weight files, including file-level checkpoint entries,
 computes sha256 hashes, and maintains a persistent cache in `models/.hashes.json` (schema v2) for fast UI inventory, backend SHA-based
-resolution, and CLIP layout metadata reuse. Paths config resolution is fail-loud (no silent fallback to defaults on invalid config payloads).
-Family hints and root selection cover SD/Flux/Anima/WAN/ZImage keyspaces.
+resolution, CLIP layout metadata reuse, and checkpoint-scoped metadata forwarding such as the current LTX2 execution-profile/default hints
+and Netflix VOID overlay pairing readiness. Paths config resolution is fail-loud (no silent fallback to defaults on invalid config payloads).
+Family hints and root selection cover SD/Flux/Anima/WAN/ZImage/LTX2/Netflix VOID keyspaces while generic VAE inventory excludes audio-bundle files.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_default_models_root` (function): Returns the default `models/` directory under `CODEX_ROOT`.
 - `_default_hf_root` (function): Returns the default Hugging Face vendor cache root under `CODEX_ROOT` (when used).
 - `_sha256` (function): Computes sha256 digest for a file path.
 - `detect_safetensors_primary_dtype` (function): Best-effort safetensors dtype hint reader (header-only parse; used for defaults/telemetry).
+- `_detect_sdxl_core_only_checkpoint` (function): Header-only SDXL checkpoint classifier for UNet-only `.safetensors` assets discovered under SDXL roots.
 - `_HashCacheEntry` (dataclass): Cache entry for one file (sha + mtime + size) used to avoid re-hashing unchanged files.
 - `LayoutMetadata` (dataclass): Typed CLIP layout metadata entry (`qkv_layout`, `projection_orientation`, optional `source_style`).
 - `_load_hash_cache` (function): Loads `.hashes.json` cache from disk (v1/v2 migration aware).
@@ -26,9 +28,11 @@ Symbols (top-level; keep in sync; no ghosts):
 - `list_checkpoints` (function): Returns checkpoint records (optional refresh).
 - `list_vaes` (function): Returns VAE records (optional refresh).
 - `refresh` (function): Forces a rescan + cache update for checkpoints/VAEs.
+- `invalidate` (function): Clears in-memory checkpoint/VAE scan snapshots (next read lazily rescans).
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import hashlib
 import json
@@ -44,7 +48,12 @@ from typing import Any, Dict, Iterable, List, Mapping, Tuple
 from apps.backend.infra.config.paths import get_paths_for
 from apps.backend.infra.config.repo_root import get_repo_root
 from apps.backend.runtime import trace as _trace
-from apps.backend.runtime.checkpoint.safetensors_header import detect_safetensors_primary_dtype
+from apps.backend.runtime.checkpoint.safetensors_header import (
+    detect_safetensors_primary_dtype,
+    read_safetensors_header,
+)
+from apps.backend.runtime.model_registry.ltx2_execution import build_ltx2_checkpoint_metadata
+from apps.backend.runtime.model_registry.netflix_void_execution import build_netflix_void_checkpoint_metadata
 
 from .types import (
     CheckpointFormat,
@@ -52,7 +61,7 @@ from .types import (
     VAERecord,
 )
 
-_LOGGER = logging.getLogger("backend.registry")
+_LOGGER = get_backend_logger("backend.registry")
 
 _ALLOWED_CHECKPOINT_EXTS = {".ckpt", ".safetensor", ".safetensors", ".pt", ".pth", ".bin", ".gguf"}
 _CHECKPOINT_BLACKLIST_SUFFIXES = {".vae.ckpt", ".vae.safetensor", ".vae.safetensors", ".vae.pt", ".vae.pth", ".vae.bin"}
@@ -61,6 +70,28 @@ _HASH_CACHE_SCHEMA_VERSION = 2
 _LAYOUT_QKV_VALUES = frozenset({"split", "fused"})
 _LAYOUT_PROJECTION_VALUES = frozenset({"none", "linear", "matmul"})
 _LAYOUT_STYLE_VALUES = frozenset({"codex", "hf", "openclip"})
+_CHECKPOINT_ROOT_FAMILY_HINTS: dict[str, str] = {
+    "sd15_ckpt": "sd15",
+    "sdxl_ckpt": "sdxl",
+    "flux1_ckpt": "flux1",
+    "flux2_ckpt": "flux2",
+    "ltx2_ckpt": "ltx2",
+    "netflix_void_ckpt": "netflix_void",
+    "anima_ckpt": "anima",
+    "wan22_ckpt": "wan22",
+    "zimage_ckpt": "zimage",
+}
+_DEFAULT_CHECKPOINT_ROOTS: tuple[tuple[str, str], ...] = (
+    ("sd15", "sd15"),
+    ("sdxl", "sdxl"),
+    ("flux", "flux1"),
+    ("flux2", "flux2"),
+    ("ltx2", "ltx2"),
+    ("netflix-void", "netflix_void"),
+    ("anima", "anima"),
+    ("wan22", "wan22"),
+    ("zimage", "zimage"),
+)
 
 def _default_models_root() -> Path:
     return get_repo_root() / "models"
@@ -76,6 +107,21 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _detect_sdxl_core_only_checkpoint(path: Path) -> bool:
+    suffix = path.suffix.lower()
+    if suffix not in {".safetensor", ".safetensors"}:
+        return False
+    try:
+        header = read_safetensors_header(path)
+    except Exception:
+        return False
+    keys = [key for key in header.keys() if isinstance(key, str) and key != "__metadata__"]
+    has_unet = any(key.startswith("model.diffusion_model.") for key in keys)
+    has_vae = any(key.startswith("first_stage_model.") or key.startswith("vae.") for key in keys)
+    has_text_encoders = any(key.startswith("conditioner.embedders.") for key in keys)
+    return has_unet and not has_vae and not has_text_encoders
 
 
 @dataclass
@@ -409,6 +455,12 @@ class ModelRegistry:
         with self._lock:
             self._scan_locked()
 
+    def invalidate(self) -> None:
+        with self._lock:
+            self._checkpoints = {}
+            self._vaes = {}
+            self._last_scan = 0.0
+
     def get_checkpoint(self, name: str) -> CheckpointRecord | None:
         with self._lock:
             if not self._checkpoints:
@@ -446,7 +498,7 @@ class ModelRegistry:
 
     def _scan_checkpoints(self) -> Iterable[CheckpointRecord]:
         seen: set[str] = set()
-        for file in self._iter_checkpoint_files():
+        for file, source_family_hint in self._iter_checkpoint_files():
             path_str = str(file.resolve())
             if path_str in seen:
                 continue
@@ -465,24 +517,61 @@ class ModelRegistry:
             fmt = CheckpointFormat.GGUF if is_gguf else CheckpointFormat.CHECKPOINT
             core_only = is_gguf
             core_only_reason = "gguf_suffix" if gguf_by_suffix else ("gguf_magic" if gguf_by_magic else None)
-            family_hint: str | None = None
-            try:
-                rel = file.resolve().relative_to(self._models_root)
-            except Exception:
-                rel = None
-            if rel and rel.parts:
-                top = str(rel.parts[0]).lower()
-                family_hint = {
-                    "sd15": "sd15",
-                    "sd1": "sd15",
-                    "sdxl": "sdxl",
-                    "flux": "flux1",
-                    "zimage": "zimage",
-                    "anima": "anima",
-                    "wan22": "wan22",
-                }.get(top)
+            family_hint = source_family_hint
+            if family_hint is None:
+                try:
+                    rel = file.resolve().relative_to(self._models_root)
+                except Exception:
+                    rel = None
+                if rel and rel.parts:
+                    top = str(rel.parts[0]).lower()
+                    family_hint = {
+                        "sd15": "sd15",
+                        "sd1": "sd15",
+                        "sdxl": "sdxl",
+                        "flux": "flux1",
+                        "flux2": "flux2",
+                        "ltx2": "ltx2",
+                        "netflix-void": "netflix_void",
+                        "netflix_void": "netflix_void",
+                        "zimage": "zimage",
+                        "anima": "anima",
+                        "wan22": "wan22",
+                    }.get(top)
+            if not core_only and family_hint == "sdxl" and _detect_sdxl_core_only_checkpoint(file):
+                core_only = True
+                core_only_reason = "sdxl_header_unet_only"
             sha256, short_hash = self._hash_for(file)
             stat = file.stat()
+            metadata: dict[str, object] = {}
+            if family_hint == "ltx2":
+                metadata.update(
+                    build_ltx2_checkpoint_metadata(
+                        CheckpointRecord(
+                            name=file.stem,
+                            title=file.name,
+                            filename=str(file),
+                            path=str(file.parent),
+                            model_name=file.stem,
+                            format=fmt,
+                            family_hint=family_hint,
+                        )
+                    )
+                )
+            if family_hint == "netflix_void":
+                metadata.update(
+                    build_netflix_void_checkpoint_metadata(
+                        CheckpointRecord(
+                            name=file.stem,
+                            title=file.name,
+                            filename=str(file),
+                            path=str(file.parent),
+                            model_name=file.stem,
+                            format=fmt,
+                            family_hint=family_hint,
+                        )
+                    )
+                )
             record = CheckpointRecord(
                 name=file.stem,
                 title=file.name,
@@ -496,13 +585,14 @@ class ModelRegistry:
                 sha256=sha256,
                 short_hash=short_hash,
                 file_size=stat.st_size,
+                metadata=metadata,
                 updated_at=stat.st_mtime,
             )
             yield record
 
     def _scan_vaes(self) -> Iterable[VAERecord]:
         candidates: List[Path] = []
-        for key in ("sd15_vae", "sdxl_vae", "flux1_vae", "anima_vae", "wan22_vae", "zimage_vae"):
+        for key in ("sd15_vae", "sdxl_vae", "flux1_vae", "flux2_vae", "ltx2_vae", "anima_vae", "wan22_vae", "zimage_vae"):
             for raw in get_paths_for(key):
                 p = Path(raw)
                 if p not in candidates:
@@ -511,11 +601,16 @@ class ModelRegistry:
         files: List[Path] = []
         for root in candidates:
             if root.is_file() and root.suffix.lower() in _VAE_EXTS:
-                files.append(root)
+                if "audio_vae" not in root.name.lower():
+                    files.append(root)
             elif root.is_dir():
                 try:
                     for path in sorted(root.rglob("*"), key=lambda p: str(p).lower()):
-                        if path.is_file() and path.suffix.lower() in _VAE_EXTS:
+                        if (
+                            path.is_file()
+                            and path.suffix.lower() in _VAE_EXTS
+                            and "audio_vae" not in path.name.lower()
+                        ):
                             files.append(path)
                 except Exception:
                     continue
@@ -537,42 +632,39 @@ class ModelRegistry:
                 updated_at=stat.st_mtime,
             )
 
-    def _iter_checkpoint_files(self) -> Iterable[Path]:
+    def _iter_checkpoint_files(self) -> Iterable[tuple[Path, str | None]]:
         """Iterate over checkpoint files using paths.json overrides + curated defaults.
 
         Resolution order:
-        1) Explicit roots from apps/paths.json per engine (sd15_ckpt, sdxl_ckpt, flux1_ckpt, wan22_ckpt).
+        1) Explicit roots from apps/paths.json per engine (sd15_ckpt, sdxl_ckpt, flux1_ckpt, flux2_ckpt, ltx2_ckpt, wan22_ckpt).
            Entries may be directories (recursive scan) or individual files.
-        2) Built-in defaults under models/: per-engine folders only (sd15, sdxl, flux, wan22, zimage).
+        2) Built-in defaults under models/: per-engine folders only (sd15, sdxl, flux, flux2, ltx2, anima, wan22, zimage).
 
         This replaces the legacy scatter of ad-hoc checkpoint folders ('stable-diffusion', 'sd', 'checkpoints').
         """
-        candidates: List[Path] = []
+        candidates: List[tuple[Path, str | None]] = []
 
         # 1) User overrides from apps/paths.json per engine.
         # Fail loud when paths config cannot be resolved (no silent fallback).
-        for key in ("sd15_ckpt", "sdxl_ckpt", "flux1_ckpt", "anima_ckpt", "wan22_ckpt", "zimage_ckpt"):
+        for key in _CHECKPOINT_ROOT_FAMILY_HINTS:
             for raw in get_paths_for(key):
                 p = Path(raw)
-                if p not in candidates:
-                    candidates.append(p)
+                candidate = (p, _CHECKPOINT_ROOT_FAMILY_HINTS[key])
+                if candidate not in candidates:
+                    candidates.append(candidate)
 
         # 2) Curated built-in defaults quando não há overrides configurados.
         # Keep these per-engine only (never scan models/ root directly).
         if not candidates:
             defaults = [
-                self._models_root / "sd15",
-                self._models_root / "sdxl",
-                self._models_root / "flux",
-                self._models_root / "anima",
-                self._models_root / "wan22",
-                self._models_root / "zimage",
+                (self._models_root / directory_name, family_hint)
+                for directory_name, family_hint in _DEFAULT_CHECKPOINT_ROOTS
             ]
-            for p in defaults:
-                if p not in candidates:
-                    candidates.append(p)
+            for candidate in defaults:
+                if candidate not in candidates:
+                    candidates.append(candidate)
 
-        for directory in candidates:
+        for directory, family_hint in candidates:
             if directory.is_file():
                 suffix = directory.suffix.lower()
                 if suffix not in _ALLOWED_CHECKPOINT_EXTS:
@@ -580,7 +672,7 @@ class ModelRegistry:
                 lower = directory.name.lower()
                 if any(lower.endswith(suf) for suf in _CHECKPOINT_BLACKLIST_SUFFIXES):
                     continue
-                yield directory
+                yield directory, family_hint
                 continue
             if not directory.is_dir():
                 continue
@@ -593,7 +685,7 @@ class ModelRegistry:
                 lower = entry.name.lower()
                 if any(lower.endswith(suf) for suf in _CHECKPOINT_BLACKLIST_SUFFIXES):
                     continue
-                yield entry
+                yield entry, family_hint
 
     def _hash_for(self, path: Path) -> Tuple[str | None, str | None]:
         try:
@@ -651,10 +743,15 @@ def refresh() -> None:
     _DEFAULT_REGISTRY.refresh()
 
 
+def invalidate() -> None:
+    _DEFAULT_REGISTRY.invalidate()
+
+
 __all__ = [
     "LayoutMetadata",
     "ModelRegistry",
     "get_registry",
+    "invalidate",
     "list_checkpoints",
     "list_vaes",
     "refresh",

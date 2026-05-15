@@ -8,39 +8,41 @@ Required Notice: see NOTICE
 
 Purpose: SDPA backend selection helpers for WAN runtimes.
 Provides a configurable `sdpa(...)` wrapper with optional chunking and strict policy validation,
-delegating per-call SDPA execution to the central attention dispatcher and carrying fused-attention mode.
+delegating per-call SDPA execution to the central attention dispatcher and carrying the generic
+SRAM-attention mode context for WAN22 self-attention integration.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `_SDPA_SETTINGS_CTX` (constant): Context-local SDPA settings tuple (`policy`, `mode`, `chunk`, `fused_mode`).
-- `_normalize_fused_mode` (function): Validates and normalizes WAN fused-attention mode input.
-- `_normalize_sdpa_settings` (function): Validates and normalizes SDPA policy/chunk/mode/fused_mode inputs.
-- `set_sdpa_settings` (function): Applies policy/chunk/mode/fused settings (explicit args override env when provided).
+- `_SDPA_SETTINGS_CTX` (constant): Context-local SDPA settings tuple (`policy`, `mode`, `chunk`, `sram_mode`, `request_id`).
+- `_normalize_sram_mode` (function): Validates and normalizes SRAM attention mode input via the generic runtime bridge.
+- `_normalize_sdpa_settings` (function): Validates and normalizes SDPA policy/chunk/mode/sram_mode inputs.
+- `set_sdpa_settings` (function): Applies policy/chunk/mode/SRAM settings (explicit args override env when provided).
 - `_get_sdpa_settings` (function): Reads effective context-local SDPA settings tuple.
-- `get_wan_fused_mode` (function): Returns the effective WAN fused-attention mode (`off|auto|force`) for the active context.
+- `get_sram_attention_mode` (function): Returns the effective SRAM attention mode (`off|auto|force`) for the active context.
 - `sdpa` (function): Calls PyTorch SDPA using the configured backend policy and optional chunking.
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import emit_backend_message, get_backend_logger
 
 from contextvars import ContextVar
 import logging
-import os
 from typing import Optional
 from uuid import uuid4
 
 import torch
 
 from apps.backend.runtime.attention import attention_function_pre_shaped, set_attention_request_id
+from apps.backend.runtime.attention.sram import resolve_effective_sram_attention_mode
 from apps.backend.runtime.memory.config import AttentionBackend
 
-_LOGGER = logging.getLogger("backend.runtime.wan22.sdpa")
+_LOGGER = get_backend_logger("backend.runtime.wan22.sdpa")
 _SDPA_CALL_COUNT_CTX: ContextVar[int] = ContextVar("wan22_sdpa_call_count", default=0)
 _CROSS_ATTN_SLIDING_FALLBACK_LOGGED_CTX: ContextVar[bool] = ContextVar(
     "wan22_cross_attn_sliding_fallback_logged",
     default=False,
 )
 
-_FUSED_MODE_ENV = "CODEX_WAN22_FUSED_ATTN_V1_MODE"
+_SRAM_MODE_ENV = "CODEX_ATTENTION_SRAM_MODE"
 
 _SDPA_SETTINGS_CTX: ContextVar[tuple[str, str, int, str, str]] = ContextVar(
     "wan22_sdpa_settings",
@@ -48,38 +50,15 @@ _SDPA_SETTINGS_CTX: ContextVar[tuple[str, str, int, str, str]] = ContextVar(
 )
 
 
-def _normalize_fused_mode(fused_mode: Optional[str]) -> str:
-    raw = fused_mode
-    if raw is None:
-        raw = os.environ.get(_FUSED_MODE_ENV, "off")
-    normalized = str(raw).strip().lower()
-    aliases = {
-        "0": "off",
-        "false": "off",
-        "no": "off",
-        "off": "off",
-        "1": "auto",
-        "true": "auto",
-        "yes": "auto",
-        "on": "auto",
-        "auto": "auto",
-        "force": "force",
-        "required": "force",
-    }
-    mapped = aliases.get(normalized)
-    if mapped is None:
-        raise RuntimeError(
-            "WAN22 SDPA: unsupported fused attention mode "
-            f"{raw!r} (expected one of: 'off', 'auto', 'force')."
-        )
-    return mapped
+def _normalize_sram_mode(sram_mode: Optional[str]) -> str:
+    return resolve_effective_sram_attention_mode(sram_mode).value
 
 
 def _normalize_sdpa_settings(
     policy: Optional[str],
     chunk: Optional[int],
     attention_mode: Optional[str],
-    fused_mode: Optional[str],
+    sram_mode: Optional[str],
 ) -> tuple[str, str, int, str]:
     if policy is not None and not isinstance(policy, str):
         raise TypeError(f"WAN22 SDPA: policy must be a string when provided, got {type(policy).__name__}.")
@@ -100,60 +79,53 @@ def _normalize_sdpa_settings(
         except Exception as exc:
             raise RuntimeError(f"WAN22 SDPA: chunk must be an integer when provided, got {chunk!r}.") from exc
         ch = chunk_value if chunk_value > 0 else 0
-    fused = _normalize_fused_mode(fused_mode)
-    return pol, mode, ch, fused
+    normalized_sram_mode = _normalize_sram_mode(sram_mode)
+    return pol, mode, ch, normalized_sram_mode
 
 
 def set_sdpa_settings(
     policy: Optional[str],
     chunk: Optional[int],
     attention_mode: Optional[str] = None,
-    fused_mode: Optional[str] = None,
+    sram_mode: Optional[str] = None,
     request_id: Optional[str] = None,
 ) -> None:
-    pol, mode, ch, fused = _normalize_sdpa_settings(policy, chunk, attention_mode, fused_mode)
+    pol, mode, ch, normalized_sram_mode = _normalize_sdpa_settings(policy, chunk, attention_mode, sram_mode)
     rid = str(request_id or "").strip() or f"wan22-{uuid4().hex[:12]}"
-    _SDPA_SETTINGS_CTX.set((pol, mode, ch, fused, rid))
+    _SDPA_SETTINGS_CTX.set((pol, mode, ch, normalized_sram_mode, rid))
     _SDPA_CALL_COUNT_CTX.set(0)
     _CROSS_ATTN_SLIDING_FALLBACK_LOGGED_CTX.set(False)
     set_attention_request_id(rid)
-    _LOGGER.info(
-        "[wan22.sdpa][req=%s] configured policy=%s mode=%s chunk=%d backend=%s fused_mode=%s",
-        rid,
-        pol,
-        mode,
-        ch,
-        AttentionBackend.PYTORCH.value,
-        fused,
-    )
 
 
 def _get_sdpa_settings() -> tuple[str, str, int, str, str]:
-    return _SDPA_SETTINGS_CTX.get()
+    pol, mode, ch, sram_mode, rid = _SDPA_SETTINGS_CTX.get()
+    return str(pol), str(mode), int(ch), str(sram_mode), str(rid)
 
 
-def get_wan_fused_mode() -> str:
-    _pol, _mode, _chunk, fused_mode, _request_id = _get_sdpa_settings()
-    return fused_mode
+def get_sram_attention_mode() -> str:
+    _pol, _mode, _chunk, sram_mode, _request_id = _get_sdpa_settings()
+    return sram_mode
 
 
 def sdpa(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: bool = False) -> torch.Tensor:
-    pol, mode, ch, fused_mode, request_id = _get_sdpa_settings()
+    pol, mode, ch, sram_mode, request_id = _get_sdpa_settings()
     set_attention_request_id(request_id)
     call_count = int(_SDPA_CALL_COUNT_CTX.get()) + 1
     _SDPA_CALL_COUNT_CTX.set(call_count)
     if call_count == 1:
-        _LOGGER.info(
-            "[wan22.sdpa][req=%s] first_call policy=%s mode=%s chunk=%d device=%s dtype=%s qkv=%s fused_mode=%s env=%s",
-            request_id,
-            pol,
-            mode,
-            ch,
-            str(q.device),
-            str(q.dtype),
-            (tuple(q.shape), tuple(k.shape), tuple(v.shape)),
-            fused_mode,
-            _FUSED_MODE_ENV,
+        emit_backend_message(
+            "[wan22.sdpa] first call",
+            logger=_LOGGER.name,
+            request_id=request_id,
+            policy=pol,
+            mode=mode,
+            chunk=ch,
+            device=str(q.device),
+            dtype=str(q.dtype),
+            qkv=(tuple(q.shape), tuple(k.shape), tuple(v.shape)),
+            sram_mode=sram_mode,
+            env=_SRAM_MODE_ENV,
         )
 
     if mode == "sliding":
@@ -164,11 +136,14 @@ def sdpa(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, causal: bool = Fa
         if kv_length != q_length:
             if not bool(_CROSS_ATTN_SLIDING_FALLBACK_LOGGED_CTX.get()):
                 _CROSS_ATTN_SLIDING_FALLBACK_LOGGED_CTX.set(True)
-                _LOGGER.warning(
-                    "[wan22.sdpa][req=%s] sliding mode fallback: q_len=%d differs from kv_len=%d; using full K/V per query chunk",
-                    request_id,
-                    q_length,
-                    kv_length,
+                emit_backend_message(
+                    "[wan22.sdpa] sliding mode fallback",
+                    logger=_LOGGER.name,
+                    level=logging.WARNING,
+                    request_id=request_id,
+                    q_len=q_length,
+                    kv_len=kv_length,
+                    reason="using full K/V per query chunk",
                 )
             out_accum: torch.Tensor | None = None
             for start in range(0, q_length, ch):

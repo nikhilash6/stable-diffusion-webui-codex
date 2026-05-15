@@ -19,6 +19,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import asyncio
 import json
@@ -39,7 +40,7 @@ from apps.backend.runtime.vision.upscalers.safeweights import allowed_upscaler_w
 
 _HF_UPSCALERS_REPO_ID = "sangoi-exe/sd-webui-codex"
 _HF_MANIFEST_PATH = "upscalers/manifest.json"
-_router_log = logging.getLogger("backend.api.routers.upscale")
+_router_log = get_backend_logger("backend.api.routers.upscale")
 
 
 def _normalize_hf_repo_id(repo_id: str | None) -> str:
@@ -103,7 +104,7 @@ def build_router(
         return {"upscalers": items}
 
     @router.get("/api/upscalers/remote")
-    async def get_remote_upscalers(
+    def get_remote_upscalers(
         repo_id: str | None = None,
         revision: str | None = None,
     ) -> Dict[str, Any]:

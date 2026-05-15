@@ -1,6 +1,6 @@
 # apps/backend/patchers Overview
 Date: 2025-10-30
-Last Review: 2026-02-25
+Last Review: 2026-05-02
 Status: Active
 
 ## Purpose
@@ -20,6 +20,7 @@ Status: Active
 
 ## Notes
 - Patchers should operate on runtime objects provided by `runtime/` and `engines/` without duplicating loading logic.
+- 2026-03-22: `vae.py` encode paths now accept optional `encode_seed` and build a device-local posterior generator for diffusers-style `latent_dist.sample(...)`; regular, tiled, regular->tiled retry, and CPU-fallback encode paths must all recreate generators from the same seed when they restart full-image work, and seeded posterior sampling failures must fail loud instead of silently degrading to mean latents.
 - LoRA merges are transactional: loaders snapshot parameters, track deterministic patch order, surface tqdm progress, and raise on any mismatched tensor metadata.
 - When introducing new patch behaviour, add explicit configuration flags/options and document them in `.sangoi/backend/`.
 - Mutator methods must raise on invalid payloads (no fallbacks) and emit backend debug logs; `ModelPatcher` now centralises logging/telemetry for patch registration.
@@ -33,7 +34,7 @@ Status: Active
 - 2026-01-02: Removed token merging patches; prompt token-merging tags are stripped but have no effect.
 - 2026-01-02: Added standardized file header docstrings to patcher modules (doc-only change; part of rollout).
 - 2026-01-04: Added `DenoiserPatcher` for Flux/Z-Image/WAN runtimes; `UnetPatcher` remains UNet/ControlNet-specific.
-- 2026-01-20: Global LoRA apply mode now supports `merge` (default; merges into weights once) vs `online` (patch during forward) via `CODEX_LORA_APPLY_MODE` / `--lora-apply-mode`.
+- 2026-05-02: Global LoRA apply mode resolves unset config to `online` (patch during forward); explicit `merge` remains available to rewrite weights once via `CODEX_LORA_APPLY_MODE` / `--lora-apply-mode`.
 - 2026-02-18: VAE decode/encode runtime now resolves a compute-preferred forward dtype and casts VAE residency to that effective forward dtype before execution/memory sizing to avoid mixed-dtype forward failures.
 - 2026-02-18: Tiled VAE fallback was rewritten to a native context-padding + center-crop stitching flow (SUPIR-inspired, no fast/approximate path, no external tiled-scale dependency).
 - 2026-02-18: Tiled encode/decode crop/index math now uses deterministic integer mapping (decode multiply, encode floor-div) to avoid border mismatch on odd image dimensions.
@@ -49,7 +50,11 @@ Status: Active
 - 2026-02-19: `vae.py` output staging now treats `DeviceRole.INTERMEDIATE=auto` as CPU-target by default, preventing large decode buffers from staying on GPU unless intermediate backend is explicitly overridden.
 - 2026-02-20: `vae.py` native-LDM type checks now import `AutoencoderKL_LDM` from `runtime/common/vae_ldm.py` (canonical shared lane) instead of the WAN family path.
 - 2026-02-23: `lora_loader.py::CodexLoraLoader.refresh(...)` now resolves default LoRA backup/offload placement from `memory_management.manager.offload_device()` when `offload_device` is omitted (no implicit CPU literal default).
+- 2026-03-24: `lora_loader.py` now normalizes GGUF re-quantization inputs through a NumPy-safe CPU float bridge; BF16 merged tensors are promoted to FP32 before `.numpy()` so GGUF-backed LoRA refresh does not die on `Got unsupported ScalarType BFloat16` while non-GGUF merge/output behavior stays unchanged.
 - 2026-03-02: `vae.py` now reports encode/decode block progress into `BackendState` during both tiled and non-tiled paths (including OOM fallback retries), so use-case progress polling can surface VAE phase progress in task streams.
+- 2026-03-05: `vae.py` now consumes shared tiled geometry policy from `runtime/common/vae_tiled.py` (`resolve_vae_decode_tiled_geometry` + `VaeTileGeometry`/window iterator); decode fallback defaults remain `64/64/16` for non-Anima, with `ModelFamily.ANIMA` override `48/48/24`.
+- 2026-03-29: `unet.py::_iter_transformer_coordinates()` must enumerate every internal `SpatialTransformer.transformer_blocks[]` entry, not merely the number of `SpatialTransformer` modules. The patch key `(block_name, block_index, transformer_index)` only has one transformer slot per block, so if a `TimestepEmbedSequential` ever carries more than one `SpatialTransformer`, the patcher must fail loud instead of silently collapsing coordinates.
+- 2026-03-29: Heavy slot-fanout replace patches such as IP-Adapter attn2 must register through one bounded batch mutation on the owned patcher clone; repeated per-slot `model_options` reassignment destroys shared module owners and can explode host RAM.
 
 ### unet.py notes
 - `control_nodes` é uma propriedade somente leitura (retorna cópia). Acesse como `unet.control_nodes`, não `unet.control_nodes()`.

@@ -19,6 +19,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import enum
 import logging
@@ -30,7 +31,7 @@ import torch
 from .devices import cpu, default_device
 from .philox import PhiloxGenerator
 
-_LOGGER = logging.getLogger(__name__ + ".rng")
+_LOGGER = get_backend_logger(f"{__name__}.rng")
 
 
 class NoiseSourceKind(str, enum.Enum):

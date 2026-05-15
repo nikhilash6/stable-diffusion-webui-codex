@@ -9,15 +9,19 @@ Required Notice: see NOTICE
 Purpose: Deterministic LoRA loader/applier with transactional backups.
 Applies patch dictionaries onto model parameters with device/dtype management, supporting GGUF packed parameters.
 Supports explicit merge precision mode (`CODEX_LORA_MERGE_MODE`) and refresh signature mode (`CODEX_LORA_REFRESH_SIGNATURE`).
-Fails loud when CodexPack packed weights are present (v1 packed-kernel execution does not support LoRA/DoRA yet).
+Fails loud when removed packed GGUF artifacts reach the root runtime path.
 
 Symbols (top-level; keep in sync; no ghosts):
+- `_trace_load_patch_debug_enabled` (function): Returns whether verbose per-patch load tracing is enabled via env flag.
+- `_raise_packed_gguf_unsupported` (function): Raises the canonical root-runtime error for removed packed GGUF artifacts during LoRA refresh.
 - `get_parameter_devices` (function): Captures current parameter device mapping for later restoration.
 - `set_parameter_devices` (function): Restores parameters to a previously captured device mapping.
+- `_numpy_safe_quantize_input` (function): Materializes a CPU float tensor into a NumPy-safe array for GGUF re-quantization, promoting BF16 to FP32 before the NumPy bridge.
 - `CodexLoraLoader` (class): High-level loader/applier that integrates mapping, device placement, and progress reporting (tqdm).
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import hashlib
 import logging
@@ -32,21 +36,29 @@ from apps.backend.infra.config.lora_refresh_signature import (
     LoraRefreshSignatureMode,
     read_lora_refresh_signature_mode,
 )
-from apps.backend.quantization.codexpack_tensor import CodexPackLinearQ4KTilepackV1Parameter
 from apps.backend.quantization.api import quantize_numpy
 from apps.backend.quantization.tensor import CodexParameter
 from apps.backend.runtime import utils
 from apps.backend.runtime.memory import memory_management
-from apps.backend.runtime.ops.operations_gguf import dequantize_tensor
+from apps.backend.runtime.ops.operations_gguf import dequantize_tensor, is_packed_gguf_artifact
 
 from .lora_merge import merge_lora_to_weight
 from .lora_types import LoraPatchEntry
 
-logger = logging.getLogger("backend.patchers.lora")
+logger = get_backend_logger("backend.patchers.lora")
 
 
 def _trace_load_patch_debug_enabled() -> bool:
     return env_flag("CODEX_TRACE_LOAD_PATCH_DEBUG", default=False)
+
+
+def _raise_packed_gguf_unsupported(*, target: str | None = None) -> None:
+    detail = f" target={target!r}." if target is not None else ""
+    raise RuntimeError(
+        "LoRA cannot run on packed GGUF artifacts on the root runtime path. "
+        "Load the base `.gguf` artifact instead."
+        f"{detail}"
+    )
 
 
 def get_parameter_devices(model) -> Dict[str, torch.device]:
@@ -59,6 +71,13 @@ def set_parameter_devices(model, parameter_devices: Mapping[str, torch.device]) 
         if parameter.device != device:
             parameter = utils.tensor2parameter(parameter.to(device=device))
             utils.set_attr_raw(model, key, parameter)
+
+
+def _numpy_safe_quantize_input(tensor: torch.Tensor):
+    cpu_tensor = tensor.detach().to(device="cpu")
+    if cpu_tensor.dtype == torch.bfloat16:
+        cpu_tensor = cpu_tensor.to(dtype=torch.float32)
+    return cpu_tensor.numpy()
 
 
 class CodexLoraLoader:
@@ -78,14 +97,8 @@ class CodexLoraLoader:
         offload_device: torch.device | str | None = None,
         force_refresh: bool = False,
     ) -> None:
-        if lora_patches and any(
-            isinstance(param, CodexPackLinearQ4KTilepackV1Parameter) for _key, param in self.model.named_parameters()
-        ):
-            raise RuntimeError(
-                "LoRA is not supported for CodexPack packed-kernel execution in v1. "
-                "Load the base GGUF (non-codexpack) or disable LoRA."
-            )
-
+        if lora_patches and any(is_packed_gguf_artifact(param) for _key, param in self.model.named_parameters()):
+            _raise_packed_gguf_unsupported()
         merge_mode = read_lora_merge_mode()
         merge_dtype = torch.float64 if merge_mode is LoraMergeMode.PRECISE else torch.float32
         signature_mode = read_lora_refresh_signature_mode()
@@ -131,12 +144,8 @@ class CodexLoraLoader:
                 parent_layer, child_key, parameter = utils.get_attr_with_parent(self.model, param_key)
                 if not isinstance(parameter, torch.nn.Parameter):
                     raise TypeError(f"LoRA target {param_key} is not a torch.nn.Parameter.")
-                if isinstance(parameter, CodexPackLinearQ4KTilepackV1Parameter):
-                    raise RuntimeError(
-                        "LoRA is not supported for CodexPack packed linear weights in v1. "
-                        f"target={param_key!r}."
-                    )
-
+                if is_packed_gguf_artifact(parameter):
+                    _raise_packed_gguf_unsupported(target=param_key)
                 if param_key not in self.backup:
                     if isinstance(parameter, CodexParameter) and parameter.qtype is not None:
                         self.backup[param_key] = parameter.copy_with_data(
@@ -193,7 +202,7 @@ class CodexLoraLoader:
                     if qtype is None:
                         raise RuntimeError(f"Unexpected GGUF parameter without qtype: {param_key}")
 
-                    packed = quantize_numpy(merged.detach().cpu().numpy(), qtype)
+                    packed = quantize_numpy(_numpy_safe_quantize_input(merged), qtype)
                     restored = CodexParameter(
                         packed,
                         qtype=qtype,

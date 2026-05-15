@@ -35,6 +35,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 import math
@@ -49,7 +50,7 @@ from apps.backend.core.state import state as backend_state
 from apps.backend.infra.config.env_flags import env_flag, env_int
 from apps.backend.runtime.model_registry.specs import ModelFamily
 
-logger = logging.getLogger(__name__)
+logger = get_backend_logger(__name__)
 
 _LATENT_RGB_FACTORS_SD15: tuple[tuple[float, float, float], ...] = (
     (0.3512, 0.2297, 0.3227),

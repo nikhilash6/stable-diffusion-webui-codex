@@ -9,7 +9,7 @@ Applies to `apps/backend/runtime/text_processing/*` including `classic_engine.py
 
 ## Design Guidelines
 - No legacy imports. Keep APIs Codex-native, clear, and typed.
-- Preserve common WebUI behaviour (chunking, emphasis, TI) while modernising structure.
+- Preserve common WebUI behaviour where it still matches the live contract: chunking, emphasis, and LoRA prompt tags.
 - Avoid hard dependencies on upstream internals that drift between HF releases.
 
 ## 2025-11-03 Update — CLIP TE Forward
@@ -39,8 +39,7 @@ Applies to `apps/backend/runtime/text_processing/*` including `classic_engine.py
 - Non-classic emphasis variants outside the configured registry will raise `NotImplementedError` when wired.
 
 ## 2026-01-02 — Notes
-- Prompt token-merging tags (`<merge:...>` / `<tm:...>`) are stripped during parsing but intentionally have no effect in Codex.
 - 2026-01-02: Added standardized file header docstrings to `__init__.py`, `emphasis.py`, `extra_nets.py`, `parsing.py`, and `textual_inversion.py` (doc-only change; part of rollout).
-- 2026-01-25: CLIP Skip control tags now accept `0` as a first-class “use default” sentinel (no more clamping to 1 during parsing).
 - 2026-02-09: Version-counter mitigation is handled at engine conditioning entrypoints (`torch.no_grad()`); text processing must not rely on internal inference-mode toggles.
-- 2026-02-17: `extra_nets.py` keeps strict filename/path alias LoRA resolution for prompt tags (`<lora:filename:weight>`); SHA tokens are transport-only (`extras.lora_sha`) and are not valid prompt aliases.
+- 2026-02-17: `extra_nets.py` keeps strict filename/path alias LoRA resolution for prompt tags (`<lora:filename[:text_encoder_weight][:unet_weight]>`); SHA tokens are transport-only (`extras.lora_sha`) and are not valid prompt aliases.
+- 2026-03-26: `extra_nets.py` is now lora-only. Only valid `<lora:name>`, `<lora:name:weight>`, and `<lora:name:text_encoder_weight:unet_weight>` tags have parser semantics here; invalid LoRA-like tags fail loud, TI/token-merge/clip-skip/sampler/scheduler/geometry/cfg/seed/denoise/tiling have no prompt-tag seam, and non-LoRA angle-bracket text is left literal in the prompt.

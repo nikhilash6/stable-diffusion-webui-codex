@@ -23,6 +23,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
@@ -32,7 +33,7 @@ import torch.nn.functional as F
 
 from apps.backend.runtime.controlnet.config import ControlMaskConfig, ControlWeightSchedule
 
-logger = logging.getLogger("backend.patchers.controlnet.weighting")
+logger = get_backend_logger("backend.patchers.controlnet.weighting")
 
 
 def broadcast_image_to(tensor: torch.Tensor, target_batch_size: int, batched_number: int) -> torch.Tensor:

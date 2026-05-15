@@ -23,6 +23,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import gc
 import logging
@@ -37,7 +38,12 @@ from typing import Any, Dict, Optional, Tuple
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-_LOG = logging.getLogger(__name__)
+from apps.backend.runtime.load_authority import (
+    LoadAuthorityStage,
+    coordinator_load_permit,
+)
+
+_LOG = get_backend_logger(__name__)
 
 _CRITICAL_PROCESS_BASENAMES: set[str] = {
     "explorer.exe",
@@ -332,7 +338,11 @@ def build_router(*, app_version: str) -> APIRouter:
             report["internal_failures"].append(f"memory_manager_import:{exc}")
         else:
             try:
-                memory_state.manager.unload_all_models()
+                with coordinator_load_permit(
+                    owner="api.routers.system.obliterate_vram",
+                    stage=LoadAuthorityStage.CLEANUP,
+                ):
+                    memory_state.manager.unload_all_models()
                 report["internal"]["runtime_unload_models"] = True
             except Exception as exc:
                 report["internal_failures"].append(f"runtime_unload_models:{exc}")

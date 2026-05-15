@@ -6,49 +6,56 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Variant detection and validation for CLIP vision checkpoints.
-Infers supported `ClipVisionVariant` values from hallmark state-dict keys and performs lightweight consistency checks.
+Purpose: Variant detection and validation for canonical CLIP vision state dicts.
+Infers supported `ClipVisionVariant` values from the normalized HF `CLIPVisionModelWithProjection` keyspace and performs lightweight
+consistency checks without assuming raw OpenCLIP or wrapper-prefixed source layouts.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `logger` (constant): Module logger for detection/validation diagnostics.
-- `_detect_openclip_variant` (function): Detects OpenCLIP variants by counting transformer blocks.
-- `detect_variant_from_state_dict` (function): Detects the supported CLIP vision variant for a state dict.
+- `detect_variant_from_state_dict` (function): Detects the supported CLIP vision variant from canonical HF keys.
 - `get_spec_for_state_dict` (function): Returns the variant spec corresponding to a detected state dict.
-- `validate_state_dict` (function): Validates a state dict matches the provided variant spec (layer count + required keys).
+- `validate_state_dict` (function): Validates a canonical CLIP vision state dict matches the provided variant spec.
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from typing import Mapping, Sequence
 
-import torch
-
 from .errors import ClipVisionConfigError, ClipVisionLoadError
 from .specs import ClipVisionVariant, ClipVisionVariantSpec, get_variant_spec
 
-logger = logging.getLogger("backend.runtime.vision.clip.registry")
+logger = get_backend_logger("backend.runtime.vision.clip.registry")
 
 
-def _detect_openclip_variant(state_dict: Mapping[str, torch.Tensor]) -> ClipVisionVariant:
-    prefix = "visual.transformer.resblocks."
+def _shape_of(state_dict: Mapping[str, object], key: str) -> tuple[int, ...] | None:
+    shape_getter = getattr(state_dict, "shape_of", None)
+    if callable(shape_getter):
+        try:
+            shape = shape_getter(key)
+        except Exception:
+            shape = None
+        if shape is not None:
+            try:
+                return tuple(int(v) for v in shape)
+            except Exception:
+                return None
+    if key not in state_dict:
+        return None
+    value = state_dict[key]
+    shape = getattr(value, "shape", None)
+    if shape is None:
+        return None
+    try:
+        return tuple(int(v) for v in shape)
+    except Exception:
+        return None
+
+
+def detect_variant_from_state_dict(state_dict: Mapping[str, object]) -> ClipVisionVariant:
+    """Infer the clip vision variant from canonical HF CLIP vision keys."""
     keys = state_dict.keys()
-    if f"{prefix}47.layer_norm1.weight" in keys:
-        return ClipVisionVariant.G
-    if f"{prefix}30.layer_norm1.weight" in keys:
-        return ClipVisionVariant.H
-    if f"{prefix}22.layer_norm1.weight" in keys:
-        return ClipVisionVariant.VIT_L
-    raise ClipVisionLoadError(
-        "Unable to detect clip vision variant from OpenCLIP layout; unsupported or truncated checkpoint."
-    )
-
-
-def detect_variant_from_state_dict(state_dict: Mapping[str, torch.Tensor]) -> ClipVisionVariant:
-    """Infer the clip vision variant by inspecting hallmark parameter names."""
-    keys = state_dict.keys()
-    if "visual.transformer.resblocks.0.attn.in_proj_weight" in keys:
-        return _detect_openclip_variant(state_dict)
     if "vision_model.encoder.layers.47.layer_norm1.weight" in keys:
         return ClipVisionVariant.G
     if "vision_model.encoder.layers.30.layer_norm1.weight" in keys:
@@ -59,28 +66,33 @@ def detect_variant_from_state_dict(state_dict: Mapping[str, torch.Tensor]) -> Cl
             raise ClipVisionLoadError(
                 "Unable to detect clip vision variant: missing position embedding for VIT-L family."
             )
-        embed_shape = state_dict[embed_key].shape[0]
-        if embed_shape == 577:
+        embed_shape = _shape_of(state_dict, embed_key)
+        if embed_shape is None or not embed_shape:
+            raise ClipVisionLoadError(
+                "Unable to detect clip vision variant: position embedding shape is unavailable."
+            )
+        embed_rows = embed_shape[0]
+        if embed_rows == 577:
             return ClipVisionVariant.VIT_L
-        if embed_shape in (729, 1024):
+        if embed_rows in (729, 1024):
             raise ClipVisionConfigError(
                 "SigLIP-style clip vision checkpoints are not yet supported; "
                 "please convert or downsample to a supported Codex variant."
             )
         raise ClipVisionLoadError(
-            f"Unrecognised position embedding shape ({embed_shape}) for clip vision encoder."
+            f"Unrecognised position embedding shape ({embed_rows}) for clip vision encoder."
         )
     raise ClipVisionLoadError(
-        "Unable to detect clip vision variant: expected layer_norm markers for known variants."
+        "Unable to detect clip vision variant: expected canonical `vision_model.encoder.layers.*.layer_norm1.weight` markers."
     )
 
 
-def get_spec_for_state_dict(state_dict: Mapping[str, torch.Tensor]) -> ClipVisionVariantSpec:
+def get_spec_for_state_dict(state_dict: Mapping[str, object]) -> ClipVisionVariantSpec:
     variant = detect_variant_from_state_dict(state_dict)
     return get_variant_spec(variant)
 
 
-def validate_state_dict(state_dict: Mapping[str, torch.Tensor], spec: ClipVisionVariantSpec) -> None:
+def validate_state_dict(state_dict: Mapping[str, object], spec: ClipVisionVariantSpec) -> None:
     """Perform cheap validations to surface mismatches early."""
     expected_prefix = "vision_model.encoder.layers."
     candidate_layers: Sequence[int] = []
@@ -99,9 +111,10 @@ def validate_state_dict(state_dict: Mapping[str, torch.Tensor], spec: ClipVision
             f"State dict encoder layer count mismatch: expected {spec.num_hidden_layers}, "
             f"detected {max_layer_index + 1}."
         )
-    projection_key = "vision_model.post_layernorm.weight"
-    if projection_key not in state_dict:
+    if "vision_model.post_layernorm.weight" not in state_dict:
         raise ClipVisionLoadError("State dict missing post_layernorm weights required for projection head.")
+    if "visual_projection.weight" not in state_dict:
+        raise ClipVisionLoadError("State dict missing `visual_projection.weight` required for CLIP vision output projection.")
     logger.debug(
         "Validated clip vision state dict against variant %s (%d layers).",
         spec.variant.value,

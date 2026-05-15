@@ -1,7 +1,7 @@
 # apps/backend/interfaces Overview
 <!-- tags: backend, api, validation -->
 Date: 2025-12-05
-Last Review: 2026-02-03
+Last Review: 2026-03-06
 Status: Active
 
 ## Purpose
@@ -31,7 +31,7 @@ Status: Active
 - 2025-12-06: `_bootstrap_runtime` agora pré-calcula o inventário de modelos (`apps.backend.inventory.cache.refresh()`) durante o bootstrap do backend, de forma que `/api/models/inventory` esteja quente quando a UI abrir o QuickSettings; a rota continua expondo `?refresh=true` e `POST /api/models/inventory/refresh` para rescans explícitos.
 - 2025-12-14: `/api/txt2vid` e `/api/img2vid` populam `steps` em `Txt2VidRequest/Img2VidRequest` e o plano de vídeo (`build_video_plan`) lê `guidance_scale` (alinhamento de contrato com o runtime).
 - 2025-12-16: Added `/api/vid2vid` (multipart: `video` upload + JSON `payload`) and `/api/output/{rel_path}` for root-scoped serving of exported videos.
-- 2026-02-28: `/api/vid2vid` is intentionally disabled in `generation.py` (HTTP 501 + `NotImplementedError`) until capability-driven router/runtime contract finalization; historical wan_animate notes remain implementation history only.
+- 2026-02-28: `/api/vid2vid` is intentionally parked in `generation.py` (HTTP 400 + explicit placeholder detail) until capability-driven router/runtime contract finalization; historical wan_animate notes remain implementation history only.
 - 2025-12-19: `/api/tools/convert-gguf` expanded quantization menu and now accepts `tensor_type_overrides` (regex → quant per tensor) for mixed schemes and advanced tuning.
 - 2025-12-29: `/api/paths` now resolves `apps/paths.json` via `CODEX_ROOT` (required), keeping QuickSettings path-based filtering stable across launchers and CWD changes.
 - 2025-12-29: `run_api.py` no longer uses `os.getcwd()` for repo files (settings/blocks/tabs/workflows/presets/tmp); it uses the resolved project root so the backend behaves the same no matter where it’s launched from.
@@ -49,10 +49,11 @@ Status: Active
 - 2026-01-24: Settings schema/options were tightened: `/api/settings/schema` is served from `apps/backend/interfaces/schemas/settings_registry.py` (generated from `settings_schema.json`) with JSON fallback, and `apps/settings_values.json` is pruned against the registry on startup (unknown keys dropped; invalid values clamped).
 - 2026-01-01: `/api/models` now accepts `?refresh=1` to re-scan checkpoint roots so the UI can pick up newly copied weights without restarting the backend.
 - 2026-01-02: Added standardized file header docstrings to interface modules (doc-only change; part of rollout).
-- 2026-01-04: Flux family engine keys are `flux1` / `flux1_kontext` / `flux1_chroma` (no legacy aliases); `run_api.py` resolves engine keys via the registry and rejects unknown keys with HTTP 400.
+- 2026-01-04: Image-family engine keys are `flux1` / `flux1_kontext` / `flux1_chroma` plus the separate FLUX.2 key `flux2` (no legacy aliases); `run_api.py` resolves engine keys via the registry and rejects unknown keys with HTTP 400.
 - 2026-01-04: Text encoder override labels are now derived from `apps/paths.json` (`*_tenc` roots via `/api/paths`) and inventory-derived TE files; tooling guardrail added to prevent direct `apps/paths.json` reads outside `infra/config/paths.py`.
 - 2026-01-06: `/api/{txt2img,img2img}` now treats `.gguf` checkpoints as core-only: requires `vae_sha` + `tenc_sha` (tenc accepts arrays for multi-encoder models); ZImage enforces exactly 1 (Qwen3) and Flux.1 enforces exactly 2 (CLIP + T5).
 - 2026-01-06: API workers now set `engine_options.vae_source`/`engine_options.tenc_source` (`built_in` vs `external`) to make asset selection explicit (pairs with `engine_options.vae_path`/`engine_options.tenc_path` when external).
 - 2026-01-06: `/api/{samplers,schedulers}` now returns minimal entries; `/api/{txt2img,img2img}` validates canonical sampler/scheduler selection (including per-sampler scheduler compatibility) and fails fast with HTTP 400.
 - 2026-01-06: `/api/{txt2vid,img2vid}` default sampler now uses `uni-pc` (scheduler `simple`) to match WAN22 diffusers scheduler metadata.
 - 2026-01-08: `run_api.py` was modularized into router modules under `apps/backend/interfaces/api/routers` (composition-only entrypoint; route logic moved to focused router files).
+- 2026-03-06: `/api/img2img` no longer hard-rejects FLUX.2 partial denoise at request parse-time now that the backend continuation path is real; the same router explicitly rejects masked FLUX.2 hires (`img2img_mask` + `img2img_extras.hires.enable`) until that backend path exists.

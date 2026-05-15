@@ -37,6 +37,8 @@ import math
 import collections
 import logging
 from typing import Any, Mapping
+from apps.backend.runtime.diagnostics.error_summary import summarize_exception_for_console
+from apps.backend.runtime.logging import emit_backend_message, get_backend_logger
 
 from apps.backend.runtime.memory import memory_management
 from apps.backend.runtime.memory.smart_offload import smart_offload_enabled
@@ -46,9 +48,9 @@ from apps.backend.runtime.diagnostics.profiler import profiler
 from .condition import Condition, compile_conditions, compile_weighted_conditions
 
 
-logger = logging.getLogger("backend.runtime.sampling")
+_DEBUG_LOGGER = get_backend_logger(__name__)
 
-_ZIMAGE_SAMPLING_DEBUG_COUNT = 0
+_SAMPLING_INNER_DEBUG_COUNT = 0
 
 _GUIDANCE_POLICY_KEY = "codex_guidance_policy"
 _GUIDANCE_STEP_INDEX_KEY = "codex_guidance_step_index"
@@ -467,13 +469,15 @@ def calc_cond_uncond_batch(model, cond, uncond, x_in, timestep, model_options):
         transformer_options["cond_mark"] = compute_cond_mark(cond_or_uncond=cond_or_uncond, sigmas=timestep)
         transformer_options["cond_indices"], transformer_options["uncond_indices"] = compute_cond_indices(cond_or_uncond=cond_or_uncond, sigmas=timestep)
 
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "Control batch: size=%d cond=%d uncond=%d sigma_shape=%s",
-                len(cond_or_uncond),
-                sum(1 for flag in cond_or_uncond if flag == COND),
-                sum(1 for flag in cond_or_uncond if flag != COND),
-                tuple(timestep.shape),
+        if _DEBUG_LOGGER.isEnabledFor(logging.DEBUG):
+            emit_backend_message(
+                "Control batch",
+                logger=__name__,
+                level=logging.DEBUG,
+                size=len(cond_or_uncond),
+                cond=sum(1 for flag in cond_or_uncond if flag == COND),
+                uncond=sum(1 for flag in cond_or_uncond if flag != COND),
+                sigma_shape=tuple(timestep.shape),
             )
 
         c_dict['transformer_options'] = transformer_options
@@ -485,7 +489,12 @@ def calc_cond_uncond_batch(model, cond, uncond, x_in, timestep, model_options):
                 try:
                     c_dict['control'] = control.get_control(input_x_cat, timestep_, control_cond, len(cond_or_uncond))
                 except Exception as err:
-                    logger.error("ControlNet get_control failed: %s", err, exc_info=True)
+                    emit_backend_message(
+                        "ControlNet get_control failed",
+                        logger=__name__,
+                        level="ERROR",
+                        error=summarize_exception_for_console(err),
+                    )
                     raise
             c_dict['control_model'] = control
 
@@ -552,10 +561,11 @@ def calc_cond_uncond_batch(model, cond, uncond, x_in, timestep, model_options):
                     if not _is_cuda_oom(exc):
                         raise
                     if not fused_disabled_logged:
-                        logger.warning(
-                            "[cfg-batch] fused attempt OOM; falling back to split (mode=%s). "
-                            "Try reducing resolution/CFG or disabling fused CFG batching.",
-                            cfg_batch_mode,
+                        emit_backend_message(
+                            "[cfg-batch] fused attempt OOM; falling back to split. Try reducing resolution/CFG or disabling fused CFG batching.",
+                            logger=__name__,
+                            level="WARNING",
+                            mode=cfg_batch_mode,
                         )
                         fused_disabled_logged = True
                     fused_enabled = False
@@ -572,10 +582,11 @@ def calc_cond_uncond_batch(model, cond, uncond, x_in, timestep, model_options):
             if _batch_flags(to_batch) != {COND, UNCOND}:
                 raise
             if not fused_disabled_logged:
-                logger.warning(
-                    "[cfg-batch] fused batch OOM; falling back to split (mode=%s). "
-                    "Try reducing resolution/CFG or disabling fused CFG batching.",
-                    cfg_batch_mode,
+                emit_backend_message(
+                    "[cfg-batch] fused batch OOM; falling back to split. Try reducing resolution/CFG or disabling fused CFG batching.",
+                    logger=__name__,
+                    level="WARNING",
+                    mode=cfg_batch_mode,
                 )
                 fused_disabled_logged = True
             fused_enabled = False
@@ -607,10 +618,10 @@ def sampling_function_inner(model, x, timestep, uncond, cond, cond_scale, model_
         cond_pred, uncond_pred = calc_cond_uncond_batch(model, cond, uncond_, x, timestep, model_options)
 
     # Optional deep diagnostics for flow models (Z Image/Flux): log CFG routing and tensor norms.
-    global _ZIMAGE_SAMPLING_DEBUG_COUNT
-    debug_enabled = env_flag("CODEX_ZIMAGE_DEBUG") or env_flag("CODEX_ZIMAGE_DEBUG_SAMPLING_INNER")
-    debug_limit = env_int("CODEX_ZIMAGE_DEBUG_SAMPLING_INNER_N", 3, min_value=0)
-    if debug_enabled and _ZIMAGE_SAMPLING_DEBUG_COUNT < debug_limit:
+    global _SAMPLING_INNER_DEBUG_COUNT
+    debug_enabled = env_flag("CODEX_SAMPLING_DEBUG") or env_flag("CODEX_SAMPLING_DEBUG_INNER")
+    debug_limit = env_int("CODEX_SAMPLING_DEBUG_INNER_N", 3, min_value=0)
+    if debug_enabled and _SAMPLING_INNER_DEBUG_COUNT < debug_limit:
         try:
             sigma0 = float(timestep.detach().view(-1)[0].item()) if isinstance(timestep, torch.Tensor) else float(timestep)
         except Exception:
@@ -623,16 +634,17 @@ def sampling_function_inner(model, x, timestep, uncond, cond, cond_scale, model_
             uncond_norm = float(uncond_pred.detach().float().norm().item()) if isinstance(uncond_pred, torch.Tensor) else float("nan")
         except Exception:
             uncond_norm = float("nan")
-        logger.info(
-            "[zimage-debug] sampling_inner sigma=%.6g cond_scale=%.4g edit_strength=%.4g uncond_present=%s cond_norm=%.6g uncond_norm=%.6g",
-            sigma0,
-            float(cond_scale),
-            float(edit_strength),
-            uncond_ is not None,
-            cond_norm,
-            uncond_norm,
+        emit_backend_message(
+            "[sampling-debug] sampling_inner",
+            logger=__name__,
+            sigma=sigma0,
+            cond_scale=float(cond_scale),
+            edit_strength=float(edit_strength),
+            uncond_present=uncond_ is not None,
+            cond_norm=cond_norm,
+            uncond_norm=uncond_norm,
         )
-        _ZIMAGE_SAMPLING_DEBUG_COUNT += 1
+        _SAMPLING_INNER_DEBUG_COUNT += 1
 
     # Distilled / turbo models may omit unconditional conditioning entirely.
     # In that case, skip CFG math and return the conditional prediction as-is.
@@ -662,8 +674,10 @@ def sampling_function_inner(model, x, timestep, uncond, cond, cond_scale, model_
             )
     if "sampler_cfg_function" in model_options and _guidance_policy_from_options(model_options) is not None:
         if not bool(model_options.get(_GUIDANCE_WARNED_SAMPLER_CFG_KEY, False)):
-            logger.warning(
-                "Guidance policy is ignored because sampler_cfg_function is active."
+            emit_backend_message(
+                "Guidance policy is ignored because sampler_cfg_function is active.",
+                logger=__name__,
+                level="WARNING",
             )
             model_options[_GUIDANCE_WARNED_SAMPLER_CFG_KEY] = True
 
@@ -740,11 +754,14 @@ def sampling_prepare(denoiser, x):
             control_runtime.prepare(real_model, percent_to_timestep_function)
             additional_inference_memory += control_runtime.inference_memory_requirements(denoiser.model_dtype())
             additional_model_patchers += control_runtime.get_models()
-            logger.debug(
-                "Control runtime activated: extra_memory=%s models=%d",
-                additional_inference_memory,
-                len(additional_model_patchers),
-            )
+            if _DEBUG_LOGGER.isEnabledFor(logging.DEBUG):
+                emit_backend_message(
+                    "Control runtime activated",
+                    logger=__name__,
+                    level=logging.DEBUG,
+                    extra_memory=additional_inference_memory,
+                    models=len(additional_model_patchers),
+                )
 
         if denoiser.has_online_lora():
             lora_memory = utils.nested_compute_size(
@@ -772,8 +789,13 @@ def sampling_prepare(denoiser, x):
                 dtype=denoiser.model.computation_dtype,
             )
 
-        if control_runtime:
-            logger.debug("Control runtime prepared with model %s", type(real_model).__name__)
+        if control_runtime and _DEBUG_LOGGER.isEnabledFor(logging.DEBUG):
+            emit_backend_message(
+                "Control runtime prepared",
+                logger=__name__,
+                level=logging.DEBUG,
+                model_type=type(real_model).__name__,
+            )
     except Exception as exc:
         try:
             sampling_cleanup(denoiser)
@@ -793,7 +815,12 @@ def sampling_cleanup(denoiser):
     control_runtime = getattr(denoiser, "controlnet_linked_list", None)
     if control_runtime:
         control_runtime.cleanup()
-        logger.debug("Control runtime cleaned up after sampling")
+        if _DEBUG_LOGGER.isEnabledFor(logging.DEBUG):
+            emit_backend_message(
+                "Control runtime cleaned up after sampling",
+                logger=__name__,
+                level=logging.DEBUG,
+            )
     if hasattr(denoiser, "clear_control"):
         denoiser.clear_control()
     if smart_offload_enabled():

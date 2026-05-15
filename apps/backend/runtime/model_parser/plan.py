@@ -18,6 +18,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 from collections.abc import MutableMapping
 from typing import Any, Dict
@@ -34,7 +35,7 @@ from .errors import MissingComponentError
 from .specs import ComponentState, ParserContext, ParserPlan
 
 
-_log = logging.getLogger("backend.model_parser")
+_log = get_backend_logger("backend.model_parser")
 
 
 def _keymap_paths() -> tuple[Path, Path]:
@@ -121,14 +122,27 @@ def execute_plan(plan: ParserPlan, state_dict: MutableMapping[str, Any], *, sign
             continue
         dtype = None
         device = None
-        try:
-            sample_key = next(iter(view), None)
-            if sample_key is not None:
+        sample_key = next(iter(view), None)
+        source_format = str(getattr(view, "source_format", "")).strip().lower()
+        if sample_key is not None and source_format in {"safetensor", "safetensors"}:
+            dtype_hint = getattr(view, "primary_dtype_hint", None)
+            if isinstance(dtype_hint, str) and dtype_hint.strip():
+                dtype = dtype_hint.strip().lower()
+            view_device = getattr(view, "device", None)
+            if isinstance(view_device, str) and view_device.strip():
+                device = view_device.strip().lower()
+            else:
+                base = getattr(view, "_base", None)
+                base_device = getattr(base, "device", None)
+                if isinstance(base_device, str) and base_device.strip():
+                    device = base_device.strip().lower()
+        elif sample_key is not None:
+            try:
                 t = view[sample_key]
                 dtype = getattr(getattr(t, "dtype", None), "name", None)
                 device = getattr(getattr(t, "device", None), "type", None)
-        except Exception:
-            pass
+            except Exception:
+                pass
         trace_event("parser_split", component=split.name, count=length, dtype=dtype, device=device)
         # Do NOT materialize the whole component here; keep the filtered mapping lazy.
         context.components[split.name] = ComponentState(name=split.name, tensors=view)

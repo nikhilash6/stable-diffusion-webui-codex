@@ -20,6 +20,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 # // tags: outputs, saving, images
 
@@ -31,7 +32,7 @@ from typing import Any, Iterable, Mapping
 from apps.backend.core.engine_interface import TaskType
 from apps.backend.infra.config.repo_root import get_repo_root
 
-_LOGGER = logging.getLogger("backend.services.output_service")
+_LOGGER = get_backend_logger("backend.services.output_service")
 
 
 def _safe_int(value: object) -> int | None:

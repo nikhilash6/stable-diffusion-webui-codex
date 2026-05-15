@@ -14,7 +14,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_ensure_position_ids_long` (function): Ensures `position_ids` tensors are `torch.long` (rounding when needed).
 - `_with_prefix` (function): Adds a prefix to every key in a state dict mapping.
 - `_strip_prefix` (function): Removes a key prefix when present (leaves non-matching keys unchanged).
-- `convert_clip` (function): Generic CLIP converter (alias-aware; keymap-owned CLIP remap + layout-aware projection policy).
+- `convert_clip` (function): Generic CLIP converter (alias-aware; keymap-owned CLIP keyspace resolution + layout-aware projection policy).
 - `convert_sd15_clip` (function): SD1.5 CLIP-L converter (drops heads reconstructed at runtime).
 - `convert_sd20_clip` (function): SD2.x CLIP-H converter (keeps native projection layout in auto mode).
 - `convert_sdxl_clip_l` (function): SDXL CLIP-L converter (drops runtime-reconstructed projection weights).

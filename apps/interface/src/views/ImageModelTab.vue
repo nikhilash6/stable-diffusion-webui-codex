@@ -8,14 +8,23 @@ Required Notice: see NOTICE
 
 Purpose: Image model tab view (txt2img/img2img/inpaint) UI for SD/Flux/ZImage-family engines.
 Owns prompt + parameter controls, init-image + mask handling for img2img/inpaint, per-tab history, and integrates with the generation composable to
-submit `/api/txt2img`/`/api/img2img` tasks and render progress/results (Z-Image Turbo/Base UI is variant-dependent: CFG label + negative prompt gating).
-When `useInitImage=true`, generation parameters render through `Img2ImgBasicParametersCard` (shared layout with current img2img payload semantics).
+submit `/api/txt2img`/`/api/img2img` tasks and render progress/results (Z-Image Turbo/Base and FLUX.2 Klein distilled/base-4B are variant-dependent:
+CFG label + negative prompt gating follow the selected checkpoint/tab state, while img2img denoise + hires visibility stay truthful to the active capability/mask contract).
+The RUN surface now owns a split-button `Generate` / `Infinite` action selector, the Initial Image seam owns the `DIR|IMG` source switch for img2img automation,
+IP-Adapter stays on its dedicated nested-owner card, and SUPIR mode now lives on the header toggle plus a split body surface: `Img2ImgBasicParametersCard` owns the SUPIR sampler/scheduler row,
+while `SupirModeCard` owns the remaining SUPIR-specific controls with parent-owned blocking/gating/readiness.
+When inpaint masking is active, it also forwards natural init-image dimensions, current processing target dimensions, and the current invert-mask state to the shared card/editor preview seam, treats unresolved natural dims as unavailable instead of falling back to processing dims, and normalizes the invalid `maskInvert + maskRegionSplit` pair in the shared parent-owned param path.
+Exact-engine inpaint-mode availability now comes from `/api/engines/capabilities` (`exact_engine_inpaint_modes`), so SDXL can expose `Fooocus Inpaint` truthfully without laundering that mode onto `sdxl_refiner` or non-SDXL engines; stale unsupported values stay visible/blocking until the user reselects a supported mode.
+When `useInitImage=true`, generation parameters render through `Img2ImgBasicParametersCard` (shared layout with honest img2img control visibility).
 CFG Advanced/APG controls are capability-gated (`engineSurface.guidance_advanced`) and persist through tab params/profile snapshots.
 Hires settings list upscalers from `/api/upscalers` and share tile controls with `/upscale`.
 Also shares the global `min_tile` preference (tiled lower bound) with `/upscale`.
-Swap-model cards (global + second-pass) share the same capability-gated advanced guidance/APG state surface.
+The generic first-pass model-swap stage lives under `params.swapModel`, the generic second-pass model selector lives under `params.hires.swapModel`,
+and global + hires refiner cards stay on the SDXL-native `refiner` seams with the shared capability-gated advanced guidance/APG state surface.
+Sampler/scheduler selectors normalize current/backend-capability selections against the executable `/api/samplers` + `/api/schedulers` inventory, keep base sampler/scheduler real without frontend fallback defaults, and scrub invalid hires overrides while still using backend recommendation lists for grouped option rendering (`Recommended` vs `Use at your own risk`) with inline technical warnings on out-of-recommendation selections.
 Surfaces a one-shot toast when the generation composable auto-reattaches to an in-flight task after a reload/crash.
-Generate CTA and run preflight are capability-driven (`/api/engines/capabilities`) and fail loud when the current mode is unsupported.
+Generate CTA and run preflight are capability-driven (`/api/engines/capabilities`) plus asset-contract-aware, failing loud in the UI when the
+current checkpoint/text-encoder/VAE contract is not runnable.
 Run status in the RUN card is centralized via `RunProgressStatus` variants (progress/error/info/success/warning), including dual progress bars (total pipeline + sampling steps), so errors are visible even when Prompt is off-screen.
 When XYZ workflow is enabled, RUN header shows an `XYZ` badge beside `Generate` via the run-card center-adjacent slot while keeping the primary CTA label stable as `Generate`.
 
@@ -24,6 +33,9 @@ Symbols (top-level; keep in sync; no ghosts):
 - `sendToWorkflows` (function): Sends the current params snapshot to the workflows subsystem (async).
 - `copyCurrentParams` (function): Copies current params snapshot to clipboard (async).
 - `onCancelRun` (function): Cancels the active run (XYZ sweep immediate stop or current image task cancel).
+- `showSupirModeCard` / `supportsSupirModeSurface` / `supirSelectionState` / `supirBlockingReason` (const): Shared SUPIR discoverability/readiness contract for the header toggle and split img2img parameter surface.
+- `availableInpaintModes` / `availableInpaintModeOptions` / `unsupportedInpaintMode` / `unsupportedInpaintModeMessage` (const): Exact-engine-owned inpaint-mode availability plus explicit invalid-submit blocking for the shared inpaint card.
+- `onInpaintModeChange` (function): Applies one validated inpaint-mode update and clears hidden per-step sliders when leaving `Per-step blend`.
 - `copyHistoryParams` (function): Copies a history entry’s params snapshot to clipboard (async).
 - `applyHistory` (function): Applies a history entry back into current state (prompt/params/assets).
 - `formatHistoryTitle` (function): Builds a human-friendly history title from a run entry.
@@ -31,18 +43,29 @@ Symbols (top-level; keep in sync; no ghosts):
 - `loadProfile` (function): Loads a saved profile into current params (with validation/defaulting).
 - `saveProfile` (function): Saves current params as a profile in localStorage.
 - `setParams` (function): Applies partial updates to the current tab params state.
+- `normalizeImageDimension` (function): Snaps width/height updates to the active engine grid before they reach tab state.
+- `normalizeImageParamPatch` (function): Applies engine-aware width/height + img2img resize-mode normalization plus inpaint toggle interlock cleanup to partial param patches.
+- `syncImageContractToEngine` (function): Reconciles persisted width/height/resize-mode state with the active engine contract.
 - `normalizeGuidanceAdvancedPatch` (function): Sanitizes/normalizes advanced-guidance payload fragments (profile + UI patch merges).
 - `setGuidanceAdvanced` (function): Applies partial advanced-guidance updates into `params.guidanceAdvanced`.
 - `setHires` (function): Applies partial updates to the hires config object.
+- `setHiresSwapModel` (function): Applies the canonical nested hires `swapModel` selection without leaking flat alias fields.
 - `setHiresRefiner` (function): Applies partial updates to the hires-refiner config object.
 - `setRefiner` (function): Applies partial updates to the refiner config object.
+- `setRunAction` (function): Persists the Run-card primary action mode (`generate` vs `infinite`) and normalizes automation batch constraints.
+- `setInitSource` (function): Applies Initial Image `DIR|IMG` source changes and clears stale mask / same-as-init dependents on DIR mode.
+- `setIpAdapter` (function): Applies partial updates to the dedicated IP-Adapter owner (including nested source patches) and enforces automation batch constraints.
+- `setIpAdapterSource` (function): Thin helper for nested IP-Adapter source patches.
 - `clampFloat` (function): Clamps a float to `[min, max]` (input sanitation).
 - `setMinTile` (function): Updates the global `min_tile` preference used as the tiled OOM fallback lower bound (hires-fix + `/upscale`).
-- `snapInitImageDim` (function): Snaps init-image derived dimensions to model constraints (e.g., multiples of 8).
+- `snapInitImageDim` (function): Snaps init-image derived dimensions to the active engine grid before reuse/sync.
 - `onInitFileSet` (function): Reads an init image file into a data URL and stores name/data, then syncs dims (async).
 - `onInitImageRejected` (function): Surfaces dropzone reject reasons for init-image input.
 - `clearInit` (function): Clears init image fields.
 - `clearMask` (function): Clears mask fields.
+- `onIpAdapterReferenceFileSet` (function): Reads an IP-Adapter reference image into the dedicated card source state (async).
+- `clearIpAdapterReference` (function): Clears the dedicated IP-Adapter reference image fields.
+- `onIpAdapterReferenceRejected` (function): Surfaces dropzone reject reasons for the IP-Adapter reference input.
 - `onMaskEditorApply` (function): Validates and stores an edited mask exported from the inpaint mask editor overlay.
 - `onMaskEditorResetNotice` (function): Surfaces inpaint mask editor source-reset notices as toasts.
 - `toDataUrl` (function): Converts a generated image payload to a data URL for preview.
@@ -50,16 +73,24 @@ Symbols (top-level; keep in sync; no ghosts):
 - `reuseSeed` (function): Reuses the last seed from history/current run as the next seed.
 - `download` (function): Downloads a generated image artifact to disk.
 - `sendToImg2Img` (function): Sends a generated image back into img2img init-image fields (async).
-- `readFileAsDataURL` (function): Reads a File into a data URL (used for init-image handling).
-- `readImageDimensions` (function): Reads width/height from an image source URL (used for init-image dimension sync).
 - `syncInitImageDims` (function): Synchronizes init-image derived dimensions into width/height params (async).
 - `maskEditorImageWidth`/`maskEditorImageHeight` (const): Derived init-image dimensions used by the inpaint mask editor canvas (keeps backend mask-dimension contract).
-- `maybeApplyKontextDefaults` (function): Applies Kontext-specific default params when relevant to the current engine/tab.
+- `maybeApplyKontextDefaults` (function): Applies FLUX.1 Kontext-specific default params when relevant to the current engine/tab.
 - `onGenerate` (function): Run handler for the Run card; dispatches standard generation or XYZ sweep depending on XYZ enable state.
 - `runGenerateDisabled`/`runGenerateTitle` (const): Run CTA state/title derived from capabilities + active mode + XYZ running/enabled state.
+- `assetContractBlockingReason` / `workflowParamsSnapshot` (const): Current image asset-contract gating reason plus workflow snapshot carrying the
+  active family-scoped VAE owner.
+- `usesImageAutomation` / `infiniteXyzConflict` / `automationBatchConflict` (const): Derived automation guards for the split-button and backend-owned automation route.
+- `showIpAdapterCard` / `initFolderMissingPath` / `dirInitMaskConflict` / `ipAdapterBlockingReason` (const): Card-visibility + preflight guards for Initial Image DIR mode and the dedicated IP-Adapter owner card.
 - `missingInpaintMask` (const): Derived guard flag used to disable generation when INPAINT is enabled without an applied mask.
-- `hideNegativePrompt` (const): Hides the base Negative Prompt field when effective base CFG is `<= 1`.
+- `supportsImg2ImgMasking` (const): Truthful backend-capability-driven mask/inpaint support gate for img2img engines.
+- `hideNegativePrompt` (const): Hides the base Negative Prompt field when the active checkpoint/model does not support it or effective base CFG is `<= 1`.
+- `recommendedSamplers` / `recommendedSchedulers` (const): Sanitized recommendation lists passed into sampler/scheduler selectors.
+- `resolveLiveSamplingDefaults` (function): Resolves executable sampler/scheduler defaults from backend capabilities only.
+- `normalizeLiveSamplingSelection` (function): Normalizes sampler/scheduler pairs against live executable catalog, family capability constraints, and sampler-allowed schedulers.
+- `normalizedBaseSampling` (const): Live-normalized base sampler/scheduler pair used by selector state and hires override cleanup.
 - `xyzSamplerChoices`/`xyzSchedulerChoices` (const): Sampler/scheduler names passed to embedded XYZ autofill (scheduler list is sampler-compatible).
+- `normalizeXyzSamplingAxisText` (function): Scrubs XYZ sampler/scheduler axis values to current family-compatible choices.
 -->
 
 <template>
@@ -78,34 +109,61 @@ Symbols (top-level; keep in sync; no ghosts):
         :fieldsId="`image-modeltab-prompt-${tabId}`"
       >
         <div v-if="supportsImg2Img && params.useInitImage" class="panel-section">
-          <Img2ImgInpaintParamsCard
+          <InitialImageBlock
             :disabled="isRunning"
+            :showSourceModeToggle="true"
+            :showInpaintControls="true"
+            :initSource="params.initSource"
             :initImageData="params.initImageData"
             :initImageName="params.initImageName"
             :imageWidth="maskEditorImageWidth"
             :imageHeight="maskEditorImageHeight"
-            :useMask="params.useMask"
+            :processingWidth="params.width"
+            :processingHeight="params.height"
+            :useMask="supportsImg2ImgMasking && params.initSource.mode === 'img' ? params.useMask : false"
             :maskImageData="params.maskImageData"
             :maskImageName="params.maskImageName"
-            :maskEnforcement="params.maskEnforcement"
+            :inpaintMode="params.inpaintMode"
+            :inpaintModeOptions="availableInpaintModeOptions"
+            :perStepBlendStrength="params.perStepBlendStrength"
+            :perStepBlendSteps="params.perStepBlendSteps"
             :inpaintingFill="params.inpaintingFill"
             :inpaintFullResPadding="params.inpaintFullResPadding"
             :maskBlur="params.maskBlur"
+            :maskInvert="params.maskInvert"
             :maskRegionSplit="params.maskRegionSplit"
+            @patch:initSource="setInitSource"
             @set:initImage="onInitFileSet"
             @clear:initImage="clearInit"
             @reject:initImage="onInitImageRejected"
             @clear:maskImage="clearMask"
             @apply:maskImageData="onMaskEditorApply"
             @notice:maskEditorReset="onMaskEditorResetNotice"
-            @update:maskEnforcement="(v) => setParams({ maskEnforcement: normalizeMaskEnforcement(v) })"
+            @update:inpaintMode="onInpaintModeChange"
+            @update:perStepBlendStrength="(v) => setParams({ perStepBlendStrength: clampFloat(v, 0, 1) })"
+            @update:perStepBlendSteps="(v) => setParams({ perStepBlendSteps: normalizeNonNegativeInt(v) })"
             @update:inpaintingFill="(v) => setParams({ inpaintingFill: normalizeInpaintingFill(v) })"
             @update:inpaintFullResPadding="(v) => setParams({ inpaintFullResPadding: normalizeNonNegativeInt(v) })"
             @update:maskBlur="(v) => setParams({ maskBlur: normalizeNonNegativeInt(v) })"
+            @toggle:maskInvert="setParams({ maskInvert: !params.maskInvert })"
             @toggle:maskRegionSplit="setParams({ maskRegionSplit: !params.maskRegionSplit })"
           />
         </div>
       </PromptCard>
+
+      <IpAdapterCard
+        v-if="showIpAdapterCard"
+        :disabled="isRunning"
+        :img2imgMode="params.useInitImage"
+        :ipAdapter="params.ipAdapter"
+        :modelChoices="ipAdapterModelChoices"
+        :imageEncoderChoices="ipAdapterImageEncoderChoices"
+        :blockingReason="ipAdapterBlockingReason"
+        @patch:ipAdapter="setIpAdapter"
+        @set:referenceImage="onIpAdapterReferenceFileSet"
+        @clear:referenceImage="clearIpAdapterReference"
+        @reject:referenceImage="onIpAdapterReferenceRejected"
+		          />
 
       <div class="panel">
         <div class="panel-header">
@@ -116,53 +174,80 @@ Symbols (top-level; keep in sync; no ghosts):
           </div>
         </div>
         <div class="panel-body">
-          <Img2ImgBasicParametersCard
-            v-if="params.useInitImage"
-            :samplers="filteredSamplers"
-            :schedulers="filteredSchedulers"
-            :upscalers="upscalers"
-            :upscalersLoading="upscalersLoading"
-            :upscalersError="upscalersError"
-            :sampler="params.sampler"
-            :scheduler="params.scheduler"
-            :steps="params.steps"
-            :width="params.width"
-            :height="params.height"
-            :cfg-scale="params.cfgScale"
-            :cfg-label="cfgLabel"
-            :denoise-strength="params.denoiseStrength"
-            :seed="params.seed"
-            :clip-skip="params.clipSkip"
-            :show-clip-skip="showClipSkip"
-            :min-clip-skip="minClipSkip"
-            :max-clip-skip="12"
-            :guidance-advanced="params.guidanceAdvanced"
-            :guidance-support="guidanceAdvancedSupport"
-            :upscaler="params.img2imgUpscaler"
-            :resize-mode="params.img2imgResizeMode"
-            :show-init-image-dims="Boolean(params.initImageData)"
-            :disabled="isRunning"
-            @update:sampler="onSamplerChange"
-            @update:scheduler="(v) => setParams({ scheduler: v })"
-            @update:steps="(v) => setParams({ steps: Math.max(1, Math.trunc(v)) })"
-            @update:width="(v) => setParams({ width: Math.max(64, Math.trunc(v)) })"
-            @update:height="(v) => setParams({ height: Math.max(64, Math.trunc(v)) })"
-            @update:cfgScale="(v) => setParams({ cfgScale: v })"
-            @update:denoiseStrength="(v) => setParams({ denoiseStrength: clampFloat(v, 0, 1) })"
-            @update:seed="(v) => setParams({ seed: Math.trunc(v) })"
-            @update:clipSkip="(v) => setParams({ clipSkip: Math.max(minClipSkip, Math.trunc(v)) })"
-            @update:guidanceAdvanced="setGuidanceAdvanced"
-            @update:upscaler="(v) => setParams({ img2imgUpscaler: String(v || '').trim() })"
-            @update:resizeMode="(v) => setParams({ img2imgResizeMode: normalizeImg2ImgResizeMode(v) })"
-            @random-seed="randomizeSeed"
-            @reuse-seed="reuseSeed"
-            @sync-init-image-dims="syncInitImageDims"
-          />
+          <template v-if="params.useInitImage">
+            <Img2ImgBasicParametersCard
+              :samplers="filteredSamplers"
+              :schedulers="filteredSchedulers"
+              :recommended-samplers="recommendedSamplers"
+              :recommended-schedulers="recommendedSchedulers"
+              :upscalers="upscalers"
+              :upscalersLoading="upscalersLoading"
+              :upscalersError="upscalersError"
+              :sampler="params.sampler"
+              :scheduler="params.scheduler"
+              :steps="params.steps"
+              :width="params.width"
+              :height="params.height"
+              :cfg-scale="params.cfgScale"
+              :cfg-label="cfgLabel"
+              :denoise-strength="params.denoiseStrength"
+              :show-denoise="true"
+              :seed="params.seed"
+              :clip-skip="params.clipSkip"
+              :show-clip-skip="showClipSkip"
+              :min-clip-skip="minClipSkip"
+              :max-clip-skip="12"
+              :guidance-advanced="params.guidanceAdvanced"
+              :guidance-support="guidanceAdvancedSupport"
+              :supir="params.supir"
+              :supir-sampler-choices="supirSamplerChoices"
+              :supir-selected-sampler-info="supirSelectedSamplerInfo"
+              :supir-blocking-reason="supirBlockingReason"
+              :upscaler="params.img2imgUpscaler"
+              :resize-mode="params.img2imgResizeMode"
+              :resize-mode-options="img2imgResizeModeOptions"
+              :show-resize-mode="!(resolvedEngineForMode === 'zimage' && params.useMask)"
+              :dimension-snap-mode="resolvedEngineForMode === 'zimage' ? 'floor' : 'nearest'"
+              :show-init-image-dims="Boolean(params.initImageData)"
+              :width-step="imageDimensionSliderStep"
+              :width-input-step="imageDimensionInputStep"
+              :height-step="imageDimensionSliderStep"
+              :height-input-step="imageDimensionInputStep"
+              :disabled="isRunning"
+              @update:sampler="onSamplerChange"
+              @update:scheduler="(v) => setParams({ scheduler: v })"
+              @update:steps="(v) => setParams({ steps: Math.max(1, Math.trunc(v)) })"
+              @update:width="(v) => setParams({ width: normalizeImageDimension(v) })"
+              @update:height="(v) => setParams({ height: normalizeImageDimension(v) })"
+              @update:cfgScale="(v) => setParams({ cfgScale: v })"
+              @update:denoiseStrength="(v) => setParams({ denoiseStrength: clampFloat(v, 0, 1) })"
+              @update:seed="(v) => setParams({ seed: Math.trunc(v) })"
+              @update:clipSkip="(v) => setParams({ clipSkip: Math.max(minClipSkip, Math.trunc(v)) })"
+              @update:guidanceAdvanced="setGuidanceAdvanced"
+              @patch:supir="setSupir"
+              @update:upscaler="(v) => setParams({ img2imgUpscaler: String(v || '').trim() })"
+              @update:resizeMode="(v) => setParams({ img2imgResizeMode: normalizeImg2ImgResizeModeForEngine(resolvedEngineForMode, v) })"
+              @random-seed="randomizeSeed"
+              @reuse-seed="reuseSeed"
+              @sync-init-image-dims="syncInitImageDims"
+            />
+
+            <SupirModeCard
+              v-if="showSupirModeCard"
+              :disabled="isRunning"
+              :supir="params.supir"
+              :variant-choices="supirVariantChoices"
+              :blocking-reason="supirBlockingReason"
+              @patch:supir="setSupir"
+            />
+          </template>
 
           <BasicParametersCard
             v-else
             :samplers="filteredSamplers"
             :schedulers="filteredSchedulers"
+            :recommended-samplers="recommendedSamplers"
+            :recommended-schedulers="recommendedSchedulers"
             :sampler="params.sampler"
             :scheduler="params.scheduler"
             :steps="params.steps"
@@ -183,26 +268,46 @@ Symbols (top-level; keep in sync; no ghosts):
             :guidance-advanced="params.guidanceAdvanced"
             :guidance-support="guidanceAdvancedSupport"
             :show-init-image-dims="false"
+            :width-step="imageDimensionSliderStep"
+            :width-input-step="imageDimensionInputStep"
+            :height-step="imageDimensionSliderStep"
+            :height-input-step="imageDimensionInputStep"
             :disabled="isRunning"
             @update:sampler="onSamplerChange"
             @update:scheduler="(v) => setParams({ scheduler: v })"
             @update:steps="(v) => setParams({ steps: Math.max(1, Math.trunc(v)) })"
-            @update:width="(v) => setParams({ width: Math.max(64, Math.trunc(v)) })"
-            @update:height="(v) => setParams({ height: Math.max(64, Math.trunc(v)) })"
+            @update:width="(v) => setParams({ width: normalizeImageDimension(v) })"
+            @update:height="(v) => setParams({ height: normalizeImageDimension(v) })"
             @update:cfgScale="(v) => setParams({ cfgScale: v })"
             @update:seed="(v) => setParams({ seed: Math.trunc(v) })"
             @update:clipSkip="(v) => setParams({ clipSkip: Math.max(minClipSkip, Math.trunc(v)) })"
             @update:guidanceAdvanced="setGuidanceAdvanced"
             @random-seed="randomizeSeed"
-            @reuse-seed="reuseSeed"
-          />
+	            @reuse-seed="reuseSeed"
+	          />
 
-          <HiresSettingsCard
-            v-if="showHires"
+					          <SwapStageSettingsCard
+			            v-if="showGlobalSwapModel"
+		            :enabled="params.swapModel.enabled"
+		            :swapAtStep="params.swapModel.swapAtStep"
+		            :maxSteps="Math.max(1, params.steps - 1)"
+		            :cfg="params.swapModel.cfg"
+		            :model="params.swapModel.model"
+		            :modelChoices="swapModelChoices"
+	            @update:enabled="(v) => setSwapModel({ enabled: v })"
+	            @update:swapAtStep="(v) => setSwapModel({ swapAtStep: Math.max(1, Math.trunc(v)) })"
+	            @update:cfg="(v) => setSwapModel({ cfg: v })"
+	            @update:model="(v) => setSwapModel({ model: v })"
+	          />
+
+	          <HiresSettingsCard
+	            v-if="showHires"
             :disabled="isRunning"
             :enabled="params.hires.enabled"
             :samplers="filteredSamplers"
             :schedulers="filteredHiresSchedulers"
+            :recommended-samplers="recommendedSamplers"
+            :recommended-schedulers="recommendedSchedulers"
             :sampler="hiresSampler"
             :scheduler="hiresScheduler"
             :denoise="params.hires.denoise"
@@ -212,8 +317,9 @@ Symbols (top-level; keep in sync; no ghosts):
             :cfg="hiresCfgValue"
             :resize-x="params.hires.resizeX"
             :resize-y="params.hires.resizeY"
-            :checkpoint="params.hires.checkpoint"
-            :model-choices="swapModelChoices"
+            :swap-model="params.hires.swapModel?.model"
+            :swap-model-choices="swapModelChoices"
+            :show-swap-model="!params.useInitImage"
             :prompt="params.hires.prompt ?? ''"
             :negative-prompt="params.hires.negativePrompt ?? ''"
             :supports-negative="supportsNegative"
@@ -230,6 +336,7 @@ Symbols (top-level; keep in sync; no ghosts):
             :refinerCfg="showHiresRefiner ? params.hires.refiner?.cfg : undefined"
             :refinerModel="showHiresRefiner ? params.hires.refiner?.model : undefined"
             :refinerModelChoices="showHiresRefiner ? swapModelChoices : undefined"
+            :refinerMaxSteps="showHiresRefiner ? Math.max(1, (params.hires.steps > 0 ? params.hires.steps : params.steps) - 1) : undefined"
             :guidanceAdvanced="params.guidanceAdvanced"
             :guidanceSupport="guidanceAdvancedSupport"
             @update:enabled="(v) => setHires({ enabled: v })"
@@ -239,7 +346,7 @@ Symbols (top-level; keep in sync; no ghosts):
             @update:cfg="onHiresCfgChange"
             @update:resizeX="(v) => setHires({ resizeX: Math.max(0, Math.trunc(v)) })"
             @update:resizeY="(v) => setHires({ resizeY: Math.max(0, Math.trunc(v)) })"
-            @update:checkpoint="(v) => setHires({ checkpoint: String(v || '').trim() || undefined })"
+            @update:swapModel="setHiresSwapModel"
             @update:prompt="(v) => setHires({ prompt: String(v || '') })"
             @update:negativePrompt="(v) => setHires({ negativePrompt: String(v || '') })"
             @update:sampler="onHiresSamplerChange"
@@ -258,6 +365,7 @@ Symbols (top-level; keep in sync; no ghosts):
             v-if="showGlobalRefiner"
             :enabled="params.refiner.enabled"
             :swapAtStep="params.refiner.swapAtStep"
+            :maxSteps="Math.max(1, params.steps - 1)"
             :cfg="params.refiner.cfg"
             :model="params.refiner.model"
             :modelChoices="swapModelChoices"
@@ -284,11 +392,14 @@ Symbols (top-level; keep in sync; no ghosts):
         :generateLabel="generateLabel"
         :generateDisabled="runGenerateDisabled"
         :generateTitle="runGenerateTitle"
+        :actionMode="params.runAction"
+        :showActionMenu="!xyzStore.enabled"
         :isRunning="isRunBusy"
-        :showBatchControls="true"
+        :showBatchControls="!usesImageAutomation"
         :batchCount="params.batchCount"
         :batchSize="params.batchSize"
         :disabled="isRunBusy"
+        @update:actionMode="setRunAction"
         @generate="onGenerate"
         @cancel="onCancelRun"
         @update:batchCount="(v) => setParams({ batchCount: Math.max(1, Math.trunc(v)) })"
@@ -332,9 +443,9 @@ Symbols (top-level; keep in sync; no ghosts):
         <RunSummaryChips :text="runSummary" />
       </RunCard>
 
-      <ResultsCard :showGenerate="false" headerClass="three-cols" headerRightClass="results-header-actions">
+      <GenerationResultsPanel showHistory :showInfo="Boolean(info)">
         <template #header-right>
-          <div class="gentime-display" v-if="gentimeSeconds !== null">
+          <div v-if="gentimeSeconds !== null">
             <span class="caption">Time: {{ gentimeSeconds.toFixed(2) }}s</span>
           </div>
           <button class="btn btn-sm btn-outline" type="button" :disabled="workflowBusy" @click="sendToWorkflows">
@@ -343,134 +454,84 @@ Symbols (top-level; keep in sync; no ghosts):
           <button class="btn btn-sm btn-outline" type="button" @click="copyCurrentParams">Copy params</button>
         </template>
 
-        <div class="gen-card mb-3">
-          <WanSubHeader title="History">
-            <button class="btn btn-sm btn-ghost" type="button" title="Clear history" :disabled="!history.length || isRunning" @click="clearHistory">Clear</button>
-          </WanSubHeader>
-          <div v-if="history.length" class="cdx-history-list">
-            <button
-              v-for="item in history"
-              :key="item.taskId"
-              type="button"
-              :class="['cdx-history-item', { 'is-selected': item.taskId === selectedTaskId }]"
-              :aria-label="`Open history details for ${formatHistoryTitle(item)}`"
-              @click="openHistoryDetails(item)"
-            >
-              <img
-                v-if="item.thumbnail"
-                class="cdx-history-thumb"
-                :src="toDataUrl(item.thumbnail)"
-                :alt="formatHistoryTitle(item)"
-                loading="lazy"
+        <template #history-actions>
+          <button class="btn btn-sm btn-ghost" type="button" title="Clear history" :disabled="!history.length || isRunning" @click="clearHistory">Clear</button>
+        </template>
+
+        <template #history>
+          <ResultsHistoryStrip
+            :items="history"
+            :selectedTaskId="selectedTaskId"
+            :formatTitle="formatHistoryTitle"
+            :toDataUrl="toDataUrl"
+            @select="onSelectImageHistoryItem"
+          />
+        </template>
+
+        <template #viewer>
+          <ResultViewer
+            mode="image"
+            :images="images"
+            :previewImage="previewImage"
+            :previewCaption="previewCaption"
+            :isRunning="isRunning"
+            :width="params.width"
+            :height="params.height"
+            :emptyText="resultsEmptyText"
+          >
+            <template #empty>
+              <div class="results-empty-state">
+                <div class="results-empty-title">
+                  <template v-if="isRunning">{{ resultsEmptyText }}</template>
+                  <template v-else>No images yet</template>
+                </div>
+                <div v-if="!isRunning" class="caption">Generate to see results here.</div>
+              </div>
+            </template>
+            <template #image-actions="{ image, index }">
+              <button
+                v-if="supportsImg2Img"
+                class="gallery-action"
+                type="button"
+                title="Send to Img2Img"
+                @click="sendToImg2Img(image)"
               >
-              <div v-else class="cdx-history-thumb cdx-history-thumb--empty">
-                <span>No preview</span>
-              </div>
-            </button>
-          </div>
-          <div v-else class="caption">No runs yet.</div>
-        </div>
+                Send to Img2Img
+              </button>
+              <button class="gallery-action" type="button" title="Download Image" @click="download(image, index)">
+                Download
+              </button>
+            </template>
+          </ResultViewer>
+        </template>
 
-        <ResultViewer
-          mode="image"
-          :images="images"
-          :previewImage="previewImage"
-          :previewCaption="previewCaption"
-          :isRunning="isRunning"
-          :width="params.width"
-          :height="params.height"
-          :emptyText="resultsEmptyText"
-        >
-          <template #empty>
-            <div class="wan-results-empty">
-              <div class="wan-empty-title">
-                <template v-if="isRunning">{{ resultsEmptyText }}</template>
-                <template v-else>No images yet</template>
-              </div>
-              <div v-if="!isRunning" class="caption">Generate to see results here.</div>
-            </div>
-          </template>
-          <template #image-actions="{ image, index }">
-            <button
-              v-if="supportsImg2Img"
-              class="gallery-action"
-              type="button"
-              title="Send to Img2Img"
-              @click="sendToImg2Img(image)"
-            >
-              Send to Img2Img
-            </button>
-            <button class="gallery-action" type="button" title="Download Image" @click="download(image, index)">
-              Download
-            </button>
-          </template>
-        </ResultViewer>
-      </ResultsCard>
-
-      <div class="panel" v-if="info">
-        <div class="panel-header">Generation Info</div>
-        <div class="panel-body">
+        <template #info>
           <pre class="text-xs break-words">{{ formatJson(info) }}</pre>
-        </div>
-      </div>
+        </template>
+      </GenerationResultsPanel>
     </div>
 
-    <Modal v-model="historyDetailsOpen" :title="historyDetailsTitle">
-      <div v-if="historyDetailsItem" class="cdx-history-modal">
-        <div class="cdx-history-modal__top">
-          <img
-            v-if="historyDetailsImageUrl"
-            class="cdx-history-modal__preview"
-            :src="historyDetailsImageUrl"
-            :alt="historyDetailsTitle"
-          >
-          <div v-else class="cdx-history-modal__preview cdx-history-modal__preview--empty">No preview</div>
-          <div class="cdx-history-modal__meta">
-            <div class="cdx-history-modal__meta-row"><span>Mode</span><strong>{{ historyDetailsModeLabel }}</strong></div>
-            <div class="cdx-history-modal__meta-row"><span>Created</span><strong>{{ historyDetailsCreatedAtLabel }}</strong></div>
-            <div class="cdx-history-modal__meta-row"><span>Status</span><strong>{{ historyDetailsItem.status }}</strong></div>
-            <div class="cdx-history-modal__meta-row"><span>Task</span><code>{{ historyDetailsItem.taskId }}</code></div>
-          </div>
-        </div>
-
-        <div class="cdx-history-modal__section">
-          <p class="label-muted">Summary</p>
-          <p class="cdx-history-modal__summary">{{ historyDetailsItem.summary }}</p>
-        </div>
-
-        <div v-if="historyDetailsPrompt" class="cdx-history-modal__section">
-          <p class="label-muted">Prompt</p>
-          <pre class="text-xs break-words">{{ historyDetailsPrompt }}</pre>
-        </div>
-        <div v-if="historyDetailsNegativePrompt" class="cdx-history-modal__section">
-          <p class="label-muted">Negative Prompt</p>
-          <pre class="text-xs break-words">{{ historyDetailsNegativePrompt }}</pre>
-        </div>
-        <div v-if="historyDetailsItem.errorMessage" class="cdx-history-modal__section">
-          <p class="label-muted">Error</p>
-          <pre class="text-xs break-words">{{ historyDetailsItem.errorMessage }}</pre>
-        </div>
-        <details class="accordion">
-          <summary>Params snapshot</summary>
-          <div class="accordion-body">
-            <pre class="text-xs break-words">{{ formatJson(historyDetailsItem.paramsSnapshot) }}</pre>
-          </div>
-        </details>
-      </div>
-      <template #footer>
-        <button
-          class="btn btn-sm btn-secondary"
-          type="button"
-          :disabled="!historyDetailsItem || isRunning || historyLoadingTaskId === historyDetailsItem.taskId"
-          @click="onLoadHistoryDetails"
-        >
-          {{ historyDetailsItem && historyLoadingTaskId === historyDetailsItem.taskId ? 'Loading…' : 'Load' }}
-        </button>
-        <button class="btn btn-sm btn-outline" type="button" :disabled="!historyDetailsItem || isRunning" @click="onApplyHistoryDetails">Apply</button>
-        <button class="btn btn-sm btn-outline" type="button" :disabled="!historyDetailsItem || isRunning" @click="onCopyHistoryDetails">Copy</button>
-        <button class="btn btn-sm btn-outline" type="button" @click="historyDetailsOpen = false">Close</button>
-      </template>
-    </Modal>
+    <RunHistoryDetailsModal
+      v-model="historyDetailsOpen"
+      :title="historyDetailsTitle"
+      :preview-url="historyDetailsImageUrl"
+      :preview-alt="historyDetailsTitle"
+      :mode-label="historyDetailsModeLabel"
+      :created-at-label="historyDetailsCreatedAtLabel"
+      :status="historyDetailsItem?.status || ''"
+      :task-id="historyDetailsItem?.taskId || ''"
+      :summary="historyDetailsItem?.summary || ''"
+      :error-message="historyDetailsItem?.errorMessage || ''"
+      :params-snapshot="historyDetailsItem?.paramsSnapshot"
+      :sections="historyDetailsSections"
+      :load-disabled="!historyDetailsItem || isRunning || historyLoadingTaskId === historyDetailsItem.taskId"
+      :load-label="historyDetailsItem && historyLoadingTaskId === historyDetailsItem.taskId ? 'Loading…' : 'Load'"
+      :apply-disabled="!historyDetailsItem || isRunning || Boolean(historyApplyingTaskId)"
+      :copy-disabled="!historyDetailsItem || isRunning"
+      @load="onLoadHistoryDetails"
+      @apply="onApplyHistoryDetails"
+      @copy="onCopyHistoryDetails"
+    />
   </section>
   <section v-else>
     <div class="panel"><div class="panel-body">Tab not found.</div></div>
@@ -480,50 +541,83 @@ Symbols (top-level; keep in sync; no ghosts):
 <script setup lang="ts">
 import { storeToRefs } from 'pinia'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { fetchPaths, fetchSamplers, fetchSchedulers } from '../api/client'
-import type { GeneratedImage, GuidanceAdvancedCapabilities, SamplerInfo, SchedulerInfo } from '../api/types'
-import { formatJson, useResultsCard } from '../composables/useResultsCard'
+import { fetchFreshModelInventory, fetchFreshPaths, fetchSamplers, fetchSchedulers, invalidateModelCatalogCaches } from '../api/client'
+import type {
+  GeneratedImage,
+  GuidanceAdvancedCapabilities,
+  SamplerInfo,
+  SchedulerInfo,
+} from '../api/types'
+import { useWorkflowSnapshotActions } from '../composables/useWorkflowSnapshotActions'
 import { resolveEngineForRequest, useGeneration, type ImageRunHistoryItem } from '../composables/useGeneration'
+import { resolveSupirSelectionState, useSupirDiagnostics } from '../composables/useSupirDiagnostics'
 import {
   defaultImageParamsForType,
+  normalizeSupirSamplerSelection,
   useModelTabsStore,
   type GuidanceAdvancedParams,
   type ImageBaseParams,
+  type ImageRunAction,
   type ImageTabType,
+  type SupirModeFormState,
   type TabByType,
 } from '../stores/model_tabs'
 import { getEngineConfig, getEngineDefaults } from '../stores/engine_config'
-import { useEngineCapabilitiesStore } from '../stores/engine_capabilities'
+import {
+  filterSamplersForFamilyCapabilities,
+  filterSchedulersForFamilyCapabilities,
+  filterSchedulersForSampler,
+  normalizeSamplerSchedulerSelection,
+  useEngineCapabilitiesStore,
+} from '../stores/engine_capabilities'
 import { useQuicksettingsStore } from '../stores/quicksettings'
 import { useBootstrapStore } from '../stores/bootstrap'
 import { useUpscalersStore } from '../stores/upscalers'
-import { useWorkflowsStore } from '../stores/workflows'
 import { useXyzStore } from '../stores/xyz'
-import { normalizeTabFamily } from '../utils/engine_taxonomy'
+import { isWanTabFamily, normalizeTabFamily } from '../utils/engine_taxonomy'
+import { buildExplicitImageRequestContract } from '../utils/image_request_contract'
 import { filterModelTitlesForFamily } from '../utils/model_family_filters'
-import { normalizeImg2ImgResizeMode } from '../utils/img2img_resize'
-import { normalizeInpaintingFill, normalizeMaskEnforcement, normalizeNonNegativeInt, resolveHiresModePolicy } from '../utils/image_params'
+import { buildFamilyVaeValidationChoices, canonicalizeVaeChoice, resolveInventoryVaeSha } from '../utils/vae_choices'
+import {
+  img2imgResizeModeOptionsForEngine,
+  normalizeImg2ImgResizeModeForEngine,
+} from '../utils/img2img_resize'
+import {
+  normalizeInpaintMaskToggleState,
+  normalizeInpaintingFill,
+  parseInpaintMode,
+  normalizeNonNegativeInt,
+  resolveHiresModePolicy,
+} from '../utils/image_params'
+import { readFileAsDataURL, readImageDimensions } from '../utils/image_io'
 import BasicParametersCard from '../components/BasicParametersCard.vue'
 import HiresSettingsCard from '../components/HiresSettingsCard.vue'
 import Img2ImgBasicParametersCard from '../components/Img2ImgBasicParametersCard.vue'
-import Img2ImgInpaintParamsCard from '../components/Img2ImgInpaintParamsCard.vue'
+import InitialImageBlock from '../components/InitialImageBlock.vue'
+import IpAdapterCard from '../components/IpAdapterCard.vue'
+import RunHistoryDetailsModal from '../components/modals/RunHistoryDetailsModal.vue'
 import PromptCard from '../components/prompt/PromptCard.vue'
 import RefinerSettingsCard from '../components/RefinerSettingsCard.vue'
-import WanSubHeader from '../components/wan/WanSubHeader.vue'
+import SupirModeCard from '../components/SupirModeCard.vue'
+import SwapStageSettingsCard from '../components/SwapStageSettingsCard.vue'
 import ResultViewer from '../components/ResultViewer.vue'
-import ResultsCard from '../components/results/ResultsCard.vue'
+import GenerationResultsPanel from '../components/results/GenerationResultsPanel.vue'
+import ResultsHistoryStrip from '../components/results/ResultsHistoryStrip.vue'
 import RunCard from '../components/results/RunCard.vue'
 import RunProgressStatus from '../components/results/RunProgressStatus.vue'
 import RunSummaryChips from '../components/results/RunSummaryChips.vue'
 import XyzSweepCard from '../components/XyzSweepCard.vue'
-import Modal from '../components/ui/Modal.vue'
 
 const props = defineProps<{ tabId: string; type: ImageTabType }>()
+type IpAdapterPatch = Partial<Omit<ImageBaseParams['ipAdapter'], 'source'>> & {
+  source?: Partial<ImageBaseParams['ipAdapter']['source']>
+}
+type SupirPatch = Partial<ImageBaseParams['supir']>
+
 const store = useModelTabsStore()
 const engineCaps = useEngineCapabilitiesStore()
 const quicksettingsStore = useQuicksettingsStore()
 const bootstrap = useBootstrapStore()
-const workflows = useWorkflowsStore()
 const upscalersStore = useUpscalersStore()
 const xyzStore = useXyzStore()
 const { upscalers, loading: upscalersLoading, error: upscalersError, minTile } = storeToRefs(upscalersStore)
@@ -551,21 +645,28 @@ const {
   resumeNotice,
 } = useGeneration(props.tabId)
 
-const modelPaths = ref<Record<string, string[]>>({})
 const samplers = ref<SamplerInfo[]>([])
 const schedulers = ref<SchedulerInfo[]>([])
 const historyDetailsOpen = ref(false)
 const historyDetailsItem = ref<ImageRunHistoryItem | null>(null)
+const historyApplyingTaskId = ref('')
+const { ensureSupirDiagnosticsLoaded } = useSupirDiagnostics()
+const ASSET_RESTORE_SUPERSEDED_ERROR = 'A newer image asset restore/apply operation superseded this one.'
+
+function onSelectImageHistoryItem(item: { taskId: string }): void {
+  const match = history.value.find((entry) => entry.taskId === item.taskId)
+  if (!match) return
+  openHistoryDetails(match)
+}
 
 onMounted(() => {
   bootstrap
     .runRequired('Failed to initialize image tab controls', async () => {
       await upscalersStore.load({ refresh: true })
       await quicksettingsStore.init()
-      const [samp, sched, pathRes] = await Promise.all([fetchSamplers(), fetchSchedulers(), fetchPaths()])
+      const [samp, sched] = await Promise.all([fetchSamplers(), fetchSchedulers()])
       samplers.value = samp.samplers
       schedulers.value = sched.schedulers
-      modelPaths.value = (pathRes.paths || {}) as Record<string, string[]>
     })
     .catch(() => {
       // Fatal state is already set by bootstrap store.
@@ -576,8 +677,28 @@ onBeforeUnmount(() => {
   stopStream()
 })
 
-const workflowBusy = ref(false)
-const { notice: copyNotice, toast, copyJson } = useResultsCard()
+const workflowParamsSnapshot = computed<Record<string, unknown> | null>(() => {
+  const currentTab = tab.value
+  if (!currentTab) return null
+  const familyOwnedVae = String(quicksettingsStore.getVaeForFamily(props.type) || '').trim()
+  return {
+    ...(currentTab.params as unknown as Record<string, unknown>),
+    vae: familyOwnedVae,
+  }
+})
+
+const {
+  notice: copyNotice,
+  toast,
+  copyJson,
+  formatJson,
+  workflowBusy,
+  sendToWorkflows,
+  copyCurrentParams,
+} = useWorkflowSnapshotActions({
+  getTab: () => tab.value ?? null,
+  getWorkflowParamsSnapshot: () => workflowParamsSnapshot.value,
+})
 type ImageTab = TabByType<ImageTabType>
 
 const historyDetailsTitle = computed(() => (historyDetailsItem.value ? formatHistoryTitle(historyDetailsItem.value) : 'History details'))
@@ -606,6 +727,10 @@ const historyDetailsNegativePrompt = computed(() => {
   if (!item) return ''
   return readHistorySnapshotText(item, 'negativePrompt')
 })
+const historyDetailsSections = computed(() => [
+  { key: 'prompt', label: 'Prompt', text: historyDetailsPrompt.value },
+  { key: 'negativePrompt', label: 'Negative Prompt', text: historyDetailsNegativePrompt.value },
+])
 
 watch(
   resumeNotice,
@@ -620,7 +745,7 @@ watch(
 
 const imageTab = computed<ImageTab | null>(() => {
   const candidate = tab.value
-  if (!candidate || candidate.type === 'wan') return null
+  if (!candidate || isWanTabFamily(candidate.type) || candidate.type === 'ltx2') return null
   return candidate as unknown as ImageTab
 })
 const fallbackParams = computed<ImageBaseParams>(() => defaultImageParamsForType(props.type))
@@ -631,23 +756,23 @@ const initImageNaturalHeight = ref(0)
 const initImageDimsToken = ref(0)
 
 const maskEditorImageWidth = computed(() => {
-  if (!String(params.value.initImageData || '').trim()) return params.value.width
+  if (!String(params.value.initImageData || '').trim()) return 0
   const w = Math.trunc(Number(initImageNaturalWidth.value))
-  return Number.isFinite(w) && w > 0 ? w : params.value.width
+  return Number.isFinite(w) && w > 0 ? w : 0
 })
 const maskEditorImageHeight = computed(() => {
-  if (!String(params.value.initImageData || '').trim()) return params.value.height
+  if (!String(params.value.initImageData || '').trim()) return 0
   const h = Math.trunc(Number(initImageNaturalHeight.value))
-  return Number.isFinite(h) && h > 0 ? h : params.value.height
+  return Number.isFinite(h) && h > 0 ? h : 0
 })
 
 watch(
   () => String(params.value.initImageData || '').trim(),
   (src) => {
     const token = (initImageDimsToken.value += 1)
+    initImageNaturalWidth.value = 0
+    initImageNaturalHeight.value = 0
     if (!src) {
-      initImageNaturalWidth.value = 0
-      initImageNaturalHeight.value = 0
       return
     }
 
@@ -687,19 +812,61 @@ watch(
 
 const engineConfig = computed(() => getEngineConfig(props.type))
 const resolvedEngineForMode = computed(() => resolveEngineForRequest(props.type, Boolean(params.value.useInitImage)))
+const imageDimensionInputStep = computed(() => resolvedEngineForMode.value === 'zimage' ? 16 : 8)
+const imageDimensionSliderStep = computed(() => resolvedEngineForMode.value === 'zimage' ? 16 : 64)
+const img2imgResizeModeOptions = computed(() => img2imgResizeModeOptionsForEngine(resolvedEngineForMode.value))
 const engineSurface = computed(() => engineCaps.get(resolvedEngineForMode.value))
+const availableInpaintModes = computed(() => engineCaps.getInpaintModes(resolvedEngineForMode.value))
+const availableInpaintModeOptions = computed(() =>
+  availableInpaintModes.value.map((value) => ({
+    value: value as ImageBaseParams['inpaintMode'],
+    label: {
+      per_step_blend: 'Per-step blend',
+      post_sample_blend: 'Post-sample blend',
+      fooocus_inpaint: 'Fooocus Inpaint',
+      brushnet: 'BrushNet',
+    }[value] ?? value,
+  })),
+)
 const guidanceAdvancedSupport = computed<GuidanceAdvancedCapabilities | null>(() => {
   const guidance = engineSurface.value?.guidance_advanced
   return guidance ?? null
 })
 const familyCapabilities = computed(() => engineCaps.getFamilyForEngine(resolvedEngineForMode.value))
+const activeInpaintDependencyMode = computed(() => (
+  params.value.useInitImage && params.value.useMask && params.value.initSource.mode === 'img'
+    ? params.value.inpaintMode
+    : null
+))
 const dependencyStatus = computed(() => engineCaps.getDependencyStatus(resolvedEngineForMode.value))
-const dependencyError = computed(() => engineCaps.firstDependencyError(resolvedEngineForMode.value))
-const dependencyReady = computed(() => Boolean(dependencyStatus.value?.ready))
+const dependencyError = computed(() => engineCaps.firstDependencyError(resolvedEngineForMode.value, {
+  inpaintMode: activeInpaintDependencyMode.value,
+}))
+const dependencyReady = computed(() => engineCaps.isDependencyReady(resolvedEngineForMode.value, {
+  inpaintMode: activeInpaintDependencyMode.value,
+}))
 
 const zimageTurbo = computed(() => props.type === 'zimage' ? Boolean(params.value.zimageTurbo ?? true) : false)
-const supportsNegative = computed(() => Boolean(familyCapabilities.value?.supports_negative_prompt))
+const flux2Variant = computed(() => (
+  props.type === 'flux2'
+    ? quicksettingsStore.resolveFlux2CheckpointVariant(String(params.value.checkpoint || '').trim())
+    : null
+))
+const fallbackRequestGuidanceMode = computed<'cfg' | 'distilled_cfg'>(() => (
+  Boolean(engineConfig.value.capabilities.usesDistilledCfg) && !Boolean(engineConfig.value.capabilities.usesCfg)
+    ? 'distilled_cfg'
+    : 'cfg'
+))
+const usesDistilledCfgModel = computed(() => {
+  if (props.type === 'flux2') return flux2Variant.value === 'distilled'
+  return Boolean(engineConfig.value.capabilities.usesDistilledCfg) && !engineConfig.value.capabilities.usesCfg
+})
+const supportsNegative = computed(() => {
+  if (!familyCapabilities.value?.supports_negative_prompt) return false
+  return !usesDistilledCfgModel.value
+})
 const hideNegativePrompt = computed(() => {
+  if (!supportsNegative.value) return true
   const cfg = Number(params.value.cfgScale)
   return Number.isFinite(cfg) && cfg <= 1
 })
@@ -716,16 +883,50 @@ const supportsImg2Img = computed(() => {
 const canGenerateForCurrentMode = computed(() =>
   dependencyReady.value
   && Boolean(familyCapabilities.value)
+  && filteredSamplers.value.length > 0
+  && filteredSchedulers.value.length > 0
   && (params.value.useInitImage ? supportsImg2Img.value : supportsTxt2Img.value),
 )
+const assetContractBlockingReason = computed(() => {
+  const checkpoint = String(params.value.checkpoint || '').trim()
+  if (!checkpoint) return 'Select a checkpoint to generate.'
+  const familyOwnedVae = String(quicksettingsStore.getVaeForFamily(props.type) || '').trim()
+  try {
+    buildExplicitImageRequestContract({
+      modelLabel: checkpoint,
+      engineKey: resolvedEngineForMode.value,
+      textEncoderLabels: params.value.textEncoders,
+      selectedVaeLabel: familyOwnedVae,
+      zimageTurbo: resolvedEngineForMode.value === 'zimage'
+        ? Boolean((params.value as unknown as Record<string, unknown>).zimageTurbo ?? true)
+        : false,
+      fallbackGuidanceMode: fallbackRequestGuidanceMode.value,
+      resolvers: {
+        requireModelInfo: quicksettingsStore.requireModelInfo,
+        resolveFlux2CheckpointVariant: quicksettingsStore.resolveFlux2CheckpointVariant,
+        resolveTextEncoderSha: quicksettingsStore.resolveTextEncoderSha,
+        resolveTextEncoderSlot: quicksettingsStore.resolveTextEncoderSlot,
+        requireVaeSelection: quicksettingsStore.requireVaeSelection,
+        resolveVaeSha: quicksettingsStore.resolveVaeSha,
+        getAssetContract: engineCaps.getAssetContract,
+      },
+    })
+    return ''
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
+})
 const generateDisabledReason = computed(() => {
   if (isRunning.value) return ''
   if (!dependencyStatus.value) return `Dependency checks for '${resolvedEngineForMode.value}' are not available.`
-  if (!dependencyStatus.value.ready) return dependencyError.value || `Dependencies for '${resolvedEngineForMode.value}' are not ready.`
+  if (!dependencyReady.value) return dependencyError.value || `Dependencies for '${resolvedEngineForMode.value}' are not ready.`
   if (!engineSurface.value) return `Capabilities for '${resolvedEngineForMode.value}' are not loaded.`
   if (!familyCapabilities.value) return `Family capabilities for '${resolvedEngineForMode.value}' are not loaded.`
   if (params.value.useInitImage && !supportsImg2Img.value) return `${engineConfig.value.label} does not support img2img.`
   if (!params.value.useInitImage && !supportsTxt2Img.value) return `${engineConfig.value.label} does not support txt2img.`
+  if (assetContractBlockingReason.value) return assetContractBlockingReason.value
+  if (filteredSamplers.value.length === 0) return `${engineConfig.value.label} has no family-compatible samplers available.`
+  if (filteredSchedulers.value.length === 0) return `${engineConfig.value.label} has no family-compatible schedulers available.`
   return ''
 })
 const xyzSamplerChoices = computed(() => filteredSamplers.value.map((entry) => entry.name))
@@ -733,33 +934,147 @@ const xyzSchedulerChoices = computed(() => filteredSchedulers.value.map((entry) 
 const xyzRunning = computed(() => xyzStore.status === 'running')
 const isRunBusy = computed(() => isRunning.value || xyzRunning.value)
 const generateLabel = 'Generate'
+const supportsImg2ImgMasking = computed(() => Boolean(engineSurface.value?.supports_img2img_masking))
+const usesImageAutomation = computed(() => (
+  params.value.runAction === 'infinite'
+  || (params.value.useInitImage && params.value.initSource.mode === 'dir')
+  || (params.value.ipAdapter.enabled && params.value.ipAdapter.source.mode === 'dir')
+))
+const ipAdapterSupported = computed(() => {
+  if (engineSurface.value) return Boolean(engineSurface.value.supports_ip_adapter)
+  return props.type === 'sd15' || props.type === 'sdxl'
+})
+const toInventoryChoiceLabel = (value: string): string => {
+  const normalized = String(value || '').trim().replace(/\\/g, '/')
+  if (!normalized) return ''
+  return normalized.split('/').filter(Boolean).pop() || normalized
+}
+const ipAdapterModelChoices = computed(() => quicksettingsStore.ipAdapterModelChoices.map((value) => ({
+  value,
+  label: toInventoryChoiceLabel(value),
+})))
+const ipAdapterImageEncoderChoices = computed(() => quicksettingsStore.ipAdapterImageEncoderChoices.map((value) => ({
+  value,
+  label: toInventoryChoiceLabel(value),
+})))
+const supirEnabled = computed(() => Boolean(params.value.supir.enabled))
+const supportsSupirModeSurface = computed(() => (
+  props.type === 'sdxl'
+  && Boolean(engineSurface.value?.supports_supir_mode)
+))
+const showSupirModeCard = computed(() => supportsSupirModeSurface.value && params.value.useInitImage)
+const supirSelectionState = computed(() => resolveSupirSelectionState({
+  supported: supportsSupirModeSurface.value,
+  selectedVariant: params.value.supir.variant,
+  selectedSampler: params.value.supir.sampler,
+  guidanceAdvancedEnabled: params.value.guidanceAdvanced.enabled,
+}))
+const supirVariantChoices = computed(() => supirSelectionState.value.variantChoices)
+const supirSamplerChoices = computed(() => supirSelectionState.value.samplerChoices)
+const supirSelectionValid = computed(() => supirSelectionState.value.selectionValid)
+const supirSelectedSamplerInfo = computed(() => supirSelectionState.value.selectedSamplerInfo)
+const supirBlockingReason = computed(() => (
+  supportsSupirModeSurface.value ? supirSelectionState.value.blockingReason : ''
+))
+
+function getSupirRestoreBlockingReason(candidate: Pick<ImageBaseParams, 'useInitImage' | 'guidanceAdvanced' | 'supir'>): string {
+  if (!candidate.supir.enabled) return ''
+  if (!candidate.useInitImage) return 'SUPIR mode requires Img2Img/Inpaint mode.'
+  if (!supportsSupirModeSurface.value) return 'SUPIR mode is unavailable for the active engine.'
+  if (candidate.guidanceAdvanced.enabled) {
+    return 'SUPIR mode cannot be enabled while Advanced Guidance/APG is active. Disable Advanced Guidance first.'
+  }
+  return ''
+}
+
+const showIpAdapterCard = computed(() => !supirEnabled.value && (ipAdapterSupported.value || params.value.ipAdapter.enabled))
+const infiniteXyzConflict = computed(() => params.value.runAction === 'infinite' && xyzStore.enabled)
+const automationBatchConflict = computed(() => (
+  usesImageAutomation.value
+  && (params.value.batchCount !== 1 || params.value.batchSize !== 1)
+))
+const initFolderMissingPath = computed(() => (
+  Boolean(params.value.useInitImage)
+  && params.value.initSource.mode === 'dir'
+  && !String(params.value.initSource.folderPath || '').trim()
+))
+const dirInitMaskConflict = computed(() => (
+  Boolean(params.value.useInitImage)
+  && params.value.initSource.mode === 'dir'
+  && Boolean(params.value.useMask)
+))
+const ipAdapterBlockingReason = computed(() => {
+  if (!params.value.ipAdapter.enabled) return ''
+  if (!ipAdapterSupported.value) return `${engineConfig.value.label} does not support IP-Adapter.`
+  if (!String(params.value.ipAdapter.model || '').trim()) return 'Select an IP-Adapter model.'
+  if (!String(params.value.ipAdapter.imageEncoder || '').trim()) return 'Select an IP-Adapter image encoder.'
+  if (params.value.ipAdapter.source.mode === 'dir') {
+    if (!String(params.value.ipAdapter.source.folderPath || '').trim()) return 'IP-Adapter folder mode requires a folder path.'
+    return ''
+  }
+  if (params.value.ipAdapter.source.sameAsInit && !params.value.useInitImage) {
+    return 'Same as init image is only available for img2img runs.'
+  }
+  if (!params.value.ipAdapter.source.sameAsInit && !String(params.value.ipAdapter.source.referenceImageData || '').trim()) {
+    return 'Select an IP-Adapter reference image.'
+  }
+  return ''
+})
 const xyzProgressPercent = computed(() => {
   if (!xyzStore.progress.total) return null
   return (xyzStore.progress.completed / xyzStore.progress.total) * 100
 })
 const missingInpaintMask = computed(() =>
   Boolean(params.value.useInitImage)
+  && supportsImg2ImgMasking.value
+  && params.value.initSource.mode === 'img'
   && Boolean(params.value.useMask)
   && !String(params.value.maskImageData || '').trim(),
 )
+const unsupportedInpaintMode = computed(() =>
+  Boolean(params.value.useInitImage)
+  && Boolean(params.value.useMask)
+  && params.value.initSource.mode === 'img'
+  && !availableInpaintModes.value.includes(params.value.inpaintMode),
+)
+const unsupportedInpaintModeMessage = computed(() => {
+  if (!unsupportedInpaintMode.value) return ''
+  return `Inpaint mode '${String(params.value.inpaintMode)}' is not available for ${engineConfig.value.label}. Reselect a supported mode.`
+})
 const runGenerateDisabled = computed(() => {
   if (isRunBusy.value) return true
+  if (infiniteXyzConflict.value) return true
+  if (automationBatchConflict.value) return true
+  if (supirEnabled.value && supirBlockingReason.value) return true
+  if (assetContractBlockingReason.value) return true
   if (xyzStore.enabled) {
-    return !(dependencyReady.value && Boolean(familyCapabilities.value) && supportsTxt2Img.value)
+    return !(dependencyReady.value && Boolean(familyCapabilities.value) && supportsTxt2Img.value && filteredSamplers.value.length > 0 && filteredSchedulers.value.length > 0)
   }
+  if (initFolderMissingPath.value || dirInitMaskConflict.value || ipAdapterBlockingReason.value) return true
   if (missingInpaintMask.value) return true
+  if (unsupportedInpaintMode.value) return true
   return !canGenerateForCurrentMode.value
 })
 const runGenerateTitle = computed(() => {
   if (xyzRunning.value) return 'XYZ sweep is running.'
+  if (infiniteXyzConflict.value) return 'Infinite generate cannot run while XYZ is enabled.'
   if (!xyzStore.enabled) {
+    if (automationBatchConflict.value) return 'Image automation requires batch count = 1 and batch size = 1.'
+    if (initFolderMissingPath.value) return 'Initial image folder mode requires a folder path.'
+    if (dirInitMaskConflict.value) return 'Mask editing is only available while the initial image source is set to IMG.'
+    if (supirEnabled.value && supirBlockingReason.value) return supirBlockingReason.value
+    if (ipAdapterBlockingReason.value) return ipAdapterBlockingReason.value
     if (missingInpaintMask.value) return 'INPAINT is enabled but no mask is applied. Open the mask editor and apply a mask.'
+    if (unsupportedInpaintMode.value) return unsupportedInpaintModeMessage.value
     return generateDisabledReason.value
   }
   if (!dependencyStatus.value) return `Dependency checks for '${resolvedEngineForMode.value}' are not available.`
-  if (!dependencyStatus.value.ready) return dependencyError.value || `Dependencies for '${resolvedEngineForMode.value}' are not ready.`
+  if (!dependencyReady.value) return dependencyError.value || `Dependencies for '${resolvedEngineForMode.value}' are not ready.`
   if (!engineSurface.value) return `Capabilities for '${resolvedEngineForMode.value}' are not loaded.`
   if (!familyCapabilities.value) return `Family capabilities for '${resolvedEngineForMode.value}' are not loaded.`
+  if (assetContractBlockingReason.value) return assetContractBlockingReason.value
+  if (filteredSamplers.value.length === 0) return `${engineConfig.value.label} has no family-compatible samplers available.`
+  if (filteredSchedulers.value.length === 0) return `${engineConfig.value.label} has no family-compatible schedulers available.`
   if (!supportsTxt2Img.value) return `${engineConfig.value.label} does not support txt2img.`
   return ''
 })
@@ -771,13 +1086,13 @@ const toolbarLabel = computed(() => {
   return zimageTurbo.value ? 'Z Image Turbo' : 'Z Image Base'
 })
 
-const cfgLabel = computed(() => (engineConfig.value.capabilities.usesDistilledCfg ? 'Distilled CFG' : 'CFG'))
+const cfgLabel = computed(() => (usesDistilledCfgModel.value ? 'Distilled CFG' : 'CFG'))
 const showClipSkip = computed(() => Boolean(familyCapabilities.value?.shows_clip_skip))
 const minClipSkip = computed(() => 0)
 const swapModelChoices = computed(() => {
   const family = normalizeTabFamily(props.type)
-  if (!family || family === 'wan') return []
-  return filterModelTitlesForFamily(quicksettingsStore.models, family, modelPaths.value)
+  if (!family || isWanTabFamily(family)) return []
+  return filterModelTitlesForFamily(quicksettingsStore.models, family, quicksettingsStore.pathsConfigSnapshot)
 })
 
 const supportsHiresForEngine = computed(() => {
@@ -786,52 +1101,116 @@ const supportsHiresForEngine = computed(() => {
   if (!surf) return true
   return surf.supports_hires
 })
-const hiresModePolicy = computed(() => resolveHiresModePolicy(Boolean(params.value.useInitImage), supportsHiresForEngine.value))
-const showHires = computed(() => hiresModePolicy.value.showCard)
+const hiresModePolicy = computed(() => resolveHiresModePolicy(
+  Boolean(params.value.useInitImage),
+  supportsHiresForEngine.value,
+  Boolean(params.value.useMask),
+))
+const showHires = computed(() => !supirEnabled.value && hiresModePolicy.value.showCard)
 
-const showHiresRefiner = computed(() => !Boolean(params.value.useInitImage))
+const showGlobalSwapModel = computed(() => !Boolean(params.value.useInitImage))
 
-const showGlobalRefiner = computed(() => {
+const showHiresRefiner = computed(() => {
+  if (params.value.useInitImage) return false
   if (props.type === 'zimage') return false
   const surf = engineSurface.value
   if (!surf) return true
   return surf.supports_refiner
 })
 
-const filteredSamplers = computed(() => {
-  const allowed = engineSurface.value?.samplers as string[] | null | undefined
-  if (!allowed || allowed.length === 0) return samplers.value
-  return samplers.value.filter(s => allowed.includes(s.name))
+const showGlobalRefiner = computed(() => {
+  if (params.value.useInitImage) return false
+  if (props.type === 'zimage') return false
+  const surf = engineSurface.value
+  if (!surf) return true
+  return surf.supports_refiner
 })
 
-const activeSamplerSpec = computed(() => samplers.value.find(s => s.name === params.value.sampler) ?? null)
+function normalizeRecommendedList(values: string[] | null | undefined): string[] | null {
+  if (!Array.isArray(values)) return null
+  const normalized = Array.from(new Set(values
+    .map((value) => String(value || '').trim())
+    .filter((value) => value.length > 0)))
+  if (normalized.length === 0) return null
+  return normalized
+}
+
+const recommendedSamplers = computed(() =>
+  normalizeRecommendedList(engineSurface.value?.recommended_samplers),
+)
+
+const recommendedSchedulers = computed(() =>
+  normalizeRecommendedList(engineSurface.value?.recommended_schedulers),
+)
+
+function resolveLiveSamplingDefaults(): { sampler: string; scheduler: string } {
+  return engineCaps.resolveSamplingDefaults(resolvedEngineForMode.value) ?? { sampler: '', scheduler: '' }
+}
+
+function normalizeLiveSamplingSelection(rawSampler: string, rawScheduler: string): { sampler: string; scheduler: string } | null {
+  const defaults = resolveLiveSamplingDefaults()
+  return normalizeSamplerSchedulerSelection({
+    samplers: samplers.value,
+    schedulers: schedulers.value,
+    familyCapabilities: familyCapabilities.value,
+    sampler: rawSampler,
+    scheduler: rawScheduler,
+    preferredSamplers: [defaults.sampler],
+    preferredSchedulers: [defaults.scheduler],
+  })
+}
+
+const filteredSamplers = computed(() => {
+  return filterSamplersForFamilyCapabilities(samplers.value, familyCapabilities.value)
+})
+
+const normalizedBaseSampling = computed(() =>
+  normalizeLiveSamplingSelection(params.value.sampler, params.value.scheduler),
+)
+
+const activeSamplerSpec = computed(() => {
+  const normalized = normalizedBaseSampling.value
+  if (normalized) {
+    return filteredSamplers.value.find((entry) => entry.name === normalized.sampler) ?? null
+  }
+  return filteredSamplers.value.find((entry) => entry.name === params.value.sampler) ?? null
+})
 
 const filteredSchedulers = computed(() => {
-  let list = schedulers.value
-  const allowed = engineSurface.value?.schedulers as string[] | null | undefined
-  if (allowed && allowed.length > 0) list = list.filter(s => allowed.includes(s.name))
-  const allowedBySampler = activeSamplerSpec.value?.allowed_schedulers
-  if (Array.isArray(allowedBySampler) && allowedBySampler.length > 0) {
-    const set = new Set(allowedBySampler)
-    list = list.filter(s => set.has(s.name))
-  }
-  return list
+  const familyScoped = filterSchedulersForFamilyCapabilities(schedulers.value, familyCapabilities.value)
+  return filterSchedulersForSampler(familyScoped, activeSamplerSpec.value)
 })
 
 const hiresSampler = computed(() => {
+  const normalizedBase = normalizedBaseSampling.value
+  if (normalizedBase) {
+    const normalizedHires = normalizeLiveSamplingSelection(
+      String(params.value.hires.sampler || '').trim() || normalizedBase.sampler,
+      String(params.value.hires.scheduler || '').trim() || normalizedBase.scheduler,
+    )
+    if (normalizedHires) return normalizedHires.sampler
+  }
   const override = String(params.value.hires.sampler || '').trim()
   if (override) return override
   return params.value.sampler
 })
 
 const hiresScheduler = computed(() => {
+  const normalizedBase = normalizedBaseSampling.value
+  if (normalizedBase) {
+    const normalizedHires = normalizeLiveSamplingSelection(
+      String(params.value.hires.sampler || '').trim() || normalizedBase.sampler,
+      String(params.value.hires.scheduler || '').trim() || normalizedBase.scheduler,
+    )
+    if (normalizedHires) return normalizedHires.scheduler
+  }
   const override = String(params.value.hires.scheduler || '').trim()
   if (override) return override
   return params.value.scheduler
 })
 
 const hiresCfgValue = computed(() => {
-  if (engineConfig.value.capabilities.usesDistilledCfg) {
+  if (usesDistilledCfgModel.value) {
     const value = Number(params.value.hires.distilledCfg)
     if (Number.isFinite(value)) return value
     return params.value.cfgScale
@@ -842,61 +1221,158 @@ const hiresCfgValue = computed(() => {
 })
 
 const filteredHiresSchedulers = computed(() => {
-  let list = schedulers.value
-  const allowed = engineSurface.value?.schedulers as string[] | null | undefined
-  if (allowed && allowed.length > 0) list = list.filter((entry) => allowed.includes(entry.name))
-  const spec = samplers.value.find((entry) => entry.name === hiresSampler.value)
-  const allowedBySampler = spec?.allowed_schedulers
-  if (Array.isArray(allowedBySampler) && allowedBySampler.length > 0) {
-    const allowedSet = new Set(allowedBySampler)
-    list = list.filter((entry) => allowedSet.has(entry.name))
-  }
-  return list
+  const familyScoped = filterSchedulersForFamilyCapabilities(schedulers.value, familyCapabilities.value)
+  const spec = filteredSamplers.value.find((entry) => entry.name === hiresSampler.value) ?? null
+  return filterSchedulersForSampler(familyScoped, spec)
 })
 
+function normalizeXyzSamplingAxisText(axisParam: string, axisValuesText: string): string {
+  if (axisParam !== 'sampler' && axisParam !== 'scheduler') return axisValuesText
+  const choices = axisParam === 'sampler' ? xyzSamplerChoices.value : xyzSchedulerChoices.value
+  if (choices.length === 0) return ''
+  const allowed = new Set(choices)
+  const values = String(axisValuesText || '')
+    .split(/[\n\r,]+/g)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0 && allowed.has(entry))
+  const deduped = Array.from(new Set(values))
+  return deduped.join(', ')
+}
+
 function onSamplerChange(value: string): void {
-  const spec = samplers.value.find(s => s.name === value)
-  const scheduler = params.value.scheduler
-  if (spec && Array.isArray(spec.allowed_schedulers) && spec.allowed_schedulers.length > 0) {
-    if (!spec.allowed_schedulers.includes(scheduler)) {
-      setParams({ sampler: value, scheduler: spec.default_scheduler })
-      return
-    }
+  const normalized = normalizeLiveSamplingSelection(value, params.value.scheduler)
+  if (!normalized) {
+    setParams({ sampler: value })
+    return
   }
-  setParams({ sampler: value })
+  setParams({
+    sampler: normalized.sampler,
+    scheduler: normalized.scheduler,
+  })
 }
 
 function onHiresSamplerChange(value: string): void {
-  const spec = samplers.value.find((entry) => entry.name === value)
-  const currentScheduler = hiresScheduler.value
-  if (spec && Array.isArray(spec.allowed_schedulers) && spec.allowed_schedulers.length > 0) {
-    if (!spec.allowed_schedulers.includes(currentScheduler)) {
-      setHires({ sampler: value, scheduler: spec.default_scheduler })
-      return
-    }
+  const normalizedBase = normalizedBaseSampling.value
+  if (!normalizedBase) {
+    setHires({ sampler: value })
+    return
   }
-  setHires({ sampler: value })
+  const normalized = normalizeLiveSamplingSelection(value, hiresScheduler.value)
+  if (!normalized) {
+    setHires({ sampler: value })
+    return
+  }
+  setHires({
+    sampler: normalized.sampler === normalizedBase.sampler ? '' : normalized.sampler,
+    scheduler: normalized.scheduler === normalizedBase.scheduler ? '' : normalized.scheduler,
+  })
 }
 
 function onHiresSchedulerChange(value: string): void {
-  setHires({ scheduler: value })
+  const normalizedBase = normalizedBaseSampling.value
+  if (!normalizedBase) {
+    setHires({ scheduler: value })
+    return
+  }
+  const normalized = normalizeLiveSamplingSelection(hiresSampler.value, value)
+  if (!normalized) {
+    setHires({ scheduler: value })
+    return
+  }
+  setHires({
+    sampler: normalized.sampler === normalizedBase.sampler ? '' : normalized.sampler,
+    scheduler: normalized.scheduler === normalizedBase.scheduler ? '' : normalized.scheduler,
+  })
 }
 
 function onHiresCfgChange(value: number): void {
   const normalized = clampFloat(value, 0, 30)
-  if (engineConfig.value.capabilities.usesDistilledCfg) {
+  if (usesDistilledCfgModel.value) {
     setHires({ distilledCfg: normalized, cfg: undefined })
     return
   }
   setHires({ cfg: normalized, distilledCfg: undefined })
 }
 
-watch([() => params.value.sampler, () => params.value.scheduler, samplers], () => {
-  const spec = samplers.value.find(s => s.name === params.value.sampler)
-  if (!spec || !Array.isArray(spec.allowed_schedulers) || spec.allowed_schedulers.length === 0) return
-  if (spec.allowed_schedulers.includes(params.value.scheduler)) return
-  setParams({ scheduler: spec.default_scheduler })
+watch([() => params.value.sampler, () => params.value.scheduler, samplers, schedulers, familyCapabilities], () => {
+  const normalized = normalizeLiveSamplingSelection(params.value.sampler, params.value.scheduler)
+  if (!normalized) return
+  if (normalized.sampler === params.value.sampler && normalized.scheduler === params.value.scheduler) return
+  setParams({
+    sampler: normalized.sampler,
+    scheduler: normalized.scheduler,
+  })
 }, { immediate: true })
+
+watch(
+  [
+    () => params.value.sampler,
+    () => params.value.scheduler,
+    () => params.value.hires.sampler,
+    () => params.value.hires.scheduler,
+    samplers,
+    schedulers,
+    familyCapabilities,
+  ],
+  () => {
+    const normalizedBase = normalizeLiveSamplingSelection(params.value.sampler, params.value.scheduler)
+    if (!normalizedBase) return
+
+    const rawHiresSampler = String(params.value.hires.sampler || '').trim()
+    const rawHiresScheduler = String(params.value.hires.scheduler || '').trim()
+    if (!rawHiresSampler && !rawHiresScheduler) return
+
+    const normalizedHires = normalizeLiveSamplingSelection(
+      rawHiresSampler || normalizedBase.sampler,
+      rawHiresScheduler || normalizedBase.scheduler,
+    )
+    if (!normalizedHires) return
+
+    const nextSamplerOverride = normalizedHires.sampler === normalizedBase.sampler ? '' : normalizedHires.sampler
+    const nextSchedulerOverride = normalizedHires.scheduler === normalizedBase.scheduler ? '' : normalizedHires.scheduler
+    if (
+      nextSamplerOverride === params.value.hires.sampler
+      && nextSchedulerOverride === params.value.hires.scheduler
+    ) {
+      return
+    }
+    setHires({
+      sampler: nextSamplerOverride,
+      scheduler: nextSchedulerOverride,
+    })
+  },
+  { immediate: true },
+)
+
+watch(
+  [() => xyzStore.xParam, () => xyzStore.xValuesText, xyzSamplerChoices, xyzSchedulerChoices],
+  () => {
+    const normalized = normalizeXyzSamplingAxisText(xyzStore.xParam, xyzStore.xValuesText)
+    if (normalized === xyzStore.xValuesText) return
+    xyzStore.xValuesText = normalized
+  },
+  { immediate: true },
+)
+
+watch(
+  [() => xyzStore.yParam, () => xyzStore.yValuesText, xyzSamplerChoices, xyzSchedulerChoices],
+  () => {
+    const normalized = normalizeXyzSamplingAxisText(xyzStore.yParam, xyzStore.yValuesText)
+    if (normalized === xyzStore.yValuesText) return
+    xyzStore.yValuesText = normalized
+  },
+  { immediate: true },
+)
+
+watch(
+  [() => xyzStore.zParam, () => xyzStore.zValuesText, xyzSamplerChoices, xyzSchedulerChoices],
+  () => {
+    const normalized = normalizeXyzSamplingAxisText(xyzStore.zParam, xyzStore.zValuesText)
+    if (normalized === xyzStore.zValuesText) return
+    xyzStore.zValuesText = normalized
+  },
+  { immediate: true },
+)
 
 const promptText = computed({
   get: () => params.value.prompt,
@@ -924,6 +1400,26 @@ watch([supportsImg2Img, () => engineCaps.loaded], ([supported, capsLoaded]) => {
   })
 }, { immediate: true })
 
+watch([supportsImg2ImgMasking, () => params.value.useMask], ([supported, useMask]) => {
+  if (supported || !useMask) return
+  setParams({
+    useMask: false,
+    maskImageData: '',
+    maskImageName: '',
+  })
+}, { immediate: true })
+
+watch([availableInpaintModes, () => params.value.inpaintMode], ([modes, activeMode]) => {
+  if (!Array.isArray(modes) || modes.length === 0) return
+  if (modes.includes(activeMode)) return
+  if (params.value.perStepBlendStrength !== fallbackParams.value.perStepBlendStrength || params.value.perStepBlendSteps !== fallbackParams.value.perStepBlendSteps) {
+    setParams({
+      perStepBlendStrength: fallbackParams.value.perStepBlendStrength,
+      perStepBlendSteps: fallbackParams.value.perStepBlendSteps,
+    })
+  }
+}, { immediate: true })
+
 watch(() => hiresModePolicy.value.resetState, (shouldReset) => {
   if (!shouldReset) return
   if (!params.value.hires.enabled && !params.value.hires.refiner?.enabled) return
@@ -937,12 +1433,112 @@ watch(showGlobalRefiner, (show) => {
   setRefiner({ enabled: false })
 })
 
+watch(showGlobalSwapModel, (show) => {
+  if (show) return
+  if (!params.value.swapModel.enabled) return
+  setSwapModel({ enabled: false })
+})
+
+watch(showHiresRefiner, (show) => {
+  if (show) return
+  if (!params.value.hires.refiner?.enabled) return
+  setHiresRefiner({ enabled: false })
+})
+
 watch(
   () => params.value.useInitImage,
   (enabled, wasEnabled) => {
+    if (enabled && params.value.hires.swapModel?.model) {
+      setHires({ swapModel: undefined })
+    }
+    if (!enabled && params.value.ipAdapter.source.sameAsInit) {
+      setIpAdapterSource({ sameAsInit: false })
+    }
     if (!enabled || wasEnabled) return
     maybeApplyKontextDefaults()
   },
+)
+
+watch(
+  supportsSupirModeSurface,
+  (supported) => {
+    if (!supported) {
+      if (params.value.supir.enabled) {
+        setSupir({ enabled: false })
+      }
+      return
+    }
+    void ensureSupirDiagnosticsLoaded()
+  },
+  { immediate: true },
+)
+
+watch(
+  () => params.value.useInitImage,
+  (enabled) => {
+    if (enabled || !params.value.supir.enabled) return
+    setSupir({ enabled: false })
+  },
+)
+
+watch(
+  () => [
+    params.value.supir.enabled,
+    supirSelectionValid.value,
+    params.value.hires.enabled,
+    Boolean(params.value.hires.refiner?.enabled),
+    Boolean(params.value.hires.swapModel?.model),
+    params.value.ipAdapter.enabled,
+  ] as const,
+  ([enabled, selectionValid, hiresEnabled, hiresRefinerEnabled, hiresSwapModelEnabled, ipAdapterEnabled]) => {
+    if (!enabled || !selectionValid) return
+    const nextPatch: Partial<ImageBaseParams> = {}
+    let needsPatch = false
+    if (hiresEnabled || hiresRefinerEnabled || hiresSwapModelEnabled) {
+      nextPatch.hires = {
+        ...params.value.hires,
+        enabled: false,
+        swapModel: undefined,
+        refiner: params.value.hires.refiner
+          ? { ...params.value.hires.refiner, enabled: false }
+          : params.value.hires.refiner,
+      }
+      needsPatch = true
+    }
+    if (ipAdapterEnabled) {
+      nextPatch.ipAdapter = {
+        ...params.value.ipAdapter,
+        enabled: false,
+      }
+      needsPatch = true
+    }
+    if (needsPatch) {
+      setParams(nextPatch)
+    }
+  },
+  { immediate: true },
+)
+
+watch(
+  () => params.value.runAction,
+  (actionMode) => {
+    if (actionMode !== 'infinite') return
+    if (params.value.batchCount === 1 && params.value.batchSize === 1) return
+    setParams({ batchCount: 1, batchSize: 1 })
+  },
+  { immediate: true },
+)
+
+watch(
+  [() => xyzStore.enabled, () => params.value.runAction],
+  ([xyzEnabled, actionMode], previous) => {
+    if (!xyzEnabled || actionMode !== 'infinite') return
+    setRunAction('generate')
+    if (previous?.[0] === false) {
+      toast('XYZ uses Generate. Infinite was reset to Generate.')
+    }
+  },
+  { immediate: true },
 )
 
 const images = computed(() => gallery.value)
@@ -979,13 +1575,26 @@ const resolutionPresets = computed((): [number, number][] => {
 })
 
 const runSummary = computed(() => {
-  const sampler = params.value.sampler || engineSurface.value?.default_sampler || ''
-  const scheduler = params.value.scheduler || engineSurface.value?.default_scheduler || ''
+  const normalizedSampling = normalizeLiveSamplingSelection(params.value.sampler, params.value.scheduler)
+  const defaults = resolveLiveSamplingDefaults()
+  const sampler = normalizedSampling?.sampler || defaults.sampler
+  const scheduler = normalizedSampling?.scheduler || defaults.scheduler
   const seedLabel = params.value.seed === -1 ? 'seed random' : `seed ${params.value.seed}`
   return `${params.value.width}×${params.value.height} px · ${params.value.steps} steps · ${cfgLabel.value} ${params.value.cfgScale} · ${sampler} / ${scheduler} · ${seedLabel} · batch ${params.value.batchCount}×${params.value.batchSize}`
 })
 
-async function onGenerate(): Promise<void> {
+async function onGenerate(actionMode: ImageRunAction = params.value.runAction): Promise<void> {
+  if (actionMode !== params.value.runAction) {
+    setRunAction(actionMode)
+  }
+  if (infiniteXyzConflict.value) {
+    toast('Infinite generate cannot run while XYZ is enabled.')
+    return
+  }
+  if (unsupportedInpaintMode.value) {
+    toast(unsupportedInpaintModeMessage.value)
+    return
+  }
   if (xyzStore.enabled) {
     await xyzStore.run()
     return
@@ -1005,30 +1614,6 @@ async function onCancelRun(): Promise<void> {
   }
 }
 
-async function sendToWorkflows(): Promise<void> {
-  if (!tab.value) return
-  workflowBusy.value = true
-  try {
-    await workflows.createSnapshot({
-      name: `${tab.value.title} — ${new Date().toLocaleString()}`,
-      source_tab_id: tab.value.id,
-      type: tab.value.type,
-      engine_semantics: tab.value.type === 'wan' ? 'wan22' : tab.value.type,
-      params_snapshot: tab.value.params as Record<string, unknown>,
-    })
-    toast('Snapshot saved to Workflows.')
-  } catch (e) {
-    toast(e instanceof Error ? e.message : String(e))
-  } finally {
-    workflowBusy.value = false
-  }
-}
-
-async function copyCurrentParams(): Promise<void> {
-  if (!tab.value) return
-  await copyJson(tab.value.params, 'Copied params.')
-}
-
 async function copyHistoryParams(item: ImageRunHistoryItem): Promise<void> {
   await copyJson(item.paramsSnapshot, 'Copied history params.')
 }
@@ -1044,10 +1629,10 @@ async function onLoadHistoryDetails(): Promise<void> {
   await loadHistory(item.taskId)
 }
 
-function onApplyHistoryDetails(): void {
+async function onApplyHistoryDetails(): Promise<void> {
   const item = historyDetailsItem.value
   if (!item) return
-  applyHistory(item)
+  await applyHistory(item)
 }
 
 async function onCopyHistoryDetails(): Promise<void> {
@@ -1056,18 +1641,115 @@ async function onCopyHistoryDetails(): Promise<void> {
   await copyHistoryParams(item)
 }
 
-function applyHistory(item: ImageRunHistoryItem): void {
-  const snap = item.paramsSnapshot as Partial<ImageBaseParams>
-  setParams({
+async function applyHistory(item: ImageRunHistoryItem): Promise<void> {
+  if (historyApplyingTaskId.value) return
+  historyApplyingTaskId.value = item.taskId
+  const rawSnapshot = item.paramsSnapshot as Record<string, unknown>
+  const snapshotVae = typeof rawSnapshot.vae === 'string' ? rawSnapshot.vae.trim() : ''
+  let previousPersistedFamilyVae = ''
+  const { vae: _ignoredSnapshotVae, ...snapshotWithoutAssets } = rawSnapshot
+  const snap = snapshotWithoutAssets as Partial<ImageBaseParams>
+  const snapshotUseInitImage = Boolean(snap.useInitImage ?? (item.mode === 'img2img' || snap.supir?.enabled))
+  const snapshotUseMask = snapshotUseInitImage && Boolean(snap.useMask)
+  const snapshotGuidanceAdvanced = (snap.guidanceAdvanced && typeof snap.guidanceAdvanced === 'object')
+    ? normalizeGuidanceAdvancedPatch(snap.guidanceAdvanced, fallbackParams.value.guidanceAdvanced)
+    : fallbackParams.value.guidanceAdvanced
+  const rawSupir = (snap.supir && typeof snap.supir === 'object')
+    ? snap.supir as Partial<SupirModeFormState>
+    : null
+  const snapshotSupir: SupirModeFormState = rawSupir
+    ? {
+        ...fallbackParams.value.supir,
+        ...rawSupir,
+        sampler: normalizeSupirSamplerSelection(rawSupir.sampler, fallbackParams.value.supir.sampler),
+      }
+    : fallbackParams.value.supir
+  const nextPatch: Partial<ImageBaseParams> = {
     ...snap,
-    useInitImage: false,
+    useInitImage: snapshotUseInitImage,
     initImageData: '',
     initImageName: '',
-    useMask: false,
+    useMask: snapshotUseMask,
     maskImageData: '',
     maskImageName: '',
+    guidanceAdvanced: snapshotGuidanceAdvanced,
+    supir: snapshotSupir,
+  }
+  const blockingReason = getSupirRestoreBlockingReason({
+    useInitImage: snapshotUseInitImage,
+    guidanceAdvanced: snapshotGuidanceAdvanced,
+    supir: snapshotSupir,
   })
-  toast('Applied history params.')
+  if (blockingReason) {
+    toast(`Cannot apply history params: ${blockingReason}`)
+    historyApplyingTaskId.value = ''
+    return
+  }
+  let restoredFamilyVae = false
+  const snapshotEpoch = quicksettingsStore.bumpAssetSnapshotEpoch()
+  const assertSnapshotEpochCurrent = (): void => {
+    if (quicksettingsStore.getAssetSnapshotEpoch() !== snapshotEpoch) {
+      throw new Error(ASSET_RESTORE_SUPERSEDED_ERROR)
+    }
+  }
+  try {
+    if (snapshotVae) {
+      await quicksettingsStore.init()
+      assertSnapshotEpochCurrent()
+      previousPersistedFamilyVae = quicksettingsStore.getPersistedVaeForFamily(props.type)
+      invalidateModelCatalogCaches()
+      const inventory = await fetchFreshModelInventory()
+      const pathsConfig = (await fetchFreshPaths()).paths || {}
+      assertSnapshotEpochCurrent()
+      quicksettingsStore.hydrateVaeInventorySnapshot(inventory)
+      quicksettingsStore.hydratePathsSnapshot(pathsConfig)
+      invalidateModelCatalogCaches()
+      const canonicalVae = canonicalizeVaeChoice(
+        snapshotVae,
+        buildFamilyVaeValidationChoices(
+          props.type,
+          inventory.vaes,
+          pathsConfig,
+        ),
+        (label) => resolveInventoryVaeSha(label, inventory.vaes),
+      )
+      if (!canonicalVae || canonicalVae.reason === 'fallback') {
+        throw new Error(`History VAE '${snapshotVae}' is no longer available for '${props.type}'.`)
+      }
+      assertSnapshotEpochCurrent()
+      await quicksettingsStore.setVaeForFamily(props.type, canonicalVae.value, {
+        expectedAssetSnapshotEpoch: snapshotEpoch,
+      })
+      assertSnapshotEpochCurrent()
+      restoredFamilyVae = true
+    }
+    const normalizedPatch = normalizeImageParamPatch(nextPatch)
+    assertSnapshotEpochCurrent()
+    await store.updateParams(props.tabId, normalizedPatch as Partial<Record<string, unknown>>)
+    assertSnapshotEpochCurrent()
+    toast('Applied history params.')
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (message === ASSET_RESTORE_SUPERSEDED_ERROR) {
+      return
+    }
+    if (restoredFamilyVae && quicksettingsStore.getAssetSnapshotEpoch() === snapshotEpoch) {
+      try {
+        await quicksettingsStore.restoreVaeForFamilyOwner(props.type, previousPersistedFamilyVae, {
+          expectedAssetSnapshotEpoch: snapshotEpoch,
+        })
+      } catch (rollbackError) {
+        const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+        toast(`${message} VAE rollback failed for '${props.type}': ${rollbackMessage}`)
+        return
+      }
+    }
+    toast(message)
+  } finally {
+    if (historyApplyingTaskId.value === item.taskId) {
+      historyApplyingTaskId.value = ''
+    }
+  }
 }
 
 function formatHistoryTitle(item: { mode: string; createdAtMs: number; taskId: string }): string {
@@ -1087,6 +1769,7 @@ function readHistorySnapshotText(item: ImageRunHistoryItem, key: string): string
 
 function profileStorageKeyFor(type: ImageTabType): string {
   if (type === 'flux1') return 'codex.flux1.profile.v1'
+  if (type === 'flux2') return 'codex.flux2.profile.v1'
   if (type === 'sdxl') return 'codex.sdxl.profile.v1'
   if (type === 'zimage') return 'codex.zimage.profile'
   if (type === 'sd15') return 'codex.sd15.profile.v1'
@@ -1154,17 +1837,61 @@ function loadProfile(): void {
     const clipSkip = numberOrNull(snapshot.clipSkip); if (clipSkip !== null) next.clipSkip = Math.max(minClipSkip.value, Math.trunc(clipSkip))
     const batchSize = numberOrNull(snapshot.batchSize); if (batchSize !== null) next.batchSize = Math.max(1, Math.trunc(batchSize))
     const batchCount = numberOrNull(snapshot.batchCount); if (batchCount !== null) next.batchCount = Math.max(1, Math.trunc(batchCount))
-    if (snapshot.guidanceAdvanced && typeof snapshot.guidanceAdvanced === 'object') {
-      next.guidanceAdvanced = normalizeGuidanceAdvancedPatch(snapshot.guidanceAdvanced, params.value.guidanceAdvanced)
-    }
+    const snapshotGuidanceAdvanced = (snapshot.guidanceAdvanced && typeof snapshot.guidanceAdvanced === 'object')
+      ? normalizeGuidanceAdvancedPatch(snapshot.guidanceAdvanced, fallbackParams.value.guidanceAdvanced)
+      : fallbackParams.value.guidanceAdvanced
 
     const selectedModel = typeof snapshot.selectedModel === 'string' ? snapshot.selectedModel : ''
     const selectedSampler = typeof snapshot.selectedSampler === 'string' ? snapshot.selectedSampler : ''
     const selectedScheduler = typeof snapshot.selectedScheduler === 'string' ? snapshot.selectedScheduler : ''
+    const hasUseInitImage = Object.prototype.hasOwnProperty.call(snapshot, 'useInitImage')
+    const hasUseMask = Object.prototype.hasOwnProperty.call(snapshot, 'useMask')
+    const hasDenoiseStrength = Object.prototype.hasOwnProperty.call(snapshot, 'denoiseStrength')
+    const hasResizeMode = Object.prototype.hasOwnProperty.call(snapshot, 'img2imgResizeMode')
+    const hasUpscaler = Object.prototype.hasOwnProperty.call(snapshot, 'img2imgUpscaler')
+    const hasSupirSnapshot = Object.prototype.hasOwnProperty.call(snapshot, 'supir')
+    const denoiseStrength = numberOrNull(snapshot.denoiseStrength)
+    const supirSnapshot = (snapshot.supir && typeof snapshot.supir === 'object')
+      ? snapshot.supir as Partial<SupirModeFormState>
+      : null
+    const useInitImage = hasUseInitImage
+      ? Boolean(snapshot.useInitImage)
+      : Boolean(supirSnapshot?.enabled || params.value.useInitImage)
+    const useMask = useInitImage && (hasUseMask ? Boolean(snapshot.useMask) : params.value.useMask)
 
     if (selectedModel) next.checkpoint = selectedModel
     if (selectedSampler) next.sampler = selectedSampler
     if (selectedScheduler) next.scheduler = selectedScheduler
+    if (hasDenoiseStrength && denoiseStrength !== null) next.denoiseStrength = clampFloat(denoiseStrength, 0, 1)
+    if (hasResizeMode && typeof snapshot.img2imgResizeMode === 'string') next.img2imgResizeMode = snapshot.img2imgResizeMode as ImageBaseParams['img2imgResizeMode']
+    if (hasUpscaler && typeof snapshot.img2imgUpscaler === 'string') next.img2imgUpscaler = snapshot.img2imgUpscaler
+    if (hasUseInitImage || hasUseMask || hasSupirSnapshot) {
+      next.useInitImage = useInitImage
+      next.useMask = useMask
+      next.initImageData = ''
+      next.initImageName = ''
+      next.maskImageData = ''
+      next.maskImageName = ''
+    }
+    const snapshotSupir: SupirModeFormState = hasSupirSnapshot
+      ? {
+          ...fallbackParams.value.supir,
+          ...(supirSnapshot ?? {}),
+          sampler: normalizeSupirSamplerSelection(supirSnapshot?.sampler, fallbackParams.value.supir.sampler),
+        }
+      : fallbackParams.value.supir
+    next.guidanceAdvanced = snapshotGuidanceAdvanced
+    next.supir = snapshotSupir
+
+    const blockingReason = getSupirRestoreBlockingReason({
+      useInitImage: next.useInitImage ?? fallbackParams.value.useInitImage,
+      guidanceAdvanced: snapshotGuidanceAdvanced,
+      supir: snapshotSupir,
+    })
+    if (blockingReason) {
+      toast(`Cannot load saved profile: ${blockingReason}`)
+      return
+    }
 
     setParams(next)
     toast('Loaded saved profile.')
@@ -1191,6 +1918,12 @@ function saveProfile(): void {
       selectedModel: params.value.checkpoint,
       selectedSampler: params.value.sampler,
       selectedScheduler: params.value.scheduler,
+      useInitImage: params.value.useInitImage,
+      useMask: params.value.useMask,
+      denoiseStrength: params.value.denoiseStrength,
+      img2imgResizeMode: params.value.img2imgResizeMode,
+      img2imgUpscaler: params.value.img2imgUpscaler,
+      supir: params.value.supir,
     }
     localStorage.setItem(key, JSON.stringify(snapshot))
     toast('Profile saved.')
@@ -1201,9 +1934,18 @@ function saveProfile(): void {
 
 function setParams(patch: Partial<ImageBaseParams>): void {
   if (!tab.value) return
-  store.updateParams(props.tabId, patch as Partial<Record<string, unknown>>).catch((error) => {
+  const normalizedPatch = normalizeImageParamPatch(patch)
+  store.updateParams(props.tabId, normalizedPatch as Partial<Record<string, unknown>>).catch((error) => {
     toast(error instanceof Error ? error.message : String(error))
   })
+}
+
+function setRunAction(actionMode: ImageRunAction): void {
+  if (actionMode === 'infinite') {
+    setParams({ runAction: actionMode, batchCount: 1, batchSize: 1 })
+    return
+  }
+  setParams({ runAction: actionMode })
 }
 
 function setGuidanceAdvanced(patch: Partial<GuidanceAdvancedParams>): void {
@@ -1216,6 +1958,24 @@ function setGuidanceAdvanced(patch: Partial<GuidanceAdvancedParams>): void {
 
 function setHires(patch: Partial<ImageBaseParams['hires']>): void {
   setParams({ hires: { ...params.value.hires, ...patch } })
+}
+
+function setHiresSwapModel(value: string): void {
+  const model = String(value || '').trim()
+  setHires({ swapModel: model ? { model } : undefined })
+}
+
+function setSwapModel(patch: Partial<ImageBaseParams['swapModel']>): void {
+  const nextSwapModel = {
+    ...params.value.swapModel,
+    ...patch,
+  }
+  if (patch.enabled === true && !params.value.swapModel.enabled && patch.cfg === undefined) {
+    nextSwapModel.cfg = params.value.cfgScale
+  }
+  const swapAtStep = Number(nextSwapModel.swapAtStep)
+  nextSwapModel.swapAtStep = Number.isFinite(swapAtStep) && swapAtStep >= 1 ? Math.trunc(swapAtStep) : 1
+  setParams({ swapModel: nextSwapModel })
 }
 
 function setHiresRefiner(patch: Partial<NonNullable<ImageBaseParams['hires']['refiner']>>): void {
@@ -1240,6 +2000,87 @@ function setRefiner(patch: Partial<ImageBaseParams['refiner']>): void {
   setParams({ refiner: nextRefiner })
 }
 
+function setInitSource(patch: Partial<ImageBaseParams['initSource']>): void {
+  const nextInitSource = {
+    ...params.value.initSource,
+    ...patch,
+  }
+  const nextInitCount = Math.trunc(Number(nextInitSource.count))
+  nextInitSource.count = Number.isFinite(nextInitCount) && nextInitCount >= 1 ? nextInitCount : 1
+  const nextPatch: Partial<ImageBaseParams> = { initSource: nextInitSource }
+  if (nextInitSource.mode !== 'img') {
+    nextPatch.batchCount = 1
+    nextPatch.batchSize = 1
+    nextPatch.useMask = false
+    nextPatch.maskImageData = ''
+    nextPatch.maskImageName = ''
+    if (params.value.ipAdapter.source.sameAsInit) {
+      nextPatch.ipAdapter = {
+        ...params.value.ipAdapter,
+        source: {
+          ...params.value.ipAdapter.source,
+          sameAsInit: false,
+        },
+      }
+    }
+  }
+  setParams(nextPatch)
+}
+
+function normalizeSupirColorFix(value: unknown, fallback: SupirModeFormState['colorFix']): SupirModeFormState['colorFix'] {
+  return value === 'AdaIN' || value === 'Wavelet' || value === 'None' ? value : fallback
+}
+
+function setSupir(patch: SupirPatch): void {
+  const nextSupir: ImageBaseParams['supir'] = {
+    ...params.value.supir,
+    ...patch,
+  }
+  nextSupir.enabled = Boolean(nextSupir.enabled)
+  nextSupir.variant = nextSupir.variant === 'v0F' ? 'v0F' : 'v0Q'
+  nextSupir.sampler = String(nextSupir.sampler || '').trim()
+  nextSupir.controlScale = clampFloat(Number(nextSupir.controlScale), 0.01, 2)
+  nextSupir.restorationScale = clampFloat(Number(nextSupir.restorationScale), 0.01, 6)
+  nextSupir.restoreCfgSTmin = clampFloat(Number(nextSupir.restoreCfgSTmin), 0, 5)
+  nextSupir.colorFix = normalizeSupirColorFix(nextSupir.colorFix, params.value.supir.colorFix)
+  setParams({ supir: nextSupir })
+}
+
+function setIpAdapter(patch: IpAdapterPatch): void {
+  const nextSource = patch.source
+    ? {
+        ...params.value.ipAdapter.source,
+        ...patch.source,
+      }
+    : params.value.ipAdapter.source
+  const nextIpAdapter: ImageBaseParams['ipAdapter'] = {
+    ...params.value.ipAdapter,
+    ...patch,
+    source: nextSource,
+  }
+  nextIpAdapter.weight = clampFloat(Number(nextIpAdapter.weight), 0, 2)
+  nextIpAdapter.startAt = clampFloat(Number(nextIpAdapter.startAt), 0, 1)
+  nextIpAdapter.endAt = clampFloat(Number(nextIpAdapter.endAt), 0, 1)
+  const nextSourceCount = Math.trunc(Number(nextIpAdapter.source.count))
+  nextIpAdapter.source.count = Number.isFinite(nextSourceCount) && nextSourceCount >= 1 ? nextSourceCount : 1
+  const nextPatch: Partial<ImageBaseParams> = { ipAdapter: nextIpAdapter }
+  if (nextIpAdapter.enabled && nextIpAdapter.source.mode === 'dir') {
+    nextPatch.batchCount = 1
+    nextPatch.batchSize = 1
+  }
+  if (nextIpAdapter.source.mode !== 'img' || !params.value.useInitImage) {
+    nextIpAdapter.source.sameAsInit = false
+  }
+  if (nextIpAdapter.endAt < nextIpAdapter.startAt) {
+    nextIpAdapter.endAt = nextIpAdapter.startAt
+  }
+  setParams(nextPatch)
+}
+
+function setIpAdapterSource(patch: Partial<ImageBaseParams['ipAdapter']['source']>): void {
+  setIpAdapter({ source: patch })
+}
+
 function clampFloat(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min
   return Math.min(max, Math.max(min, value))
@@ -1255,17 +2096,121 @@ const _KONTEXT_DEFAULT_STEPS = 28
 const _KONTEXT_DEFAULT_DISTILLED_CFG = 2.5
 const _INIT_IMAGE_DIM_MIN = 64
 const _INIT_IMAGE_DIM_MAX = 8192
-const _INIT_IMAGE_DIM_STEP = 8
 
-function snapInitImageDim(value: number): number {
+function snapInitImageDim(value: number, step: number): number {
   const clamped = Math.max(_INIT_IMAGE_DIM_MIN, Math.min(_INIT_IMAGE_DIM_MAX, Math.trunc(value)))
-  const snapped = Math.round(clamped / _INIT_IMAGE_DIM_STEP) * _INIT_IMAGE_DIM_STEP
+  const safeStep = Number.isFinite(step) && step > 0 ? Math.trunc(step) : 8
+  const snapped = (resolvedEngineForMode.value === 'zimage' ? Math.floor(clamped / safeStep) : Math.round(clamped / safeStep)) * safeStep
   return Math.max(_INIT_IMAGE_DIM_MIN, Math.min(_INIT_IMAGE_DIM_MAX, snapped))
 }
+
+function normalizeImageDimension(value: unknown): number {
+  const numeric = Number(value)
+  const fallback = Number.isFinite(numeric) ? numeric : _INIT_IMAGE_DIM_MIN
+  return snapInitImageDim(fallback, imageDimensionInputStep.value)
+}
+
+function normalizeImageParamPatch(patch: Partial<ImageBaseParams>): Partial<ImageBaseParams> {
+  const next: Partial<ImageBaseParams> = { ...patch }
+  if (patch.width !== undefined) next.width = normalizeImageDimension(patch.width)
+  if (patch.height !== undefined) next.height = normalizeImageDimension(patch.height)
+  if (patch.perStepBlendStrength !== undefined) {
+    next.perStepBlendStrength = clampFloat(Number(patch.perStepBlendStrength), 0, 1)
+  }
+  if (patch.perStepBlendSteps !== undefined) {
+    next.perStepBlendSteps = normalizeNonNegativeInt(patch.perStepBlendSteps)
+  }
+  if (patch.inpaintMode !== undefined) {
+    const nextInpaintMode = parseInpaintMode(patch.inpaintMode)
+    if (nextInpaintMode === null) {
+      throw new Error(`ImageModelTab received invalid inpaintMode patch '${String(patch.inpaintMode)}'.`)
+    }
+    next.inpaintMode = nextInpaintMode
+    if (next.inpaintMode !== 'per_step_blend') {
+      next.perStepBlendStrength = fallbackParams.value.perStepBlendStrength
+      next.perStepBlendSteps = fallbackParams.value.perStepBlendSteps
+    }
+  }
+  if (patch.img2imgResizeMode !== undefined) {
+    next.img2imgResizeMode = normalizeImg2ImgResizeModeForEngine(resolvedEngineForMode.value, patch.img2imgResizeMode)
+  }
+  if (patch.maskInvert !== undefined || patch.maskRegionSplit !== undefined) {
+    const normalizedMaskToggles = normalizeInpaintMaskToggleState(
+      patch.maskInvert ?? params.value.maskInvert,
+      patch.maskRegionSplit ?? params.value.maskRegionSplit,
+    )
+    next.maskInvert = normalizedMaskToggles.maskInvert
+    next.maskRegionSplit = normalizedMaskToggles.maskRegionSplit
+  }
+  if (patch.supir && typeof patch.supir === 'object') {
+    const supirPatch = patch.supir as Partial<SupirModeFormState>
+    next.supir = {
+      ...params.value.supir,
+      ...supirPatch,
+      sampler: normalizeSupirSamplerSelection(supirPatch.sampler, params.value.supir.sampler),
+    }
+  }
+  return next
+}
+
+function syncImageContractToEngine(): void {
+  const patch = normalizeImageParamPatch({
+    width: params.value.width,
+    height: params.value.height,
+    img2imgResizeMode: params.value.img2imgResizeMode,
+  })
+  const needsUpdate = (
+    patch.width !== params.value.width
+    || patch.height !== params.value.height
+    || patch.img2imgResizeMode !== params.value.img2imgResizeMode
+  )
+  if (!needsUpdate) return
+  setParams(patch)
+}
+
+function onInpaintModeChange(rawValue: string): void {
+  const nextMode = parseInpaintMode(rawValue)
+  if (nextMode === null) {
+    throw new Error(`ImageModelTab received invalid inpaintMode '${rawValue}'.`)
+  }
+  const patch: Partial<ImageBaseParams> = { inpaintMode: nextMode }
+  if (nextMode !== 'per_step_blend') {
+    patch.perStepBlendStrength = fallbackParams.value.perStepBlendStrength
+    patch.perStepBlendSteps = fallbackParams.value.perStepBlendSteps
+  }
+  setParams(patch)
+}
+
+watch(
+  resolvedEngineForMode,
+  () => {
+    syncImageContractToEngine()
+  },
+  { immediate: true },
+)
+
+watch(
+  () => [params.value.maskInvert, params.value.maskRegionSplit] as const,
+  ([maskInvert, maskRegionSplit]) => {
+    const normalizedMaskToggles = normalizeInpaintMaskToggleState(maskInvert, maskRegionSplit)
+    if (
+      normalizedMaskToggles.maskInvert === maskInvert
+      && normalizedMaskToggles.maskRegionSplit === maskRegionSplit
+    ) {
+      return
+    }
+    setParams(normalizedMaskToggles)
+  },
+  { immediate: true },
+)
 
 async function onInitFileSet(file: File): Promise<void> {
   const dataUrl = await readFileAsDataURL(file)
   const patch: Partial<ImageBaseParams> = {
+    initSource: {
+      ...params.value.initSource,
+      mode: 'img',
+    },
     initImageData: dataUrl,
     initImageName: file.name,
     useInitImage: true,
@@ -1275,8 +2220,8 @@ async function onInitFileSet(file: File): Promise<void> {
   }
   try {
     const { width, height } = await readImageDimensions(dataUrl)
-    patch.width = snapInitImageDim(width)
-    patch.height = snapInitImageDim(height)
+    patch.width = normalizeImageDimension(width)
+    patch.height = normalizeImageDimension(height)
   } catch {
     // ignore: keep current dims
   }
@@ -1289,17 +2234,50 @@ function onInitImageRejected(payload: { reason: string; files: File[] }): void {
 }
 
 function clearInit(): void {
-  setParams({
+  const nextPatch: Partial<ImageBaseParams> = {
     initImageData: '',
     initImageName: '',
     useMask: false,
     maskImageData: '',
     maskImageName: '',
-  })
+  }
+  if (params.value.ipAdapter.source.sameAsInit) {
+    nextPatch.ipAdapter = {
+      ...params.value.ipAdapter,
+      source: {
+        ...params.value.ipAdapter.source,
+        sameAsInit: false,
+      },
+    }
+  }
+  setParams(nextPatch)
 }
 
 function clearMask(): void {
   setParams({ maskImageData: '', maskImageName: '' })
+}
+
+async function onIpAdapterReferenceFileSet(file: File): Promise<void> {
+  const dataUrl = await readFileAsDataURL(file)
+  setIpAdapterSource({
+    mode: 'img',
+    sameAsInit: false,
+    referenceImageData: dataUrl,
+    referenceImageName: file.name,
+  })
+}
+
+function clearIpAdapterReference(): void {
+  setIpAdapterSource({
+    referenceImageData: '',
+    referenceImageName: '',
+    sameAsInit: false,
+  })
+}
+
+function onIpAdapterReferenceRejected(payload: { reason: string; files: File[] }): void {
+  const fileName = payload.files[0]?.name || 'file'
+  toast(`IP-Adapter reference rejected (${fileName}): ${payload.reason}`)
 }
 
 async function onMaskEditorApply(maskDataUrl: string): Promise<void> {
@@ -1358,6 +2336,10 @@ async function sendToImg2Img(image: GeneratedImage): Promise<void> {
   const dataUrl = toDataUrl(image)
   const patch: Partial<ImageBaseParams> = {
     useInitImage: true,
+    initSource: {
+      ...params.value.initSource,
+      mode: 'img',
+    },
     initImageData: dataUrl,
     initImageName: `from_${props.type}.png`,
     useMask: false,
@@ -1366,27 +2348,12 @@ async function sendToImg2Img(image: GeneratedImage): Promise<void> {
   }
   try {
     const { width, height } = await readImageDimensions(dataUrl)
-    patch.width = snapInitImageDim(width)
-    patch.height = snapInitImageDim(height)
+    patch.width = normalizeImageDimension(width)
+    patch.height = normalizeImageDimension(height)
   } catch {
     // ignore
   }
   setParams(patch)
-}
-
-function readFileAsDataURL(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(reader.error); reader.readAsDataURL(file)
-  })
-}
-
-function readImageDimensions(src: string): Promise<{ width: number; height: number }> {
-  return new Promise((resolve, reject) => {
-    const img = new Image()
-    img.onload = () => resolve({ width: img.naturalWidth || img.width, height: img.naturalHeight || img.height })
-    img.onerror = () => reject(new Error('Failed to load image'))
-    img.src = src
-  })
 }
 
 async function syncInitImageDims(): Promise<void> {
@@ -1394,7 +2361,7 @@ async function syncInitImageDims(): Promise<void> {
   if (!src) return
   try {
     const { width, height } = await readImageDimensions(src)
-    setParams({ width: snapInitImageDim(width), height: snapInitImageDim(height) })
+    setParams({ width: normalizeImageDimension(width), height: normalizeImageDimension(height) })
   } catch {
     // ignore
   }
@@ -1402,7 +2369,7 @@ async function syncInitImageDims(): Promise<void> {
 
 function maybeApplyKontextDefaults(): void {
   if (props.type !== 'flux1') return
-  const defaults = getEngineDefaults('flux1')
+  const defaults = getEngineDefaults(props.type)
   const defaultCfg = defaults.distilledCfg ?? defaults.cfg
   // Only apply when user hasn't customized away from the Flux defaults.
   if (params.value.steps === defaults.steps) setParams({ steps: _KONTEXT_DEFAULT_STEPS })

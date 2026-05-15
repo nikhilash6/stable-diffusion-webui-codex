@@ -11,28 +11,42 @@ Normalizes a batch of images (expected in BHWC) to the encoder input format (BCH
 
 Symbols (top-level; keep in sync; no ghosts):
 - `logger` (constant): Module logger for clip vision preprocessing.
-- `_ensure_mean_std` (function): Validates and converts normalization stats into a tensor.
+- `_build_processor` (function): Caches a CLIPImageProcessor configured for a canonical clip-vision preprocess spec.
 - `preprocess_image` (function): Resizes/crops and normalizes an image batch for a given preprocess spec.
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
-from typing import Iterable
+from functools import lru_cache
 
 import torch
+from transformers import CLIPImageProcessor
 
 from .errors import ClipVisionInputError
 from .specs import ClipVisionPreprocessSpec
 
-logger = logging.getLogger("backend.runtime.vision.clip.preprocess")
+logger = get_backend_logger("backend.runtime.vision.clip.preprocess")
 
 
-def _ensure_mean_std(values: Iterable[float], *, expected: int) -> torch.Tensor:
-    values_tuple = tuple(float(v) for v in values)
-    if len(values_tuple) != expected:
-        raise ClipVisionInputError(f"Expected {expected} normalization values, received {len(values_tuple)}.")
-    return torch.tensor(values_tuple)
+@lru_cache(maxsize=8)
+def _build_processor(
+    image_size: int,
+    mean: tuple[float, float, float],
+    std: tuple[float, float, float],
+) -> CLIPImageProcessor:
+    return CLIPImageProcessor(
+        do_resize=True,
+        do_center_crop=True,
+        do_rescale=True,
+        do_normalize=True,
+        do_convert_rgb=False,
+        size={"shortest_edge": int(image_size)},
+        crop_size={"height": int(image_size), "width": int(image_size)},
+        image_mean=list(mean),
+        image_std=list(std),
+    )
 
 
 def preprocess_image(
@@ -41,7 +55,7 @@ def preprocess_image(
     *,
     crop: bool = True,
 ) -> torch.Tensor:
-    """Normalize a BCHW image tensor for clip vision encoders."""
+    """Normalize a BHWC image tensor into canonical CLIP BCHW pixel values."""
     if image.ndim != 4:
         raise ClipVisionInputError(f"Expected image tensor with 4 dims (batch, height, width, channels); got {image.shape}.")
     if image.shape[-1] < 3:
@@ -57,30 +71,27 @@ def preprocess_image(
         crop,
     )
     image = image[..., :3]  # enforce RGB
-    mean = _ensure_mean_std(spec.mean, expected=3).to(device=device, dtype=dtype)
-    std = _ensure_mean_std(spec.std, expected=3).to(device=device, dtype=dtype)
-    image = image.movedim(-1, 1)
-    if not (image.shape[2] == spec.image_size and image.shape[3] == spec.image_size):
-        if crop:
-            scale = spec.image_size / min(image.shape[2], image.shape[3])
-            target_h = round(scale * image.shape[2])
-            target_w = round(scale * image.shape[3])
-        else:
-            target_h = target_w = spec.image_size
-        image = torch.nn.functional.interpolate(
-            image,
-            size=(target_h, target_w),
-            mode="bicubic",
-            antialias=True,
+    processor = _build_processor(
+        int(spec.image_size),
+        tuple(float(v) for v in spec.mean),
+        tuple(float(v) for v in spec.std),
+    )
+    images_np = (
+        torch.clamp((image.detach().to(device="cpu", dtype=torch.float32) * 255.0).round(), 0.0, 255.0)
+        .to(torch.uint8)
+        .numpy()
+    )
+    processed = processor(
+        images=[sample for sample in images_np],
+        do_center_crop=bool(crop),
+        size={"shortest_edge": int(spec.image_size)} if crop else {"height": int(spec.image_size), "width": int(spec.image_size)},
+        crop_size={"height": int(spec.image_size), "width": int(spec.image_size)},
+        return_tensors="pt",
+        input_data_format="channels_last",
+    ).pixel_values
+    if processed.ndim != 4 or processed.shape[1] != 3:
+        raise ClipVisionInputError(
+            "CLIPImageProcessor returned invalid pixel_values shape "
+            f"{tuple(processed.shape)} for clip vision preprocessing."
         )
-        h_start = max((image.shape[2] - spec.image_size) // 2, 0)
-        w_start = max((image.shape[3] - spec.image_size) // 2, 0)
-        image = image[
-            :,
-            :,
-            h_start : h_start + spec.image_size,
-            w_start : w_start + spec.image_size,
-        ]
-    image = torch.clip(255.0 * image, 0.0, 255.0).round() / 255.0
-    image = (image - mean.view(3, 1, 1)) / std.view(3, 1, 1)
-    return image
+    return processed.to(device=device)

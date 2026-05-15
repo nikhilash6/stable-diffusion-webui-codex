@@ -15,6 +15,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from typing import Any, List, Mapping, Optional
@@ -36,7 +37,7 @@ from apps.backend.runtime.memory import memory_management
 from apps.backend.runtime.model_registry.specs import ModelFamily
 from apps.backend.runtime.models.loader import DiffusionModelBundle
 
-logger = logging.getLogger("backend.engines.flux.chroma")
+logger = get_backend_logger("backend.engines.flux.chroma")
 
 _CHROMA_FACTORY = CodexFluxFamilyFactory(spec=CHROMA_SPEC)
 

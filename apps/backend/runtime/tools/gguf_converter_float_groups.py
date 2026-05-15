@@ -8,7 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: Float dtype override groups for the GGUF converter.
 Defines stable, profile-scoped “groups” of tensor-name patterns that the UI can expose as simple FP16/FP32 knobs
-without requiring users to type regex overrides.
+without requiring users to type regex overrides. Groups match the source/native tensor names emitted by the converter.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `FloatDtypeGroup` (dataclass): Named group of tensor-name regex patterns (applies to destination names).
@@ -28,20 +28,7 @@ class FloatDtypeGroup:
 
 
 _FLOAT_GROUPS: dict[str, tuple[FloatDtypeGroup, ...]] = {
-    # Flux transformer (Comfy/Codex layout keys).
-    "flux_transformer_comfy": (
-        FloatDtypeGroup(
-            id="io_weights",
-            label="IO weights (txt_in + out_layer + final modulation)",
-            patterns=(
-                r"^txt_in\.weight$",
-                r"^(?:guidance_in|time_in|vector_in)\.out_layer\.weight$",
-                r"^final_layer\.adaLN_modulation\.1\.weight$",
-            ),
-        ),
-    ),
-    # Flux transformer (native/Diffusers keys).
-    "flux_transformer_native": (
+    "flux_transformer": (
         FloatDtypeGroup(
             id="io_weights",
             label="IO weights (context_embedder + time_text_embed linear_2 + norm_out)",
@@ -52,37 +39,14 @@ _FLOAT_GROUPS: dict[str, tuple[FloatDtypeGroup, ...]] = {
             ),
         ),
     ),
-    # Z-Image transformer (Comfy/Codex layout keys).
-    "zimage_transformer_comfy": (
+    "zimage_transformer": (
         FloatDtypeGroup(
             id="pad_tokens",
             label="Pad tokens (x_pad_token + cap_pad_token)",
             patterns=(r"^(?:x_pad_token|cap_pad_token)$",),
         ),
     ),
-    "zimage_transformer_native": (
-        FloatDtypeGroup(
-            id="pad_tokens",
-            label="Pad tokens (x_pad_token + cap_pad_token)",
-            patterns=(r"^(?:x_pad_token|cap_pad_token)$",),
-        ),
-    ),
-    # WAN22 transformer (Comfy/WAN export layout keys).
-    "wan22_transformer_comfy": (
-        FloatDtypeGroup(
-            id="sensitive_weights",
-            label="Sensitive weights (patch embed + time/text embed + head)",
-            patterns=(
-                r"^patch_embedding\.weight$",
-                r"^time_embedding\.(?:0|2)\.weight$",
-                r"^time_projection\.1\.weight$",
-                r"^text_embedding\.(?:0|2)\.weight$",
-                r"^head\.head\.weight$",
-            ),
-        ),
-    ),
-    # WAN22 transformer (native/Diffusers keys). Destination keys are the source keys.
-    "wan22_transformer_native": (
+    "wan22_transformer": (
         FloatDtypeGroup(
             id="sensitive_weights",
             label="Sensitive weights (patch embed + time/text embed + head)",
@@ -92,7 +56,7 @@ _FLOAT_GROUPS: dict[str, tuple[FloatDtypeGroup, ...]] = {
                 r"^condition_embedder\.time_proj\.weight$",
                 r"^condition_embedder\.text_embedder\.linear_(?:1|2)\.weight$",
                 r"^proj_out\.weight$",
-                # If the source is already in WAN-export layout, these keys are also valid in native mode.
+                # Some source checkpoints already use these normalized WAN tensor names.
                 r"^time_embedding\.(?:0|2)\.weight$",
                 r"^time_projection\.1\.weight$",
                 r"^text_embedding\.(?:0|2)\.weight$",

@@ -15,19 +15,19 @@ Symbols (top-level; keep in sync; no ghosts):
 - `truncate_text` (function): Truncates text to a configurable max length for logs.
 - `summarize_ints` (function): Summarizes long integer sequences using a head/tail window.
 - `find_indices` (function): Finds a bounded number of indices matching a value in a sequence.
-- `tensor_stats` (function): Logs min/max/mean/std/norm for a tensor (no-grad, float stats).
+- `tensor_stats` (function): Logs min/max/mean/std/norm for a tensor (no-grad, float stats) through an explicit logger-name selector.
 - `__all__` (constant): Explicit export list for debug helpers.
 """
 
 from __future__ import annotations
 
-import logging
 import os
 from typing import Sequence
 
 import torch
 
 from apps.backend.infra.config.env_flags import env_flag as _env_flag
+from apps.backend.runtime.logging import emit_backend_message
 from apps.backend.infra.config.env_flags import env_int as _env_int
 
 
@@ -78,27 +78,33 @@ def find_indices(values: Sequence[int], needle: int, *, limit: int = 16) -> list
     return out
 
 
-def tensor_stats(logger: logging.Logger, label: str, tensor: torch.Tensor | None) -> None:
+def tensor_stats(logger_name: str, label: str, tensor: torch.Tensor | None) -> None:
     if tensor is None:
-        logger.info("[zimage-debug] %s: <none>", label)
+        emit_backend_message("[zimage-debug] tensor", logger=logger_name, label=label, value="<none>")
         return
     if not torch.is_tensor(tensor):
-        logger.info("[zimage-debug] %s: <non-tensor %s>", label, type(tensor).__name__)
+        emit_backend_message(
+            "[zimage-debug] tensor",
+            logger=logger_name,
+            label=label,
+            value=f"<non-tensor {type(tensor).__name__}>",
+        )
         return
     with torch.no_grad():
         data = tensor.detach()
         stats_tensor = data.float()
-        logger.info(
-            "[zimage-debug] %s: shape=%s dtype=%s device=%s min=%.6g max=%.6g mean=%.6g std=%.6g norm=%.6g",
-            label,
-            tuple(data.shape),
-            data.dtype,
-            data.device,
-            float(stats_tensor.min().item()),
-            float(stats_tensor.max().item()),
-            float(stats_tensor.mean().item()),
-            float(stats_tensor.std(unbiased=False).item()),
-            float(stats_tensor.norm().item()),
+        emit_backend_message(
+            "[zimage-debug] tensor",
+            logger=logger_name,
+            label=label,
+            shape=tuple(data.shape),
+            dtype=data.dtype,
+            device=data.device,
+            min=float(stats_tensor.min().item()),
+            max=float(stats_tensor.max().item()),
+            mean=float(stats_tensor.mean().item()),
+            std=float(stats_tensor.std(unbiased=False).item()),
+            norm=float(stats_tensor.norm().item()),
         )
 
 

@@ -24,6 +24,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from dataclasses import dataclass
@@ -37,7 +38,7 @@ from apps.backend.runtime.model_registry.specs import ModelFamily
 from apps.backend.runtime.text_processing.classic_engine import ClassicTextProcessingEngine
 from apps.backend.runtime.text_processing.t5_engine import T5TextProcessingEngine
 
-logger = logging.getLogger("backend.engines.sd.spec")
+logger = get_backend_logger("backend.engines.sd.spec")
 
 
 class SDEngineConfigurationError(RuntimeError):

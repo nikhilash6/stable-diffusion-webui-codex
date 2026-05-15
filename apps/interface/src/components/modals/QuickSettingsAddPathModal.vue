@@ -8,17 +8,22 @@ Required Notice: see NOTICE
 
 Purpose: Reusable quicksettings add-path modal (scan + add-to-library).
 Provides add-path workflows for checkpoint/VAE/text-encoder path keys by scanning a user-supplied path (no hash on scan),
-then adding selected/all files with SHA computed only at add-time and per-row centered spinner while adding.
+then adding selected/all files with SHA computed only at add-time, explicit per-row FSM state transitions, and honest byte-progress
+semantics that fail loud on invalid `size_bytes` metadata.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `QuickSettingsAddPathModal` (component): Modal for scanning and adding model files into a target paths.json key.
+- `AddPathRowFsmState` (type): Explicit row finite-state machine (`queued|adding|added|already_in_library|error`).
+- `RowStatus` (interface): Per-row runtime state record (FSM + SHA/error/size metadata).
+- `InvalidSizeBytesError` (class): Fail-loud error for invalid or missing `size_bytes` metadata.
 - `sanitizePathInput` (function): Sanitizes path input (trim, quote removal, slash normalization, repeated separator collapse).
 - `scanCandidates` (function): Calls backend scan endpoint and populates candidate rows (no SHA).
 - `addOne` (function): Adds one candidate file to library key and records per-row SHA/result state.
-- `addAllSequential` (function): Adds all scanned candidates sequentially with visible per-row adding state.
-- `normalizeSizeBytes` (function): Validates optional backend size metadata for honest progress calculations.
+- `addAllSequential` (function): Adds all scanned candidates sequentially and reports deterministic byte progress when metadata is complete.
+- `normalizeSizeBytes` (function): Validates backend `size_bytes` metadata (`number|null`) and throws on invalid/missing contract values.
+- `setRowFsm` (function): Enforces legal row FSM transitions and throws on invalid transitions.
 - `formatBytes` (function): Formats byte counts for UI progress/status labels.
-- `planAddAllRun` (function): Builds one sequential add-all plan of pending rows.
+- `planAddAllRun` (function): Builds one sequential add-all plan of pending rows with byte-total planning.
 - `rowSizeLabel` (function): Formats per-row metadata (`Size …` and optional short SHA after add).
 -->
 
@@ -44,9 +49,17 @@ Symbols (top-level; keep in sync; no ghosts):
 
       <div class="qs-add-path-actions">
         <button class="btn btn-sm btn-secondary" type="button" :disabled="!canAddAll" @click="addAllSequential">
-          <span>{{ addAllRunning ? 'Adding' : 'Add whole folder' }}</span>
+          <span v-if="addAllRunning" class="qs-add-path-spinner" aria-hidden="true"></span>
+          <span>{{ addAllButtonLabel }}</span>
         </button>
       </div>
+      <p v-if="addAllRunning" class="caption qs-add-path-progress-caption">{{ addAllProgressCaption }}</p>
+      <progress
+        v-if="addAllRunning && addAllProgressPercent !== null"
+        class="qs-add-path-progress-bar"
+        :value="addAllProgressPercent"
+        max="100"
+      ></progress>
 
       <p v-if="scanError" class="panel-error">Error: {{ scanError }}</p>
       <p v-else-if="scanned && scanResults.length === 0 && !scanLoading" class="caption">No supported files found.</p>
@@ -54,26 +67,26 @@ Symbols (top-level; keep in sync; no ghosts):
       <div v-if="scanResults.length > 0" class="panel-section modal-list-section qs-add-path-list-section">
         <div class="qs-add-path-list" role="list">
           <div
-            v-for="(item, index) in scanResults"
+            v-for="item in scanResults"
             :key="item.path"
             :class="[
               'qs-add-path-row',
-              rowState(item).error ? 'is-error' : '',
-              rowState(item).adding ? 'is-adding' : '',
+              isRowErrored(item) ? 'is-error' : '',
+              isRowAdding(item) ? 'is-adding' : '',
             ]"
             role="listitem"
           >
             <div class="qs-add-path-row__name" :title="item.path">
               <div class="qs-add-path-row__title">{{ displayName(item) }}</div>
               <div class="qs-add-path-row__size">{{ rowSizeLabel(item) }}</div>
-              <div v-if="rowState(item).error" class="qs-add-path-row__status qs-add-path-row__status--error">{{ rowState(item).error }}</div>
+              <div v-if="rowErrorText(item)" class="qs-add-path-row__status qs-add-path-row__status--error">{{ rowErrorText(item) }}</div>
             </div>
             <div class="qs-add-path-row__actions">
               <button
                 class="btn btn-sm btn-outline"
                 type="button"
                 :disabled="isRowActionDisabled(item)"
-                @click="addOne(item, index)"
+                @click="addOne(item)"
               >
                 <span>{{ rowActionLabel(item) }}</span>
               </button>
@@ -92,14 +105,38 @@ import { addModelPathItem, scanModelPath } from '../../api/client'
 import type { ModelPathLibraryKind, ModelPathScanItem } from '../../api/types'
 import Modal from '../ui/Modal.vue'
 
+type AddPathRowFsmState = 'queued' | 'adding' | 'added' | 'already_in_library' | 'error'
+
 interface RowStatus {
-  adding: boolean
-  done: boolean
-  addedToLibrary: boolean
-  alreadyInLibrary: boolean
+  fsm: AddPathRowFsmState
   sha256: string
   error: string
   sizeBytes: number | null
+}
+
+interface AddAllRunEntry {
+  item: ModelPathScanItem
+  plannedSizeBytes: number | null
+}
+
+interface AddAllRunPlan {
+  entries: AddAllRunEntry[]
+  totalBytes: number | null
+}
+
+class InvalidSizeBytesError extends Error {
+  constructor(filePath: string, raw: unknown) {
+    super(`invalid size_bytes for ${filePath}: ${String(raw)}`)
+    this.name = 'InvalidSizeBytesError'
+  }
+}
+
+const ROW_FSM_TRANSITIONS: Record<AddPathRowFsmState, ReadonlyArray<AddPathRowFsmState>> = {
+  queued: ['adding'],
+  adding: ['added', 'already_in_library', 'error'],
+  added: [],
+  already_in_library: [],
+  error: ['adding'],
 }
 
 const props = withDefaults(defineProps<{
@@ -132,8 +169,11 @@ const scanned = ref(false)
 const scanResults = ref<ModelPathScanItem[]>([])
 const rowStatuses = ref<Record<string, RowStatus>>({})
 const addAllRunning = ref(false)
-const addAllIndex = ref(0)
 const addAllActivePath = ref('')
+const addAllTotalCount = ref(0)
+const addAllCompletedCount = ref(0)
+const addAllPlannedTotalBytes = ref<number | null>(null)
+const addAllProcessedBytes = ref(0)
 
 const placeholderExample = computed(() => {
   const explicit = String(props.placeholder || '').trim()
@@ -148,13 +188,35 @@ const placeholderExample = computed(() => {
 })
 
 const sanitizedInput = computed(() => sanitizePathInput(pathInput.value))
-const hasRowAddInFlight = computed(() => scanResults.value.some((item) => rowState(item).adding))
+const hasRowAddInFlight = computed(() => scanResults.value.some((item) => isRowAdding(item)))
 const canScan = computed(() => !scanLoading.value && !addAllRunning.value && Boolean(sanitizedInput.value))
 const pendingAddCount = computed(() => scanResults.value.filter((item) => {
   const state = rowState(item)
-  return !(state.done && !state.error)
+  return isRowPendingForAdd(state)
 }).length)
 const canAddAll = computed(() => !scanLoading.value && !addAllRunning.value && !hasRowAddInFlight.value && pendingAddCount.value > 0)
+const addAllProgressPercent = computed<number | null>(() => {
+  const totalBytes = addAllPlannedTotalBytes.value
+  if (totalBytes === null) return null
+  if (totalBytes === 0) {
+    if (addAllTotalCount.value <= 0) return 0
+    return Math.min(100, Math.max(0, (addAllCompletedCount.value / addAllTotalCount.value) * 100))
+  }
+  return Math.min(100, Math.max(0, (addAllProcessedBytes.value / totalBytes) * 100))
+})
+const addAllProgressCaption = computed(() => {
+  if (!addAllRunning.value) return ''
+  const completedLabel = `${addAllCompletedCount.value}/${addAllTotalCount.value} files`
+  const totalBytes = addAllPlannedTotalBytes.value
+  if (totalBytes === null) {
+    return `Processing ${completedLabel} · byte progress unavailable (size metadata missing)`
+  }
+  const processed = Math.min(addAllProcessedBytes.value, totalBytes)
+  const percent = addAllProgressPercent.value
+  const percentText = percent === null ? '' : ` (${percent.toFixed(1)}%)`
+  return `Processed ${formatBytes(processed)} / ${formatBytes(totalBytes)}${percentText} · ${completedLabel}`
+})
+const addAllButtonLabel = computed(() => addAllRunning.value ? 'Adding…' : 'Add whole folder')
 
 watch(open, (isOpen) => {
   if (!isOpen) {
@@ -175,8 +237,11 @@ function resetState(): void {
   scanResults.value = []
   rowStatuses.value = {}
   addAllRunning.value = false
-  addAllIndex.value = 0
   addAllActivePath.value = ''
+  addAllTotalCount.value = 0
+  addAllCompletedCount.value = 0
+  addAllPlannedTotalBytes.value = null
+  addAllProcessedBytes.value = 0
 }
 
 function isWindowsClient(): boolean {
@@ -231,9 +296,12 @@ function shortSha(sha: string): string {
 }
 
 function normalizeSizeBytes(raw: unknown, filePath: string): number | null {
-  if (raw === undefined || raw === null) return null
+  if (raw === null) return null
+  if (raw === undefined) {
+    throw new InvalidSizeBytesError(filePath, raw)
+  }
   if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0 || !Number.isInteger(raw)) {
-    throw new Error(`invalid size_bytes for ${filePath}: ${String(raw)}`)
+    throw new InvalidSizeBytesError(filePath, raw)
   }
   return raw
 }
@@ -261,47 +329,96 @@ function rowSizeLabel(item: ModelPathScanItem): string {
   return sizeLabel
 }
 
-function rowState(item: ModelPathScanItem): RowStatus {
-  const existing = rowStatuses.value[item.path]
-  if (existing) return existing
+function buildRowStatus(item: ModelPathScanItem): RowStatus {
   const alreadyInLibrary = item.already_in_library === true
-  const created: RowStatus = {
-    adding: false,
-    done: alreadyInLibrary,
-    addedToLibrary: false,
-    alreadyInLibrary,
+  return {
+    fsm: alreadyInLibrary ? 'already_in_library' : 'queued',
     sha256: '',
     error: '',
     sizeBytes: normalizeSizeBytes(item.size_bytes, item.path),
   }
+}
+
+function setRowFsm(state: RowStatus, next: AddPathRowFsmState, filePath: string): void {
+  const allowed = ROW_FSM_TRANSITIONS[state.fsm]
+  if (!allowed.includes(next)) {
+    throw new Error(`invalid row state transition for ${filePath}: ${state.fsm} -> ${next}`)
+  }
+  state.fsm = next
+}
+
+function isRowPendingForAdd(state: RowStatus): boolean {
+  return state.fsm === 'queued' || state.fsm === 'error'
+}
+
+function isRowAdding(item: ModelPathScanItem): boolean {
+  return rowState(item).fsm === 'adding'
+}
+
+function isRowErrored(item: ModelPathScanItem): boolean {
+  const state = rowState(item)
+  return state.fsm === 'error' && Boolean(state.error)
+}
+
+function rowErrorText(item: ModelPathScanItem): string {
+  const state = rowState(item)
+  return state.fsm === 'error' ? state.error : ''
+}
+
+function rowState(item: ModelPathScanItem): RowStatus {
+  const existing = rowStatuses.value[item.path]
+  if (existing) return existing
+  const created = buildRowStatus(item)
   rowStatuses.value[item.path] = created
   return created
 }
 
-function planAddAllRun(): Array<{ item: ModelPathScanItem; index: number }> {
-  const entries: Array<{ item: ModelPathScanItem; index: number }> = []
-  for (let index = 0; index < scanResults.value.length; index += 1) {
-    const item = scanResults.value[index]
-    const state = rowState(item)
-    if (state.done && !state.error) continue
-    entries.push({ item, index })
+function validatePlannedSizeBytes(value: unknown, filePath: string): number | null {
+  if (value === null) return null
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || !Number.isInteger(value)) {
+    throw new InvalidSizeBytesError(filePath, value)
   }
-  return entries
+  return value
+}
+
+function planAddAllRun(): AddAllRunPlan {
+  const entries: AddAllRunEntry[] = []
+  let totalBytes = 0
+  let hasUnknownSize = false
+  for (const item of scanResults.value) {
+    const state = rowState(item)
+    if (!isRowPendingForAdd(state)) continue
+    const plannedSizeBytes = validatePlannedSizeBytes(state.sizeBytes, item.path)
+    if (plannedSizeBytes === null) {
+      hasUnknownSize = true
+    } else {
+      totalBytes += plannedSizeBytes
+    }
+    entries.push({ item, plannedSizeBytes })
+  }
+  return {
+    entries,
+    totalBytes: hasUnknownSize ? null : totalBytes,
+  }
 }
 
 function isRowActionDisabled(item: ModelPathScanItem): boolean {
   const state = rowState(item)
-  if (state.adding) return true
+  if (state.fsm === 'adding') return true
   if (addAllRunning.value) return true
-  return state.done && !state.error
+  return state.fsm === 'added' || state.fsm === 'already_in_library'
 }
 
 function rowActionLabel(item: ModelPathScanItem): string {
   const state = rowState(item)
-  if (state.adding) return 'Adding'
-  if (state.done && !state.error) {
-    return state.addedToLibrary ? 'Added' : 'Already in library'
+  if (state.fsm === 'adding') {
+    if (addAllRunning.value && addAllActivePath.value === item.path && addAllProgressPercent.value !== null) {
+      return `Adding ${addAllProgressPercent.value.toFixed(0)}%`
+    }
+    return 'Adding…'
   }
+  if (state.fsm === 'added') return 'Added'
+  if (state.fsm === 'already_in_library') return 'Already in library'
   return 'Add to library'
 }
 
@@ -316,6 +433,10 @@ async function scanCandidates(): Promise<void> {
   scanned.value = true
   scanResults.value = []
   rowStatuses.value = {}
+  addAllTotalCount.value = 0
+  addAllCompletedCount.value = 0
+  addAllPlannedTotalBytes.value = null
+  addAllProcessedBytes.value = 0
 
   try {
     const response = await scanModelPath({
@@ -335,16 +456,7 @@ async function scanCandidates(): Promise<void> {
     })
     const next: Record<string, RowStatus> = {}
     for (const item of scanResults.value) {
-      const alreadyInLibrary = item.already_in_library === true
-      next[item.path] = {
-        adding: false,
-        done: alreadyInLibrary,
-        addedToLibrary: false,
-        alreadyInLibrary,
-        sha256: '',
-        error: '',
-        sizeBytes: normalizeSizeBytes(item.size_bytes, item.path),
-      }
+      next[item.path] = buildRowStatus(item)
     }
     rowStatuses.value = next
   } catch (error) {
@@ -356,9 +468,14 @@ async function scanCandidates(): Promise<void> {
   }
 }
 
-async function addOne(item: ModelPathScanItem, index: number, options?: { silent?: boolean }): Promise<{ ok: boolean; added: boolean }> {
+async function addOne(item: ModelPathScanItem, options?: { silent?: boolean }): Promise<{ ok: boolean; added: boolean; fatal: boolean }> {
   const state = rowState(item)
-  state.adding = true
+  if (state.fsm === 'added') return { ok: true, added: true, fatal: false }
+  if (state.fsm === 'already_in_library') return { ok: true, added: false, fatal: false }
+  if (state.fsm !== 'queued' && state.fsm !== 'error') {
+    throw new Error(`cannot add row in state ${state.fsm}: ${item.path}`)
+  }
+  setRowFsm(state, 'adding', item.path)
   state.error = ''
 
   try {
@@ -367,56 +484,88 @@ async function addOne(item: ModelPathScanItem, index: number, options?: { silent
       kind: props.targetKind,
       path: item.path,
     })
-    state.done = true
-    state.addedToLibrary = Boolean(response.item.added)
-    state.alreadyInLibrary = response.item.already_in_library === true || !state.addedToLibrary
+    const addedToLibrary = response.item.added === true
     state.sha256 = String(response.item.sha256 || '')
     const responseSize = normalizeSizeBytes(response.item.size_bytes, item.path)
-    if (responseSize !== null) state.sizeBytes = responseSize
-    if (state.addedToLibrary && !options?.silent) {
+    state.sizeBytes = responseSize
+    setRowFsm(state, addedToLibrary ? 'added' : 'already_in_library', item.path)
+    if (addedToLibrary && !options?.silent) {
       emit('added', { addedCount: 1 })
     }
-    return { ok: true, added: state.addedToLibrary }
+    return { ok: true, added: addedToLibrary, fatal: false }
   } catch (error) {
+    if (ROW_FSM_TRANSITIONS[state.fsm].includes('error')) {
+      setRowFsm(state, 'error', item.path)
+    }
+    const fatal = error instanceof InvalidSizeBytesError
     const message = error instanceof Error ? error.message : String(error)
     state.error = message
     if (!options?.silent) {
       emit('error', message)
     }
-    return { ok: false, added: false }
-  } finally {
-    state.adding = false
-    if (!addAllRunning.value) {
-      addAllIndex.value = Math.max(addAllIndex.value, index + 1)
-    }
+    return { ok: false, added: false, fatal }
   }
 }
 
 async function addAllSequential(): Promise<void> {
   if (!canAddAll.value) return
-  const runEntries = planAddAllRun()
-  if (runEntries.length === 0) return
+  let runPlan: AddAllRunPlan
+  try {
+    runPlan = planAddAllRun()
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    scanError.value = message
+    emit('error', message)
+    return
+  }
+  if (runPlan.entries.length === 0) return
 
+  scanError.value = ''
   addAllRunning.value = true
-  addAllIndex.value = 0
   addAllActivePath.value = ''
+  addAllTotalCount.value = runPlan.entries.length
+  addAllCompletedCount.value = 0
+  addAllPlannedTotalBytes.value = runPlan.totalBytes
+  addAllProcessedBytes.value = 0
 
   let addedCount = 0
+  let fatalMessage = ''
   try {
-    for (let runIndex = 0; runIndex < runEntries.length; runIndex += 1) {
-      const { item, index } = runEntries[runIndex]
+    for (const entry of runPlan.entries) {
+      const { item, plannedSizeBytes } = entry
       const state = rowState(item)
-      addAllIndex.value = runIndex + 1
       addAllActivePath.value = item.path
-      const result = await addOne(item, index, { silent: true })
+      const result = await addOne(item, { silent: true })
       if (result.added) addedCount += 1
+      if (plannedSizeBytes !== null) {
+        addAllProcessedBytes.value += plannedSizeBytes
+        if (addAllPlannedTotalBytes.value !== null) {
+          addAllProcessedBytes.value = Math.min(addAllProcessedBytes.value, addAllPlannedTotalBytes.value)
+        }
+      }
+      addAllCompletedCount.value += 1
       if (!result.ok) {
-        if (state.error) emit('error', state.error)
+        if (result.fatal) {
+          fatalMessage = state.error || `invalid size_bytes for ${item.path}`
+          break
+        }
+        if (state.error) {
+          emit('error', state.error)
+        }
       }
     }
   } finally {
     addAllRunning.value = false
     addAllActivePath.value = ''
+  }
+
+  if (fatalMessage) {
+    if (addedCount > 0) {
+      emit('added', { addedCount })
+    }
+    scanError.value = fatalMessage
+    emit('error', fatalMessage)
+    return
   }
 
   if (addedCount > 0) {

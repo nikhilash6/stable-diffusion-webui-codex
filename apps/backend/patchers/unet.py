@@ -18,6 +18,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import copy
 import logging
@@ -32,7 +33,7 @@ from apps.backend.runtime.controlnet.runtime import build_composite
 from apps.backend.runtime.sampling_adapters.sampler_model import SamplerModel
 from .base import ModelPatcher
 
-logger = logging.getLogger("backend.patchers.unet")
+logger = get_backend_logger("backend.patchers.unet")
 
 
 @dataclass
@@ -381,10 +382,15 @@ class UnetPatcher(ModelPatcher):
             raise AttributeError("SamplerModel is missing diffusion_model reference")
 
         def block_transformer_indices(block: torch.nn.Module) -> range:
-            count = sum(1 for module in block.modules() if isinstance(module, SpatialTransformer))
-            if count == 0:
+            spatial_transformers = [module for module in block if isinstance(module, SpatialTransformer)]
+            if not spatial_transformers:
                 return range(0)
-            return range(count)
+            if len(spatial_transformers) != 1:
+                raise RuntimeError(
+                    "UNet transformer coordinate enumeration requires at most one SpatialTransformer per block; "
+                    f"got {len(spatial_transformers)} in {type(block).__name__}."
+                )
+            return range(int(len(spatial_transformers[0].transformer_blocks)))
 
         input_blocks = getattr(diffusion_model, "input_blocks", [])
         for block_index, block in enumerate(input_blocks):

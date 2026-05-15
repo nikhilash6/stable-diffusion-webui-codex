@@ -52,71 +52,87 @@ class FormRenderer:
         return self._field_widgets.get(str(field_id))
 
     def _render_section(self, row: int, section: FormSectionDescriptor) -> int:
-        header = ttk.Label(self._parent, text=section.title, style="Section.Header.TLabel")
-        header.grid(row=row, column=self._label_column, columnspan=2, sticky="w", padx=self._padx, pady=(18, 8))
-        self._mark_advanced(section.advanced, header)
-        row += 1
+        section_frame = ttk.LabelFrame(self._parent, text=f"  {section.title}  ", padding=14)
+        section_frame.grid(
+            row=row,
+            column=self._label_column,
+            columnspan=3,
+            sticky="ew",
+            padx=self._padx,
+            pady=(18 if row > 0 else 0, 10),
+        )
+        section_frame.columnconfigure(0, weight=0)
+        section_frame.columnconfigure(1, weight=1)
+        section_frame.columnconfigure(2, weight=0)
+        self._mark_advanced(section.advanced, section_frame)
 
+        inner_row = 0
         for descriptor in section.fields:
-            row = self._render_field(row, descriptor, section_advanced=section.advanced)
+            inner_row = self._render_field(section_frame, inner_row, descriptor, section_advanced=section.advanced)
 
         for help_text in section.help_texts:
-            help_label = ttk.Label(self._parent, text=str(help_text), justify="left", style="Muted.TLabel")
+            help_label = ttk.Label(section_frame, text=str(help_text), justify="left", style="Muted.TLabel")
             help_label.grid(
-                row=row,
-                column=self._label_column,
-                columnspan=2,
+                row=inner_row,
+                column=0,
+                columnspan=3,
                 sticky="w",
-                padx=self._padx,
                 pady=(0, 8),
             )
             self._mark_advanced(section.advanced, help_label)
-            row += 1
+            inner_row += 1
 
-        return row
+        return row + 1
 
-    def _render_field(self, row: int, descriptor: FormFieldDescriptor, *, section_advanced: bool) -> int:
+    def _render_field(
+        self,
+        parent: ttk.LabelFrame,
+        row: int,
+        descriptor: FormFieldDescriptor,
+        *,
+        section_advanced: bool,
+    ) -> int:
         is_advanced = bool(section_advanced or descriptor.advanced)
-        label_widget = ttk.Label(self._parent, text=descriptor.label)
-        label_widget.grid(row=row, column=self._label_column, sticky="w", padx=self._padx, pady=8)
+        label_widget = ttk.Label(parent, text=descriptor.label)
+        label_widget.grid(row=row, column=0, sticky="w", pady=8)
 
         widget: tk.Widget
         if descriptor.kind == FieldKind.CHOICE:
             combo = ttk.Combobox(
-                self._parent,
+                parent,
                 textvariable=descriptor.variable,  # type: ignore[arg-type]
                 values=list(descriptor.choices),
                 state="readonly",
                 width=int(descriptor.width),
             )
-            combo.grid(row=row, column=self._value_column, sticky="w", padx=(0, self._padx), pady=8)
+            combo.grid(row=row, column=1, sticky="ew", padx=(10, 0), pady=8)
             combo.bind("<<ComboboxSelected>>", lambda _event: descriptor.on_change())
             widget = combo
         elif descriptor.kind == FieldKind.CHECK:
             check = ttk.Checkbutton(
-                self._parent,
+                parent,
                 variable=descriptor.variable,  # type: ignore[arg-type]
                 command=descriptor.on_change,
                 style="Toggle.TCheckbutton",
             )
-            check.grid(row=row, column=self._value_column, sticky="w", padx=(0, self._padx), pady=8)
+            check.grid(row=row, column=1, sticky="w", padx=(10, 0), pady=8)
             widget = check
         elif descriptor.kind == FieldKind.ENTRY:
             entry = ttk.Entry(
-                self._parent,
+                parent,
                 textvariable=descriptor.variable,  # type: ignore[arg-type]
                 width=int(descriptor.width),
             )
-            entry.grid(row=row, column=self._value_column, sticky="w", padx=(0, self._padx), pady=8)
+            entry.grid(row=row, column=1, sticky="ew", padx=(10, 0), pady=8)
             entry.bind("<KeyRelease>", lambda _event: descriptor.on_change())
             widget = entry
         elif descriptor.kind == FieldKind.ENTRY_COMMIT:
             entry = ttk.Entry(
-                self._parent,
+                parent,
                 textvariable=descriptor.variable,  # type: ignore[arg-type]
                 width=int(descriptor.width),
             )
-            entry.grid(row=row, column=self._value_column, sticky="w", padx=(0, self._padx), pady=8)
+            entry.grid(row=row, column=1, sticky="ew", padx=(10, 0), pady=8)
             entry.bind("<FocusOut>", lambda _event: descriptor.on_change())
             entry.bind("<Return>", lambda _event: descriptor.on_change())
             widget = entry
@@ -129,17 +145,18 @@ class FormRenderer:
             title = str(descriptor.help_title or descriptor.label or "Field Help")
             message = str(descriptor.help_text)
             help_button = ttk.Button(
-                self._parent,
+                parent,
                 text="?",
                 width=3,
                 style="Help.TButton",
+                takefocus=0,
                 command=lambda t=title, m=message: messagebox.showinfo(t, m),
             )
             help_button.grid(
                 row=row,
-                column=self._value_column + 1,
+                column=2,
                 sticky="w",
-                padx=(6, self._padx),
+                padx=(6, 0),
                 pady=8,
             )
 
@@ -150,13 +167,12 @@ class FormRenderer:
         row += 1
 
         if descriptor.help_text and descriptor.help_mode == HelpMode.INLINE:
-            help_label = ttk.Label(self._parent, text=str(descriptor.help_text), justify="left", style="Muted.TLabel")
+            help_label = ttk.Label(parent, text=str(descriptor.help_text), justify="left", style="Muted.TLabel")
             help_label.grid(
                 row=row,
-                column=self._label_column,
+                column=0,
                 columnspan=3,
                 sticky="w",
-                padx=self._padx,
                 pady=(0, 8),
             )
             self._mark_advanced(is_advanced, help_label)

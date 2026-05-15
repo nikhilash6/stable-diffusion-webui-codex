@@ -11,26 +11,21 @@ Keeps processing-level script callbacks and shared job metadata isolated from sa
 
 Symbols (top-level; keep in sync; no ghosts):
 - `run_process_scripts` (function): Run processing scripts (legacy-compatible) when present.
-- `activate_extra_networks` (function): Apply globally selected extra networks (LoRAs) to the current engine.
 - `set_shared_job` (function): Update shared job metadata for batch runs.
-- `collect_lora_selections` (function): Merge global selections with prompt-local LoRA descriptors.
+- `collect_lora_selections` (function): Merge global selections with prompt-local LoRA descriptors, with prompt-local same-path weights winning.
 - `run_before_sampling_hooks` (function): Invoke before-sampling hooks (scripts + shared job metadata).
 - `run_post_sample_hooks` (function): Invoke post-sample hooks, returning potentially modified samples.
 """
 
 from __future__ import annotations
 
-import logging
 from typing import Any, Iterable, Sequence
 
 import torch
 
 from apps.backend.runtime.adapters.lora import selections as lora_selections
 from apps.backend.core.state import state as backend_state
-from apps.backend.patchers.lora_apply import apply_loras_to_engine
 from apps.backend.runtime.processing.datatypes import PromptContext
-
-logger = logging.getLogger(__name__)
 
 
 def run_process_scripts(processing: Any) -> None:
@@ -38,24 +33,6 @@ def run_process_scripts(processing: Any) -> None:
     script_runner = getattr(processing, "scripts", None)
     if script_runner is not None and hasattr(script_runner, "process"):
         script_runner.process(processing)
-
-
-def activate_extra_networks(processing: Any) -> None:
-    """Apply globally selected extra networks to the current engine.
-
-    Note: sampling-path LoRA ownership lives in `sampling_execute.execute_sampling(...)`.
-    This helper remains explicit/opt-in for non-sampling callsites only.
-    """
-    if getattr(processing, "disable_extra_networks", False):
-        return
-    try:
-        selections = lora_selections.get_selections()
-    except Exception:
-        selections = []
-    if not selections:
-        return
-    stats = apply_loras_to_engine(processing.sd_model, selections)
-    logger.info("[native] Applied %d LoRA(s), %d params touched", stats.files, stats.params_touched)
 
 
 def set_shared_job(processing: Any) -> None:
@@ -67,19 +44,21 @@ def set_shared_job(processing: Any) -> None:
 
 def collect_lora_selections(prompt_loras: Sequence[Any]) -> list[Any]:
     """Merge global selections with prompt-local LoRA descriptors."""
-    selections: list[Any] = []
-    seen: set[str] = set()
+    ordered_paths: list[str] = []
+    last_by_path: dict[str, Any] = {}
     try:
         all_selections: Iterable[Any] = list(lora_selections.get_selections()) + list(prompt_loras)
     except Exception:
         all_selections = list(prompt_loras)
     for sel in all_selections:
         path = getattr(sel, "path", None)
-        if not path or path in seen:
+        if not path:
             continue
-        seen.add(path)
-        selections.append(sel)
-    return selections
+        path_key = str(path)
+        if path_key not in last_by_path:
+            ordered_paths.append(path_key)
+        last_by_path[path_key] = sel
+    return [last_by_path[path] for path in ordered_paths]
 
 
 def run_before_sampling_hooks(

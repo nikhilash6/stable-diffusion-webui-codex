@@ -16,12 +16,13 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 
 import torch
 
-_log = logging.getLogger("backend.runtime.utils")
+_log = get_backend_logger("backend.runtime.utils")
 
 
 def calculate_parameters(sd, prefix=""):

@@ -1,0 +1,107 @@
+@layer components {
+  .cdx-video-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .cdx-video-card-body {
+    min-width: 0;
+  }
+
+  .cdx-video-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding-bottom: 0.35rem;
+    border-bottom: 0.0625rem solid hsla(0, 0%, 100%, 0.06);
+  }
+
+  .cdx-video-card-header__left {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    min-width: 0;
+  }
+
+  .cdx-video-card-header__right {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.4rem;
+    flex-shrink: 0;
+  }
+
+  .cdx-video-card-header__title {
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.8rem;
+    opacity: 0.92;
+  }
+
+  .cdx-video-badge-experimental {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 999rem;
+    border: 0.0625rem solid hsla(13, 92%, 60%, 0.6);
+    background: linear-gradient(180deg, hsla(13, 96%, 56%, 0.28), hsla(7, 92%, 52%, 0.2));
+    color: hsla(15, 95%, 69%, 0.98);
+    padding: 0.15rem 0.5rem;
+    font-size: 0.62rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    line-height: 1;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  .cdx-video-inline-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .cdx-video-temporal-controls,
+  .cdx-video-upscaling-controls {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+  }
+
+  .cdx-video-temporal-controls .cdx-video-temporal-row,
+  .cdx-video-upscaling-controls .cdx-video-upscaling-row {
+    align-items: end;
+  }
+
+  .cdx-video-temporal-anchor-toggle,
+  .cdx-video-compact-toggle-column,
+  .cdx-video-compact-toggle-row {
+    display: inline-grid;
+    grid-template-columns: minmax(0, max-content);
+    align-items: start;
+    justify-content: start;
+  }
+
+  .cdx-video-temporal-anchor-toggle {
+    align-items: start;
+  }
+
+  .cdx-video-temporal-anchor-toggle .cdx-slider-field__label-tooltip {
+    width: max-content;
+    max-width: 100%;
+  }
+
+  .cdx-video-temporal-anchor-toggle .cdx-video-temporal-anchor-toggle__btn,
+  .cdx-video-compact-toggle-column .qs-toggle-btn,
+  .cdx-video-compact-toggle-row .qs-toggle-btn {
+    width: auto;
+    justify-content: flex-start;
+  }
+
+  .cdx-video-compact-toggle-column {
+    gap: 0.35rem;
+  }
+}

@@ -18,6 +18,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from collections import namedtuple
@@ -31,7 +32,7 @@ from apps.backend.runtime.memory import memory_management
 from apps.backend.runtime.memory.config import DeviceRole
 from . import emphasis, parsing
 
-logger = logging.getLogger("backend.runtime.text_processing.t5_engine")
+logger = get_backend_logger("backend.runtime.text_processing.t5_engine")
 
 PromptChunkFix = namedtuple("PromptChunkFix", ["offset", "embedding"])
 

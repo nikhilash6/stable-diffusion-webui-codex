@@ -8,7 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: Header-only text encoder slot classification for sha-selected assets.
 Provides a fast, import-light helper used by API request paths to classify a resolved text encoder weights file into
-an explicit slot (`clip_l`, `clip_g`, `t5xxl`, `qwen3_4b`, `qwen3_06b`) without loading any tensors.
+an explicit slot (`clip_l`, `clip_g`, `t5xxl`, `qwen3_4b`, `qwen3_06b`, `gemma3_12b`) without loading any tensors.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `TextEncoderSlotError` (class): Raised when a weights file cannot be classified into a known slot.
@@ -27,6 +27,20 @@ from typing import Mapping, Sequence
 
 class TextEncoderSlotError(ValueError):
     """Raised when a text encoder weights file cannot be classified."""
+
+
+def _looks_like_mmproj_context(context: str) -> bool:
+    lower = Path(str(context or "")).name.strip().lower()
+    return "mmproj" in lower or "multimodal-projector" in lower
+
+
+def _gguf_is_multimodal_projector(kv: Mapping[str, object]) -> bool:
+    gguf_type = str(kv.get("general.type") or kv.get("model.type") or "").strip().lower()
+    projector_type = str(kv.get("clip.projector_type") or "").strip().lower()
+    has_vision_encoder = kv.get("clip.has_vision_encoder")
+    return gguf_type in {"mmproj", "multimodal-projector", "projector"} or bool(projector_type) or bool(
+        has_vision_encoder
+    )
 
 
 def classify_text_encoder_slot(path: str) -> str:
@@ -65,7 +79,7 @@ def classify_text_encoder_slot(path: str) -> str:
             raise TextEncoderSlotError(f"Failed to classify GGUF text encoder slot for {p}: {exc}") from exc
 
     raise TextEncoderSlotError(
-        "Unsupported text encoder weights extension %r (supported: .safetensors, .gguf)" % suffix
+        "Unsupported text encoder weights extension %r (supported: .safetensor, .safetensors, .gguf)" % suffix
     )
 
 
@@ -154,21 +168,24 @@ def _classify_safetensors_header(header: Mapping[str, object], *, context: str) 
             f"Unrecognized T5 hidden size {hidden} for {context} (expected 4096 for T5-XXL)."
         )
 
-    # --- Qwen3 (used by flow-based text encoder selection)
+    # --- Qwen3 / Gemma3 (used by flow-based text encoder selection)
     qwen_embed = _shape_for_suffix(("model.embed_tokens.weight", "embed_tokens.weight"))
     if qwen_embed and len(qwen_embed) >= 2:
         hidden = int(qwen_embed[-1])
+        if hidden == 3840:
+            return "gemma3_12b"
         if hidden == 2560:
             return "qwen3_4b"
         if hidden == 1024:
             return "qwen3_06b"
         raise TextEncoderSlotError(
-            f"Unrecognized LLM embed dim {hidden} for {context} (expected 2560 (Qwen3-4B) or 1024 (Qwen3-0.6B))."
+            f"Unrecognized LLM embed dim {hidden} for {context} "
+            "(expected 3840 (Gemma3-12B), 2560 (Qwen3-4B), or 1024 (Qwen3-0.6B))."
         )
 
     raise TextEncoderSlotError(
         "Could not classify text encoder slot from safetensors header for %s. "
-        "Expected a CLIP (token_embedding), T5 (shared+encoder.block), or Qwen (embed_tokens) weights file."
+        "Expected a CLIP (token_embedding), T5 (shared+encoder.block), or LLM (embed_tokens) weights file."
         % context
     )
 
@@ -283,35 +300,43 @@ def _read_gguf_kv(path: Path) -> dict[str, object]:
 
 
 def _classify_gguf_kv(kv: Mapping[str, object], *, context: str) -> str:
-    arch = str(kv.get("general.architecture") or "").strip().lower()
+    if _looks_like_mmproj_context(context) or _gguf_is_multimodal_projector(kv):
+        raise TextEncoderSlotError(f"GGUF multimodal projector files are not supported text encoder slots: {context}")
+
+    arch = str(kv.get("general.architecture") or kv.get("model.architecture") or "").strip().lower()
     tok_model = str(kv.get("tokenizer.ggml.model") or "").strip().lower()
     hint = arch or tok_model
+
+    def _get_int(key: str) -> int | None:
+        raw = kv.get(key)
+        if isinstance(raw, bool):
+            return None
+        if isinstance(raw, int):
+            return int(raw)
+        if isinstance(raw, float):
+            if float(raw).is_integer():
+                return int(raw)
+            return None
+        if isinstance(raw, str):
+            s = raw.strip()
+            if s and s.isdigit():
+                return int(s)
+        return None
+
+    def _resolve_embed_dim() -> int | None:
+        return (
+            _get_int("llama.embedding_length")
+            or _get_int("qwen.embedding_length")
+            or _get_int("gemma3.embedding_length")
+            or _get_int("gemma.embedding_length")
+            or _get_int("model.embedding_length")
+            or _get_int("general.embedding_length")
+        )
 
     if "t5" in hint:
         return "t5xxl"
     if "qwen" in hint:
-        def _get_int(key: str) -> int | None:
-            raw = kv.get(key)
-            if isinstance(raw, bool):
-                return None
-            if isinstance(raw, int):
-                return int(raw)
-            if isinstance(raw, float):
-                if float(raw).is_integer():
-                    return int(raw)
-                return None
-            if isinstance(raw, str):
-                s = raw.strip()
-                if s and s.isdigit():
-                    return int(s)
-            return None
-
-        # GGUF metadata usually follows llama.cpp key naming even for Qwen-family arches.
-        embed = (
-            _get_int("llama.embedding_length")
-            or _get_int("qwen.embedding_length")
-            or _get_int("general.embedding_length")
-        )
+        embed = _resolve_embed_dim()
         if embed is None:
             raise TextEncoderSlotError(
                 f"GGUF Qwen slot disambiguation requires an embed dim (expected 2560 or 1024): {context}"
@@ -323,12 +348,23 @@ def _classify_gguf_kv(kv: Mapping[str, object], *, context: str) -> str:
         raise TextEncoderSlotError(
             f"Unrecognized GGUF Qwen embed dim {embed} for {context} (expected 2560 (Qwen3-4B) or 1024 (Qwen3-0.6B))."
         )
+    if "gemma" in hint:
+        embed = _resolve_embed_dim()
+        if embed is None:
+            raise TextEncoderSlotError(
+                f"GGUF Gemma slot disambiguation requires an embed dim (expected 3840): {context}"
+            )
+        if embed == 3840:
+            return "gemma3_12b"
+        raise TextEncoderSlotError(
+            f"Unrecognized GGUF Gemma embed dim {embed} for {context} (expected 3840 for Gemma3-12B)."
+        )
     if "clip" in hint:
         # GGUF CLIP variants are not slot-disambiguated today; fail if we ever need this.
         raise TextEncoderSlotError(f"GGUF CLIP slot disambiguation is not supported yet: {context}")
 
     raise TextEncoderSlotError(
-        "Could not classify GGUF text encoder slot for %s (missing/unknown 'general.architecture')." % context
+        "Could not classify GGUF text encoder slot for %s (missing/unknown architecture metadata)." % context
     )
 
 

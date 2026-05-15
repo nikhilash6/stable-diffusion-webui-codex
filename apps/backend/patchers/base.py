@@ -18,6 +18,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_ensure_transformer_options` (function): Ensures model options include the nested transformer-options mapping.
 - `_copy_transformer_options` (function): Copies transformer options mapping to avoid shared-mutation across clones.
 - `set_model_options_patch_replace` (function): Adds a “patch replace” entry into model options (block/name/indices keyed).
+- `_coerce_patch_replace_block` (function): Validates and normalizes a patch-replace block key tuple before registration.
 - `set_model_options_post_cfg_function` (function): Registers a post-CFG callback in model options.
 - `set_model_options_pre_cfg_function` (function): Registers a pre-CFG callback in model options.
 - `ModelPatcher` (class): Main patcher wrapper around a model; owns LoRA/object patch registries and exposes many methods to
@@ -25,6 +26,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import copy
 import inspect
@@ -42,7 +44,7 @@ from apps.backend.runtime.memory.smart_offload import (
 )
 from .lora import CodexLoraLoader
 
-logger = logging.getLogger("backend.patchers.base")
+logger = get_backend_logger("backend.patchers.base")
 
 LoraPatchKey = Tuple[str, float, float, bool]
 PatchEntry = List[Any]
@@ -184,6 +186,26 @@ def set_model_options_patch_replace(
         transformer_index,
     )
     return model_options
+
+
+def _coerce_patch_replace_block(block: Any) -> tuple[tuple[str, int] | tuple[str, int, int], str, int, Optional[int]]:
+    if not isinstance(block, tuple):
+        raise TypeError("Patch-replace block key must be a tuple.")
+    if len(block) == 2:
+        block_name, number = block
+        transformer_index = None
+    elif len(block) == 3:
+        block_name, number, transformer_index = block
+    else:
+        raise TypeError("Patch-replace block key must have length 2 or 3.")
+    if not isinstance(block_name, str):
+        raise TypeError("Patch-replace block name must be a string.")
+    if not isinstance(number, int):
+        raise TypeError("Patch-replace block index must be an int.")
+    if transformer_index is not None and not isinstance(transformer_index, int):
+        raise TypeError("Patch-replace transformer_index must be an int when provided.")
+    normalized = (block_name, number) if transformer_index is None else (block_name, number, transformer_index)
+    return normalized, block_name, number, transformer_index
 
 
 def set_model_options_post_cfg_function(
@@ -414,6 +436,28 @@ class ModelPatcher:
             transformer_index=transformer_index,
         )
 
+    def set_model_patch_replace_many(self, name: str, patches: MutableMapping[tuple[Any, ...], Any]) -> None:
+        transformer_options = _ensure_transformer_options(self._model_options)
+        patches_replace = transformer_options.setdefault("patches_replace", {})
+        if not isinstance(patches_replace, MutableMapping):
+            raise TypeError("transformer_options['patches_replace'] must be a mapping")
+        target = patches_replace.get(name)
+        if target is None:
+            target = {}
+            patches_replace[name] = target
+        elif not isinstance(target, MutableMapping):
+            raise TypeError(f"transformer_options['patches_replace']['{name}'] must be a mapping")
+        for raw_block, patch in patches.items():
+            block, block_name, number, transformer_index = _coerce_patch_replace_block(raw_block)
+            target[block] = patch
+            logger.debug(
+                "Registered transformer replace patch name=%s block=%s number=%s transformer_index=%s",
+                name,
+                block_name,
+                number,
+                transformer_index,
+            )
+
     def set_model_attn1_patch(self, patch):
         self.set_model_patch(patch, "attn1_patch")
 
@@ -425,6 +469,12 @@ class ModelPatcher:
 
     def set_model_attn2_replace(self, patch, block_name, number, transformer_index=None):
         self.set_model_patch_replace(patch, "attn2", block_name, number, transformer_index)
+
+    def set_model_attn1_replace_many(self, patches: MutableMapping[tuple[Any, ...], Any]) -> None:
+        self.set_model_patch_replace_many("attn1", patches)
+
+    def set_model_attn2_replace_many(self, patches: MutableMapping[tuple[Any, ...], Any]) -> None:
+        self.set_model_patch_replace_many("attn2", patches)
 
     def set_model_attn1_output_patch(self, patch):
         self.set_model_patch(patch, "attn1_output_patch")

@@ -14,7 +14,7 @@ Status: Active
 - **No models in Git:** model weights, checkpoints, and large binary artefacts (e.g., `models/`, `*.ckpt`, `*.safetensors`) must remain untracked.
 - **No caches or build outputs:** bytecode caches (`__pycache__/`), node modules (`node_modules/`), frontend bundles (`apps/interface/dist/`), and temporary directories (repo-root `.tmp/`, plus `.pytest_cache/`) stay ignored. (Legacy repo-root scratch `tmp` is deprecated; do not use it.)
 - **Docs and configs are tracked:** docs/config/source in this repo are tracked; the companion `.sangoi` repo (checked out at `./.sangoi/`) holds maintainers’ extended docs + dev tooling and is intentionally ignored here.
-- **Tests and dev tooling live in `.sangoi`:** this repo does not track `tests/` or repo-root `tools/`; use `.sangoi/dev/tests/` and `.sangoi/dev/tools/` after checking out the companion docs repo.
+- **Dev tooling lives in `.sangoi`:** this repo does not track repo-root `tools/`; use `.sangoi/dev/tools/` after checking out the companion docs repo.
 - **No binary office docs:** keep office exports like `*.docx` local; prefer Markdown under `.sangoi/**`.
 
 ## WebUI runtime outputs (tracked? no)

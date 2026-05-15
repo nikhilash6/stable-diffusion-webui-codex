@@ -7,20 +7,32 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Dynamic model tab view (`/models/:tabId`).
-Loads the selected tab from the tabs store and mounts either `WANTab` or `ImageModelTab` based on tab type.
+Loads the selected tab from the tabs store and mounts the current video route selector or `ImageModelTab` for image families,
+while distinguishing stale route ids from deferred tab-load failures.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `ModelTabView` (component): Route view that mounts the correct model tab workspace.
-- `ImageTabType` (type): Non-WAN tab types supported by `ImageModelTab`.
-- `imageTabType` (computed): Normalized non-WAN type passed to `ImageModelTab`.
+- `tabLoadFailed` (computed): Tracks whether deferred model-tab loading failed for the current route.
+- `VideoTabType` (type): Video tab types supported by `VideoTabRouteView`.
+- `videoTabType` (computed): Normalized video tab type passed to `VideoTabRouteView`.
+- `ImageTabType` (type): Non-video tab types supported by `ImageModelTab`.
+- `imageTabType` (computed): Normalized non-video type passed to `ImageModelTab`.
 -->
 
 <template>
   <section v-if="tab">
-    <WANTab v-if="tab.type === 'wan'" :tab-id="tab.id" :key="tab.id" />
+    <VideoTabRouteView v-if="videoTabType" :tab-id="tab.id" :key="tab.id" />
     <ImageModelTab v-else-if="imageTabType" :tab-id="tab.id" :key="tab.id" :type="imageTabType" />
     <div v-else class="panel">
       <div class="panel-body">Unsupported tab type: {{ tab.type }}</div>
+    </div>
+  </section>
+  <section v-else-if="tabLoadFailed">
+    <div class="panel">
+      <div class="panel-body">
+        <p>Falha ao carregar abas do modelo.</p>
+        <p v-if="bootstrap.deferredMessage" class="caption">{{ bootstrap.deferredMessage }}</p>
+      </div>
     </div>
   </section>
   <section v-else>
@@ -31,21 +43,32 @@ Symbols (top-level; keep in sync; no ghosts):
 <script setup lang="ts">
 import { computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import WANTab from './WANTab.vue'
 import ImageModelTab from './ImageModelTab.vue'
+import VideoTabRouteView from './VideoTabRouteView.vue'
+import { useBootstrapStore } from '../stores/bootstrap'
 import { useModelTabsStore, type BaseTabType } from '../stores/model_tabs'
+import { isVideoTabFamily, type VideoTabFamily } from '../utils/engine_taxonomy'
 
 const route = useRoute()
+const bootstrap = useBootstrapStore()
 const store = useModelTabsStore()
 
 const id = computed(() => String(route.params.tabId || ''))
 const tab = computed(() => store.tabs.find(t => t.id === id.value) || null)
+const tabLoadFailed = computed(() => !tab.value && bootstrap.deferredStatus === 'error')
 
-type ImageTabType = Exclude<BaseTabType, 'wan'>
+type VideoTabType = VideoTabFamily
+type ImageTabType = Exclude<BaseTabType, VideoTabFamily>
+
+const videoTabType = computed<VideoTabType | null>(() => {
+  const t = tab.value?.type
+  if (isVideoTabFamily(t)) return t
+  return null
+})
 
 const imageTabType = computed<ImageTabType | null>(() => {
   const t = tab.value?.type
-  if (!t || t === 'wan') return null
+  if (!t || isVideoTabFamily(t)) return null
   return t
 })
 

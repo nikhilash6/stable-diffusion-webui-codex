@@ -8,7 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: Prediction adapters and helpers (FlowMatch / EDM variants) used by schedulers/samplers.
 Provides prediction modules that transform model outputs into the form expected by different sigma schedules (including FlowMatch Euler),
-plus helper utilities for beta schedules and SNR/sigma rescaling. Flow-match helpers follow ComfyUI-style discrete flow semantics:
+plus helper utilities for beta schedules and SNR/sigma rescaling. Flow-match helpers keep shift-aware discrete-flow semantics:
 `percent_to_sigma` applies the same shift transform used by the schedule, and discrete-flow predictors support an explicit timestep multiplier.
 This module is Diffusers-free and uses Codex-native flow-shift helpers.
 
@@ -17,7 +17,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `make_beta_schedule` (function): Creates standard beta schedules (linear/cosine/sqrt variants) as tensors.
 - `time_snr_shift` (function): Applies an SNR-based time shift parameterization.
 - `rescale_zero_terminal_snr_sigmas` (function): Rescales sigmas for “zero terminal SNR” behavior.
-- `SIMPLE_SCHEDULE_MODE_COMFY_DOWNSAMPLE_SIGMAS` (constant): Predictor opt-in for Comfy-style SIMPLE sigma downsample.
+- `SIMPLE_SCHEDULE_MODE_TAIL_DOWNSAMPLE_SIGMAS` (constant): Predictor opt-in for SIMPLE sigma downsample from the predictor ladder tail.
 - `SIMPLE_SCHEDULE_MODE_FLOWMATCH_SHIFTED_LINSPACE` (constant): Predictor default SIMPLE mode (legacy shifted-linspace behavior).
 - `FLOW_SIMPLE_SCHEDULE_MODES` (constant): Allowed SIMPLE schedule mode values for flow predictors.
 - `AbstractPrediction` (class): Base prediction module interface (torch.nn.Module) for mapping model output → prediction.
@@ -38,11 +38,11 @@ import numpy as np
 from apps.backend.runtime.model_registry.flow_shift import calculate_shift
 
 
-SIMPLE_SCHEDULE_MODE_COMFY_DOWNSAMPLE_SIGMAS = "comfy_downsample_sigmas"
+SIMPLE_SCHEDULE_MODE_TAIL_DOWNSAMPLE_SIGMAS = "tail_downsample_sigmas"
 SIMPLE_SCHEDULE_MODE_FLOWMATCH_SHIFTED_LINSPACE = "flowmatch_shifted_linspace"
 FLOW_SIMPLE_SCHEDULE_MODES = frozenset(
     {
-        SIMPLE_SCHEDULE_MODE_COMFY_DOWNSAMPLE_SIGMAS,
+        SIMPLE_SCHEDULE_MODE_TAIL_DOWNSAMPLE_SIGMAS,
         SIMPLE_SCHEDULE_MODE_FLOWMATCH_SHIFTED_LINSPACE,
     }
 )
@@ -278,7 +278,7 @@ class PredictionFlow(AbstractPrediction):
         self.multiplier = float(multiplier)
         if simple_schedule_mode is None:
             # Default behavior: keep legacy SIMPLE schedule semantics (FlowMatch-style shifted-linspace).
-            # The sigma scheduler opts-in to Comfy parity only when set to `comfy_downsample_sigmas`.
+            # The sigma scheduler opts-in to tail-downsample SIMPLE scheduling only when set to `tail_downsample_sigmas`.
             self.simple_schedule_mode = SIMPLE_SCHEDULE_MODE_FLOWMATCH_SHIFTED_LINSPACE
         else:
             value = str(simple_schedule_mode).strip().lower()
@@ -317,9 +317,9 @@ class PredictionFlow(AbstractPrediction):
 
 
 class PredictionDiscreteFlow(PredictionFlow):
-    """Discrete flow predictor matching ComfyUI `ModelSamplingDiscreteFlow`.
+    """Discrete flow predictor with explicit shift-aware timestep scaling.
 
-    This wrapper exists for parity with upstream naming; the implementation is
+    This wrapper exists for explicit naming; the implementation is
     identical to `PredictionFlow` (shift + multiplier-based timestep mapping).
     """
 

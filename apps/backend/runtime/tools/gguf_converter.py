@@ -11,7 +11,7 @@ Used primarily for text encoders and other components that need GGUF artifacts (
 
 Symbols (top-level; keep in sync; no ghosts):
 - `QuantizationType` (enum): Supported “human” quantization selectors for conversion (maps to `GGMLQuantizationType`).
-- `ConversionConfig` (dataclass): Conversion configuration (input/output paths, quantization choices, tensor overrides, and metadata inputs).
+- `ConversionConfig` (dataclass): Conversion configuration (input/output paths, quantization choices, profile selection, and dtype overrides).
 - `ConversionProgress` (dataclass): Progress/report structure for long conversions (stage counters, timings, and status fields).
 - `GGUFConversionCancelled` (exception): Raised when a conversion is cancelled via a cooperative cancel signal.
 - `GGUFVerificationError` (exception): Raised when a written GGUF file fails validation/verification.
@@ -25,6 +25,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 from dataclasses import replace
 import json
@@ -51,7 +52,6 @@ from apps.backend.runtime.tools.gguf_converter_float_groups import float_groups_
 from apps.backend.runtime.tools.gguf_converter_specs import (
     CompiledTensorTypeRule,
     GGUFArch,
-    GGUFKeyLayout,
     TensorNameTarget,
 )
 from apps.backend.runtime.tools.gguf_converter_types import (
@@ -63,7 +63,7 @@ from apps.backend.runtime.tools.gguf_converter_types import (
     normalize_mixed_float_override,
 )
 
-logger = logging.getLogger("backend.runtime.tools.gguf_converter")
+logger = get_backend_logger("backend.runtime.tools.gguf_converter")
 
 
 class GGUFConversionCancelled(Exception):
@@ -264,15 +264,14 @@ def convert_safetensors_to_gguf(
     logger.info("Loaded config: %s", model_config.get("_class_name") or model_config.get("model_type") or "unknown")
     check_cancel()
     
-    comfy_layout = bool(getattr(config, "comfy_layout", True))
-
     profile_id = getattr(config, "profile_id", None)
     if profile_id:
         profile = _profiles.profile_by_id(str(profile_id))
-        if profile.layout in {GGUFKeyLayout.COMFY_CODEX, GGUFKeyLayout.NATIVE_KEYS}:
-            comfy_layout = profile.layout is GGUFKeyLayout.COMFY_CODEX
+        if not profile.detect(model_config):
+            cfg_hint = model_config.get("_class_name") or model_config.get("architectures") or model_config.get("model_type") or "unknown"
+            raise RuntimeError(f"profile_id {profile.id.value!r} does not match the selected config ({cfg_hint!r})")
     else:
-        profile = _profiles.resolve_profile(model_config, comfy_layout=comfy_layout)
+        profile = _profiles.resolve_profile(model_config)
 
     precision_mode = getattr(config, "precision_mode", None)
     plus_mode_overrides = _precision_mode_plus_overrides(precision_mode, profile_id=profile.id.value)
@@ -304,7 +303,7 @@ def convert_safetensors_to_gguf(
         arch = profile.arch.value
 
     metadata_config = (
-        profile.planner.normalize_metadata(model_config) if profile.planner is not None else dict(model_config)
+        profile.metadata_normalizer(model_config) if profile.metadata_normalizer is not None else dict(model_config)
     )
 
     key_mapping: dict[str, str] = {}
@@ -325,10 +324,7 @@ def convert_safetensors_to_gguf(
         tensor_names = list(sf.keys())
         check_cancel()
 
-        if profile.layout is GGUFKeyLayout.COMFY_CODEX and profile.planner is not None:
-            plans, key_mapping = profile.planner.plan(tensor_names, sf, requested_type, dtype_rules)
-        else:
-            plans = _tensor_planner.plan_tensors(tensor_names, sf, key_mapping, requested_type, dtype_rules)
+        plans = _tensor_planner.plan_tensors(tensor_names, sf, key_mapping, requested_type, dtype_rules)
         plans = _force_nonquantized_tensor_dtype(plans, target_dtype=full_float_target)
 
         progress.total_steps = len(plans)
@@ -343,7 +339,6 @@ def convert_safetensors_to_gguf(
             config_path=config_path,
             safetensors_path=config.safetensors_path,
         )
-        writer.add_bool("codex.converter.comfy_layout", comfy_layout)
 
         for plan in plans:
             raw_dtype = None if plan.ggml_type in {GGMLQuantizationType.F16, GGMLQuantizationType.F32} else plan.ggml_type

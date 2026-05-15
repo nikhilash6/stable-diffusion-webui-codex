@@ -2,7 +2,7 @@
 
 # apps/backend/runtime/families/supir/nn Overview
 Date: 2026-02-02
-Last Review: 2026-02-02
+Last Review: 2026-04-02
 Status: In progress
 
 ## Purpose
@@ -17,4 +17,4 @@ Status: In progress
 ## Notes
 - Weight compatibility is strict on structure: module/attribute names must remain stable once SUPIR weights are supported.
 - These modules are torch-heavy; keep imports local in routers/tasks (import-light policy).
-
+- `GLVControl.label_emb` for `num_classes='sequential'` must keep the upstream nested owner shape (`label_emb.0.0.*` / `label_emb.0.2.*`), not the flattened `label_emb.0.*` / `label_emb.2.*` shape, or official SUPIR control checkpoints stop loading.

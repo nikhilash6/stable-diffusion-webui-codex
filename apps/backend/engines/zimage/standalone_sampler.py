@@ -16,6 +16,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from typing import Optional
@@ -25,7 +26,7 @@ from diffusers import FlowMatchEulerDiscreteScheduler
 
 from apps.backend.runtime.memory import memory_management
 
-logger = logging.getLogger("backend.zimage.standalone")
+logger = get_backend_logger("backend.zimage.standalone")
 
 
 def _default_zimage_sampler_device() -> str:

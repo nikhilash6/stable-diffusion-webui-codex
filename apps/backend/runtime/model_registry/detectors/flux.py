@@ -39,8 +39,6 @@ from apps.backend.runtime.model_registry.specs import (
     TextEncoderSignature,
     VAESignature,
 )
-from apps.backend.quantization.tensor import CodexParameter
-
 
 FLUX_CORE_KEYS = (
     "x_embedder.weight",
@@ -157,8 +155,8 @@ class FluxCoreGGUFDetector(ModelDetector):
             if key in bundle.state_dict:
                 return False
 
-        # Ensure this is actually a GGUF quantized checkpoint (CodexParameter tensors).
-        if not any(isinstance(v, CodexParameter) and v.qtype is not None for v in bundle.state_dict.values()):
+        # Ensure this is actually a GGUF quantized checkpoint.
+        if not bundle.is_gguf_quantized():
             return False
 
         return True

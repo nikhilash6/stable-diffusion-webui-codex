@@ -6,31 +6,30 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Modal for quicksettings device/dtype overrides.
-Provides global device selection and per-component device/dtype overrides (core/TE/VAE) backed by the quicksettings store, and reflects backend
+Purpose: Modal for quicksettings runtime device/dtype overrides.
+Provides one runtime-device override plus per-component dtype overrides backed by the quicksettings store, and reflects backend
 apply metadata (`restart_required[]`) so restart warnings are shown only when required.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `QuickSettingsOverridesModal` (component): Quicksettings overrides modal for device/dtype settings.
+- `runStoreUpdate` (function): Shared async store-update wrapper that turns rejected option writes into a visible modal notice instead of an unhandled console rejection.
 - `onCoreDtypeChange` (function): Store update handler for Core storage dtype selection.
 - `onCoreComputeDtypeChange` (function): Store update handler for Core compute dtype selection.
-- `onCoreDeviceChange` (function): Store update handler for Core device selection.
 - `onTeDtypeChange` (function): Store update handler for TE storage dtype selection.
 - `onTeComputeDtypeChange` (function): Store update handler for TE compute dtype selection.
-- `onTeDeviceChange` (function): Store update handler for TE device selection.
 - `onVaeDtypeChange` (function): Store update handler for VAE storage dtype selection.
 - `onVaeComputeDtypeChange` (function): Store update handler for VAE compute dtype selection.
-- `onVaeDeviceChange` (function): Store update handler for VAE device selection.
-- `onGlobalDeviceChange` (function): Store update handler for global device selection.
+- `onMainDeviceChange` (function): Store update handler for runtime main-device selection.
 - `resetAll` (function): Resets overrides back to `auto` for all components.
 - `close` (function): Closes the modal.
 -->
 
 <template>
-  <Modal v-model="open" title="Component overrides">
+  <Modal v-model="open" title="Runtime overrides">
     <p class="subtitle">
-      Configure global device and per-component overrides (device + storage/compute dtype). Leave values as <code>Default</code> to clear overrides.
+      Configure one runtime device override and per-component dtype overrides. Leave the device as <code>Default</code> to follow backend authority.
     </p>
+    <p v-if="notice" class="caption" role="status">{{ notice }}</p>
     <p v-if="store.lastRestartRequiredMessages.length > 0" class="cdx-qs-overrides-restart-note" role="note">
       Some settings require API restart before they take effect.
     </p>
@@ -43,9 +42,10 @@ Symbols (top-level; keep in sync; no ghosts):
 
     <div class="gen-card">
       <div class="field">
-        <label class="label-muted">Global device</label>
+        <label class="label-muted">Runtime device</label>
         <div class="qs-row">
-          <select class="select-md" :value="store.currentDevice" @change="onGlobalDeviceChange">
+          <select class="select-md" :value="store.mainDevice" @change="onMainDeviceChange">
+            <option value="auto">Default</option>
             <option v-for="opt in store.deviceChoices" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
           </select>
         </div>
@@ -73,15 +73,6 @@ Symbols (top-level; keep in sync; no ghosts):
               </select>
             </div>
           </div>
-          <div class="field">
-            <label class="label-muted">Core device</label>
-            <div class="qs-row">
-              <select class="select-md" :value="store.coreDevice" @change="onCoreDeviceChange">
-                <option value="auto">Default</option>
-                <option v-for="opt in store.deviceChoices" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
-              </select>
-            </div>
-          </div>
         </div>
 
         <div class="cdx-qs-overrides-col">
@@ -99,15 +90,6 @@ Symbols (top-level; keep in sync; no ghosts):
             <div class="qs-row">
               <select class="select-md" :value="store.teComputeDtype" @change="onTeComputeDtypeChange">
                 <option v-for="opt in store.dtypeChoices" :key="opt" :value="opt">{{ opt === 'auto' ? 'Default' : opt }}</option>
-              </select>
-            </div>
-          </div>
-          <div class="field">
-            <label class="label-muted">TE device</label>
-            <div class="qs-row">
-              <select class="select-md" :value="store.teDevice" @change="onTeDeviceChange">
-                <option value="auto">Default</option>
-                <option v-for="opt in store.deviceChoices" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
               </select>
             </div>
           </div>
@@ -131,15 +113,6 @@ Symbols (top-level; keep in sync; no ghosts):
               </select>
             </div>
           </div>
-          <div class="field">
-            <label class="label-muted">VAE device</label>
-            <div class="qs-row">
-              <select class="select-md" :value="store.vaeDevice" @change="onVaeDeviceChange">
-                <option value="auto">Default</option>
-                <option v-for="opt in store.deviceChoices" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
-              </select>
-            </div>
-          </div>
         </div>
       </div>
     </div>
@@ -153,6 +126,7 @@ Symbols (top-level; keep in sync; no ghosts):
 <script setup lang="ts">
 import { computed } from 'vue'
 import Modal from '../ui/Modal.vue'
+import { useResultsCard } from '../../composables/useResultsCard'
 import { useQuicksettingsStore } from '../../stores/quicksettings'
 
 const props = defineProps<{ modelValue: boolean }>()
@@ -164,48 +138,53 @@ const open = computed({
 })
 
 const store = useQuicksettingsStore()
+const { notice, toast } = useResultsCard({ noticeDurationMs: 4000 })
+
+async function runStoreUpdate(action: Promise<unknown>): Promise<void> {
+  try {
+    await action
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error))
+  }
+}
 
 function onCoreDtypeChange(e: Event): void {
-  void store.setCoreDtype((e.target as HTMLSelectElement).value)
+  void runStoreUpdate(store.setCoreDtype((e.target as HTMLSelectElement).value))
 }
 function onCoreComputeDtypeChange(e: Event): void {
-  void store.setCoreComputeDtype((e.target as HTMLSelectElement).value)
-}
-function onCoreDeviceChange(e: Event): void {
-  void store.setCoreDevice((e.target as HTMLSelectElement).value)
+  void runStoreUpdate(store.setCoreComputeDtype((e.target as HTMLSelectElement).value))
 }
 function onTeDtypeChange(e: Event): void {
-  void store.setTeDtype((e.target as HTMLSelectElement).value)
+  void runStoreUpdate(store.setTeDtype((e.target as HTMLSelectElement).value))
 }
 function onTeComputeDtypeChange(e: Event): void {
-  void store.setTeComputeDtype((e.target as HTMLSelectElement).value)
-}
-function onTeDeviceChange(e: Event): void {
-  void store.setTeDevice((e.target as HTMLSelectElement).value)
+  void runStoreUpdate(store.setTeComputeDtype((e.target as HTMLSelectElement).value))
 }
 function onVaeDtypeChange(e: Event): void {
-  void store.setVaeDtype((e.target as HTMLSelectElement).value)
+  void runStoreUpdate(store.setVaeDtype((e.target as HTMLSelectElement).value))
 }
 function onVaeComputeDtypeChange(e: Event): void {
-  void store.setVaeComputeDtype((e.target as HTMLSelectElement).value)
+  void runStoreUpdate(store.setVaeComputeDtype((e.target as HTMLSelectElement).value))
 }
-function onVaeDeviceChange(e: Event): void {
-  void store.setVaeDevice((e.target as HTMLSelectElement).value)
-}
-function onGlobalDeviceChange(e: Event): void {
-  void store.setCoreDevice((e.target as HTMLSelectElement).value)
+function onMainDeviceChange(e: Event): void {
+  void runStoreUpdate(store.setMainDevice((e.target as HTMLSelectElement).value))
 }
 
 function resetAll(): void {
-  void store.setCoreDtype('auto')
-  void store.setCoreComputeDtype('auto')
-  void store.setTeDtype('auto')
-  void store.setTeComputeDtype('auto')
-  void store.setVaeDtype('auto')
-  void store.setVaeComputeDtype('auto')
-  void store.setCoreDevice('auto')
-  void store.setTeDevice('auto')
-  void store.setVaeDevice('auto')
+  void (async () => {
+    try {
+      await store.setCoreDtype('auto')
+      await store.setCoreComputeDtype('auto')
+      await store.setTeDtype('auto')
+      await store.setTeComputeDtype('auto')
+      await store.setVaeDtype('auto')
+      await store.setVaeComputeDtype('auto')
+      await store.setMainDevice('auto')
+      toast('Overrides reset to default.')
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error))
+    }
+  })()
 }
 
 function close(): void {

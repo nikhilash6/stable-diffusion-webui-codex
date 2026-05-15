@@ -7,7 +7,8 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: PNG info inspection view.
-Inspect uploaded PNG metadata, parse common infotext formats, and bridge extracted parameters into model tabs and workflow snapshots.
+Inspect uploaded PNG metadata, parse common infotext formats, and bridge extracted parameters into model tabs and workflow snapshots
+(including family-aware sampler/scheduler patching that never applies family-invalid values).
 
 Symbols (top-level; keep in sync; no ghosts):
 - `PngInfo` (component): PNG info route view component.
@@ -15,7 +16,7 @@ Symbols (top-level; keep in sync; no ghosts):
 -->
 
 <template>
-  <section class="panels pnginfo-panels">
+  <section class="panels">
     <div class="panel-stack">
       <div class="panel">
         <div class="panel-header">Drop PNG</div>
@@ -241,9 +242,17 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { analyzePngInfo, fetchModelInventory, fetchSamplers, fetchSchedulers } from '../api/client'
 import type { InventoryResponse, PngInfoAnalyzeResponse, SamplerInfo, SchedulerInfo } from '../api/types'
 import { useResultsCard } from '../composables/useResultsCard'
+import {
+  filterSamplersForFamilyCapabilities,
+  filterSchedulersForFamilyCapabilities,
+  useEngineCapabilitiesStore,
+} from '../stores/engine_capabilities'
 import { useModelTabsStore } from '../stores/model_tabs'
 import { useQuicksettingsStore } from '../stores/quicksettings'
 import { useWorkflowsStore } from '../stores/workflows'
+import { isWanTabFamily, resolveImageRequestEngineId, type TabFamily } from '../utils/engine_taxonomy'
+import { readFileAsDataURL } from '../utils/image_io'
+import { buildUseInitImagePatch } from '../utils/image_params'
 import { mapCheckpointTitle, mapSamplerScheduler, parseComfyPromptJson, parseInfotext, type ParsedInfotext } from '../utils/pnginfo'
 import ResultsCard from '../components/results/ResultsCard.vue'
 import Dropzone from '../components/ui/Dropzone.vue'
@@ -254,6 +263,7 @@ type TargetMode = 'txt2img' | 'img2img'
 const tabs = useModelTabsStore()
 const workflows = useWorkflowsStore()
 const quicksettings = useQuicksettingsStore()
+const engineCaps = useEngineCapabilitiesStore()
 const { notice, toast } = useResultsCard()
 
 const selectedFile = ref<File | null>(null)
@@ -271,10 +281,25 @@ const workflowBusy = ref(false)
 const sendBusy = ref(false)
 const lastSentTabId = ref<string>('')
 
-const compatibleTabs = computed(() => tabs.orderedTabs.filter(t => t.type !== 'wan' && t.type !== 'anima'))
+const compatibleTabs = computed(() => tabs.orderedTabs.filter((tab) => !isWanTabFamily(tab.type) && tab.type !== 'anima' && tab.type !== 'ltx2'))
 const targetTabId = ref('')
 const targetTab = computed(() => compatibleTabs.value.find(t => t.id === targetTabId.value) || null)
 const targetMode = ref<TargetMode>('txt2img')
+const targetTabFamily = computed<TabFamily | null>(() => {
+  const type = targetTab.value?.type
+  if (!type || isWanTabFamily(type) || type === 'anima' || type === 'ltx2') return null
+  return type
+})
+const targetSamplingEngineId = computed(() => {
+  const family = targetTabFamily.value
+  if (!family) return null
+  return resolveImageRequestEngineId(family, targetMode.value === 'img2img')
+})
+const targetFamilyCapabilities = computed(() => {
+  const engineId = targetSamplingEngineId.value
+  if (!engineId) return null
+  return engineCaps.getFamilyForEngine(engineId)
+})
 
 const parsedResult = computed(() => parseInfotext(infotext.value))
 const parsed = computed<ParsedInfotext>(() => parsedResult.value.parsed)
@@ -299,7 +324,7 @@ const resolvedVae = computed<VaeResolution>(() => {
   if (matches.length > 1) return { warnings: [`VAE '${raw}' is ambiguous (${matches.length} matches); leaving unchanged.`] }
 
   const entry = matches[0]
-  const wantsPath = tab.type === 'flux1' || tab.type === 'chroma' || tab.type === 'zimage'
+  const wantsPath = tab.type === 'flux1' || tab.type === 'flux2' || tab.type === 'chroma' || tab.type === 'zimage'
   const label = wantsPath ? String(entry.path || '').replace(/\\+/g, '/') : String(entry.name || '').trim()
   if (!label) return { warnings: [`VAE '${raw}' resolved, but label is empty; leaving unchanged.`] }
   return { label, warnings: [] }
@@ -307,9 +332,29 @@ const resolvedVae = computed<VaeResolution>(() => {
 const resolvedVaeLabel = computed(() => resolvedVae.value.label || '')
 const vaeWarnings = computed(() => resolvedVae.value.warnings)
 
-const mappingResult = computed(() =>
-  mapSamplerScheduler(parsed.value.sampler, parsed.value.scheduler, samplers.value, schedulers.value),
-)
+const samplingMapSamplers = computed<SamplerInfo[]>(() => {
+  if (!targetTabFamily.value) return samplers.value
+  if (!targetFamilyCapabilities.value) return []
+  return filterSamplersForFamilyCapabilities(samplers.value, targetFamilyCapabilities.value)
+})
+const samplingMapSchedulers = computed<SchedulerInfo[]>(() => {
+  if (!targetTabFamily.value) return schedulers.value
+  if (!targetFamilyCapabilities.value) return []
+  return filterSchedulersForFamilyCapabilities(schedulers.value, targetFamilyCapabilities.value)
+})
+const samplingMappingCapabilityWarning = computed(() => {
+  if (!targetTabFamily.value) return ''
+  if (targetFamilyCapabilities.value) return ''
+  const engineId = targetSamplingEngineId.value
+  if (!engineId) return ''
+  return `Family sampling capabilities for '${engineId}' are unavailable; sampler/scheduler import is skipped.`
+})
+const mappingResult = computed(() => {
+  if (targetTabFamily.value && !targetFamilyCapabilities.value) {
+    return { warnings: [] as string[] }
+  }
+  return mapSamplerScheduler(parsed.value.sampler, parsed.value.scheduler, samplingMapSamplers.value, samplingMapSchedulers.value)
+})
 const mappedSampler = computed(() => mappingResult.value.sampler || '')
 const mappedScheduler = computed(() => mappingResult.value.scheduler || '')
 const mappingWarnings = computed(() => mappingResult.value.warnings)
@@ -324,6 +369,7 @@ const allWarnings = computed(() => [
   ...parseWarnings.value,
   ...checkpointWarnings.value,
   ...vaeWarnings.value,
+  ...(samplingMappingCapabilityWarning.value ? [samplingMappingCapabilityWarning.value] : []),
   ...mappingWarnings.value,
   ...comfyWarnings.value,
 ])
@@ -361,15 +407,6 @@ const canSendTo = computed(() => {
   if (targetMode.value === 'img2img' && !previewDataUrl.value) return false
   return true
 })
-
-function readFileAsDataURL(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result))
-    reader.onerror = () => reject(reader.error)
-    reader.readAsDataURL(file)
-  })
-}
 
 function metadataValue(metadata: Record<string, string> | undefined | null, key: string): string {
   if (!metadata) return ''
@@ -517,23 +554,32 @@ function buildImageParamsPatch(options: { mode: TargetMode; includeInitImage: bo
   if (p.clipSkip !== undefined) patch.clipSkip = p.clipSkip
   if (p.denoiseStrength !== undefined) patch.denoiseStrength = p.denoiseStrength
 
-  if (mappingResult.value.sampler && mappingResult.value.scheduler) {
-    patch.sampler = mappingResult.value.sampler
-    patch.scheduler = mappingResult.value.scheduler
+  const canApplySamplingPatch = !targetTabFamily.value || Boolean(targetFamilyCapabilities.value)
+  if (canApplySamplingPatch) {
+    if (mappingResult.value.sampler) patch.sampler = mappingResult.value.sampler
+    if (mappingResult.value.scheduler) patch.scheduler = mappingResult.value.scheduler
   }
 
   if (options.mode === 'txt2img') {
-    patch.useInitImage = false
-    patch.initImageData = ''
-    patch.initImageName = ''
+    Object.assign(patch, buildUseInitImagePatch(false))
   } else if (options.includeInitImage) {
-    patch.useInitImage = true
+    Object.assign(patch, buildUseInitImagePatch(true))
+    patch.initSource = {
+      ...(targetTab.value?.params.initSource ?? {
+        mode: 'img',
+        folderPath: '',
+        selectionMode: 'all',
+        count: 1,
+        order: 'random',
+        sortBy: 'name',
+        useCrop: false,
+      }),
+      mode: 'img',
+    }
     patch.initImageData = previewDataUrl.value
     patch.initImageName = selectedFile.value?.name || ''
   } else {
-    patch.useInitImage = false
-    patch.initImageData = ''
-    patch.initImageName = ''
+    Object.assign(patch, buildUseInitImagePatch(false))
   }
 
   return { patch, warnings: allWarnings.value }
@@ -542,8 +588,10 @@ function buildImageParamsPatch(options: { mode: TargetMode; includeInitImage: bo
 async function maybeApplyVae(): Promise<{ appliedLabel?: string; error?: string }> {
   const label = resolvedVaeLabel.value
   if (!label) return {}
+  const family = targetTabFamily.value
+  if (!family) return { error: 'Selected target tab does not support family-owned VAE apply.' }
   try {
-    await quicksettings.setVae(label)
+    await quicksettings.setVaeForFamily(family, label)
     return { appliedLabel: label }
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) }
@@ -556,21 +604,24 @@ async function saveSnapshot(): Promise<void> {
 
   workflowBusy.value = true
   try {
-    const { patch } = buildImageParamsPatch({ mode: 'txt2img', includeInitImage: false })
-    await workflows.createSnapshot({
+    const snapshotMode = targetMode.value
+    const { patch } = buildImageParamsPatch({
+      mode: snapshotMode,
+      includeInitImage: snapshotMode === 'img2img',
+    })
+    const result = await workflows.saveSnapshot({
       name: `${selectedFile.value.name} — ${new Date().toLocaleString()}`,
       source_tab_id: targetTab.value.id,
       type: targetTab.value.type,
-      engine_semantics: targetTab.value.type === 'wan' ? 'wan22' : targetTab.value.type,
       params_snapshot: patch,
     })
     const vae = await maybeApplyVae()
     if (vae.error) {
-      toast(`Snapshot saved. VAE not applied: ${vae.error}`)
+      toast(`${result.action === 'updated' ? 'Snapshot updated' : 'Snapshot saved'}. VAE not applied: ${vae.error}`)
     } else if (vae.appliedLabel) {
-      toast(`Snapshot saved. VAE: ${vae.appliedLabel}`)
+      toast(`${result.action === 'updated' ? 'Snapshot updated' : 'Snapshot saved'}. VAE: ${vae.appliedLabel}`)
     } else {
-      toast('Snapshot saved to Workflows.')
+      toast(result.action === 'updated' ? 'Snapshot updated in Workflows.' : 'Snapshot saved to Workflows.')
     }
   } catch (err) {
     toast(err instanceof Error ? err.message : String(err))
@@ -611,6 +662,9 @@ onMounted(async () => {
   try { await quicksettings.init() } catch (err) {
     initWarnings.value.push(`QuickSettings: failed to initialize (${err instanceof Error ? err.message : String(err)}).`)
   }
+  try { await engineCaps.init() } catch (err) {
+    initWarnings.value.push(`Capabilities: failed to initialize (${err instanceof Error ? err.message : String(err)}).`)
+  }
   try { inventory.value = await fetchModelInventory() } catch (err) {
     initWarnings.value.push(`Inventory: failed to load (${err instanceof Error ? err.message : String(err)}).`)
   }
@@ -627,7 +681,7 @@ onMounted(async () => {
 watch([compatibleTabs, () => tabs.activeTab], () => {
   if (targetTabId.value && compatibleTabs.value.some(t => t.id === targetTabId.value)) return
   const active = tabs.activeTab
-  if (active && active.type !== 'wan') {
+  if (active && compatibleTabs.value.some((tab) => tab.id === active.id)) {
     targetTabId.value = active.id
     return
   }

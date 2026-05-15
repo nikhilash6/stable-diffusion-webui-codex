@@ -7,85 +7,88 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: LoRA picker + token insertion modal.
-Fetches LoRAs via the backend API, filters by search query, and emits `<lora:filename:weight>` tokens targeting positive/negative prompt inputs.
-Refreshes quicksettings LoRA SHA mappings from the same inventory payload used by the modal list.
+Wraps the shared `PromptAssetInsertModal.vue` shell, fetches LoRAs via the backend API, and emits `<lora:filename:weight>` tokens targeting
+positive/negative prompt inputs. Refreshes quicksettings LoRA SHA mappings from the same inventory payload used by the modal list.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `LoraModal` (component): Modal for browsing LoRAs and emitting insertion tokens.
-- `filtered` (const): Filtered LoRA list based on the current search query.
 - `loadItems` (function): Loads cached LoRA inventory into the modal list.
 - `resolveTokenName` (function): Resolves token filename from inventory row data.
 - `normalizeInsertWeight` (function): Normalizes user-entered LoRA weight to a finite numeric value.
-- `parseInventoryTaskResult` (function): Extracts inventory payloads from refresh task `result` SSE events.
-- `runAsyncInventoryRefreshTask` (function): Starts and awaits async inventory refresh task completion.
+- `isAbortError` (function): Detects abort-shaped refresh failures so user-facing errors stay clean.
 - `cancelActiveRefreshTask` (function): Cancels any in-flight refresh task SSE subscription.
 - `refreshList` (function): Runs async inventory refresh and applies LoRA/quicksettings updates on terminal success.
 - `toggleInsert` (function): Toggles add/remove insertion state for a LoRA token target (`positive`/`negative`).
 -->
 
 <template>
-  <Modal v-model="open" title="LoRA Selector" panel-class="lora-modal-panel" :show-footer="false">
-    <div class="lora-modal-toolbar">
-      <div class="lora-modal-field lora-modal-field--search">
-        <label class="label-muted">Search</label>
-        <input class="ui-input" v-model="q" placeholder="type to filter..." />
-      </div>
-      <div class="lora-modal-field lora-modal-field--weight">
-        <label class="label-muted">Weight</label>
-        <input class="ui-input lora-modal-weight-input" type="number" step="0.05" min="0" v-model.number="weight" />
-      </div>
-      <button class="btn btn-sm btn-secondary lora-modal-refresh-btn" type="button" :disabled="loading" @click="refreshList">
-        {{ loading ? 'Refreshing…' : 'Refresh' }}
-      </button>
-      <span class="caption lora-modal-count">{{ filtered.length }} / {{ items.length }} LoRAs</span>
-    </div>
-    <p v-if="loadError" class="panel-error">Error: {{ loadError }}</p>
-    <div class="panel-section modal-list-section lora-modal-list-section">
+  <PromptAssetInsertModal
+    :model-value="modelValue"
+    title="LoRA Selector"
+    panel-class="prompt-asset-modal-panel"
+    :show-footer="false"
+    :show-refresh="true"
+    count-label="LoRAs"
+    :items="items"
+    :loading="loading"
+    :loaded="loaded"
+    :error-message="loadError"
+    :weight-step="0.05"
+    :get-item-label="getItemLabel"
+    @update:modelValue="emit('update:modelValue', $event)"
+    @ensure-loaded="loadItems"
+    @refresh="refreshList"
+  >
+    <template #items="{ filteredItems, weight }">
       <ul class="lora-modal-list" role="listbox">
-        <li v-for="item in filtered" :key="item.path || item.name" class="lora-modal-item">
+        <li v-for="item in asLoraItems(filteredItems)" :key="item.path || item.name" class="lora-modal-item">
           <span class="lora-modal-item__name" :title="item.name">{{ item.name }}</span>
           <span class="lora-modal-item__actions">
             <button
-              :class="['btn', 'btn-sm', 'btn-secondary', 'lora-modal-action', 'lora-modal-action--positive', { 'is-active': isSelected(item, 'positive') }]"
+              :class="['btn', 'btn-sm', 'btn-secondary', 'lora-modal-action', { 'is-active': isSelected(item, 'positive') }]"
               type="button"
               :aria-pressed="isSelected(item, 'positive') ? 'true' : 'false'"
               :title="isSelected(item, 'positive') ? 'Remove from Prompt' : 'Insert into Prompt'"
-              @click.stop="toggleInsert(item, 'positive')"
+              @click.stop="toggleInsert(item, 'positive', weight)"
             >
               {{ isSelected(item, 'positive') ? 'Prompt ✓' : 'Prompt' }}
             </button>
             <button
-              :class="['btn', 'btn-sm', 'btn-outline', 'lora-modal-action', 'lora-modal-action--negative', { 'is-active': isSelected(item, 'negative') }]"
+              v-if="showNegativeTarget"
+              :class="['btn', 'btn-sm', 'btn-outline', 'lora-modal-action', { 'is-active': isSelected(item, 'negative') }]"
               type="button"
               :aria-pressed="isSelected(item, 'negative') ? 'true' : 'false'"
               :title="isSelected(item, 'negative') ? 'Remove from Negative Prompt' : 'Insert into Negative Prompt'"
-              @click.stop="toggleInsert(item, 'negative')"
+              @click.stop="toggleInsert(item, 'negative', weight)"
             >
               {{ isSelected(item, 'negative') ? 'Negative ✓' : 'Negative' }}
             </button>
           </span>
         </li>
       </ul>
-    </div>
-  </Modal>
+    </template>
+  </PromptAssetInsertModal>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import Modal from '../ui/Modal.vue'
-import { cacheModelInventorySnapshot, fetchModelInventory, startModelInventoryRefreshTask, subscribeTask } from '../../api/client'
-import type { InventoryResponse, TaskEvent } from '../../api/types'
+import { onBeforeUnmount, ref, watch } from 'vue'
+import type { InventoryResponse } from '../../api/types'
 import { useQuicksettingsStore } from '../../stores/quicksettings'
+import PromptAssetInsertModal from './PromptAssetInsertModal.vue'
 
 type PromptTarget = 'positive' | 'negative'
 type InsertAction = 'add' | 'remove'
 
-const props = defineProps<{ modelValue: boolean }>()
+const props = withDefaults(defineProps<{
+  modelValue: boolean
+  showNegativeTarget?: boolean
+}>(), {
+  showNegativeTarget: true,
+})
 const emit = defineEmits<{
   (e: 'update:modelValue', value: boolean): void
   (e: 'insert', payload: { token: string; target: PromptTarget; action: InsertAction }): void
 }>()
-const open = computed({ get: () => props.modelValue, set: (v: boolean) => emit('update:modelValue', v) })
 const quicksettings = useQuicksettingsStore()
 
 interface LoraItem {
@@ -93,33 +96,22 @@ interface LoraItem {
   path: string
 }
 const items = ref<LoraItem[]>([])
-const q = ref('')
-const weight = ref(1.0)
 const loading = ref(false)
 const loaded = ref(false)
 const loadError = ref('')
 const selectedPositive = ref<Record<string, string>>({})
 const selectedNegative = ref<Record<string, string>>({})
-let activeRefreshCancel: (() => void) | null = null
-let refreshAbortRequested = false
+let activeRefreshAbortController: AbortController | null = null
 
-const REFRESH_CANCELLED_MESSAGE = 'LoRA inventory refresh cancelled'
-
-const filtered = computed(() => {
-  const query = q.value.toLowerCase().trim()
-  return items.value.filter(n => n.name.toLowerCase().includes(query))
-})
 watch(
-  open,
-  async (isOpen) => {
+  () => props.modelValue,
+  (isOpen) => {
     if (!isOpen) {
       cancelActiveRefreshTask()
       selectedPositive.value = {}
       selectedNegative.value = {}
       return
     }
-    if (loaded.value) return
-    await loadItems()
   },
   { immediate: true },
 )
@@ -127,22 +119,6 @@ watch(
 onBeforeUnmount(() => {
   cancelActiveRefreshTask()
 })
-
-function isRecordObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-}
-
-function parseInventoryTaskResult(event: TaskEvent): InventoryResponse | null {
-  if (event.type !== 'result') return null
-  const payload = event as unknown as Record<string, unknown>
-  const direct = payload.inventory
-  if (isRecordObject(direct)) return direct as unknown as InventoryResponse
-  const info = payload.info
-  if (!isRecordObject(info)) return null
-  const nested = info.inventory
-  if (!isRecordObject(nested)) return null
-  return nested as unknown as InventoryResponse
-}
 
 function sortedLoraItems(inv: Pick<InventoryResponse, 'loras'>): LoraItem[] {
   if (!Array.isArray(inv.loras)) {
@@ -152,7 +128,6 @@ function sortedLoraItems(inv: Pick<InventoryResponse, 'loras'>): LoraItem[] {
 }
 
 function applyInventorySnapshot(inv: InventoryResponse): void {
-  quicksettings.hydrateLoraShaMap(inv)
   items.value = sortedLoraItems(inv)
   loaded.value = true
 }
@@ -162,11 +137,11 @@ async function loadItems(): Promise<void> {
   loading.value = true
   loadError.value = ''
   try {
-    const inv = await fetchModelInventory()
+    const inv = await quicksettings.fetchInventoryWithLoraHydration()
     applyInventorySnapshot(inv)
   } catch (error) {
     items.value = []
-    loaded.value = true
+    loaded.value = false
     loadError.value = error instanceof Error ? error.message : String(error)
   } finally {
     loading.value = false
@@ -174,93 +149,48 @@ async function loadItems(): Promise<void> {
 }
 
 function cancelActiveRefreshTask(): void {
-  refreshAbortRequested = true
-  const cancel = activeRefreshCancel
-  if (!cancel) return
-  activeRefreshCancel = null
-  try {
-    cancel()
-  } catch (_) {
-    // Ignore cancellation callback failures.
-  }
+  const controller = activeRefreshAbortController
+  if (!controller) return
+  activeRefreshAbortController = null
+  controller.abort()
 }
 
-async function runAsyncInventoryRefreshTask(): Promise<InventoryResponse> {
-  const { task_id } = await startModelInventoryRefreshTask()
-  if (refreshAbortRequested || !open.value) {
-    throw new Error(REFRESH_CANCELLED_MESSAGE)
-  }
-  return await new Promise<InventoryResponse>((resolve, reject) => {
-    let settled = false
-    let unsubscribe: (() => void) | null = null
-    let resolvedInventory: InventoryResponse | null = null
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError'
+}
 
-    const settle = (fn: () => void): void => {
-      if (settled) return
-      settled = true
-      try { unsubscribe?.() } catch (_) { /* ignore */ }
-      unsubscribe = null
-      if (activeRefreshCancel === cancel) {
-        activeRefreshCancel = null
-      }
-      fn()
-    }
+function getItemLabel(item: unknown): string {
+  return isLoraItem(item) ? item.name : ''
+}
 
-    const cancel = (): void => {
-      settle(() => reject(new Error(REFRESH_CANCELLED_MESSAGE)))
-    }
-    activeRefreshCancel = cancel
+function isLoraItem(item: unknown): item is LoraItem {
+  return typeof item === 'object' && item !== null && 'name' in item && 'path' in item
+}
 
-    unsubscribe = subscribeTask(
-      task_id,
-      (event) => {
-        if (event.type === 'error') {
-          settle(() => reject(new Error(String(event.message || 'LoRA inventory refresh task failed'))))
-          return
-        }
-        if (event.type === 'result') {
-          const parsed = parseInventoryTaskResult(event)
-          if (!parsed) {
-            settle(() => reject(new Error('LoRA inventory refresh task result missing inventory payload')))
-            return
-          }
-          if (!Array.isArray(parsed.loras)) {
-            settle(() => reject(new Error('LoRA inventory refresh task result payload missing inventory.loras[]')))
-            return
-          }
-          resolvedInventory = parsed
-          return
-        }
-        if (event.type === 'end') {
-          if (!resolvedInventory) {
-            settle(() => reject(new Error('LoRA inventory refresh task completed without inventory payload')))
-            return
-          }
-          settle(() => resolve(resolvedInventory as InventoryResponse))
-        }
-      },
-      (err) => {
-        settle(() => reject(err instanceof Error ? err : new Error(String(err))))
-      },
-    )
-  })
+function asLoraItems(items: readonly unknown[]): LoraItem[] {
+  return items.filter(isLoraItem)
 }
 
 async function refreshList(): Promise<void> {
   if (loading.value) return
-  refreshAbortRequested = false
   loading.value = true
   loadError.value = ''
+  const refreshAbortController = new AbortController()
+  activeRefreshAbortController = refreshAbortController
   try {
-    const refreshedInventory = await runAsyncInventoryRefreshTask()
-    cacheModelInventorySnapshot(refreshedInventory)
+    const refreshedInventory = await quicksettings.fetchInventoryWithLoraHydration({
+      refresh: true,
+      signal: refreshAbortController.signal,
+    })
     applyInventorySnapshot(refreshedInventory)
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    if (message !== REFRESH_CANCELLED_MESSAGE) {
-      loadError.value = message
+    if (!isAbortError(error)) {
+      loadError.value = error instanceof Error ? error.message : String(error)
     }
   } finally {
+    if (activeRefreshAbortController === refreshAbortController) {
+      activeRefreshAbortController = null
+    }
     loading.value = false
   }
 }
@@ -305,22 +235,12 @@ function setSelected(item: LoraItem, target: PromptTarget, token: string): void 
   selectedPositive.value[key] = token
 }
 
-function buildToken(item: LoraItem): string {
-  const tokenName = resolveTokenName(item)
-  if (!tokenName) {
-    loadError.value = `LoRA '${item.name || item.path}' has no valid filename; refresh and retry.`
-    return ''
-  }
-  const resolvedWeight = normalizeInsertWeight(weight.value)
-  return `<lora:${tokenName}:${resolvedWeight.toFixed(2)}>`
-}
-
 function emitInsert(token: string, target: PromptTarget, action: InsertAction): void {
   if (!token) return
   emit('insert', { token, target, action })
 }
 
-function toggleInsert(item: LoraItem, target: PromptTarget): void {
+function toggleInsert(item: LoraItem, target: PromptTarget, weight: number): void {
   const currentToken = selectedToken(item, target)
   if (currentToken) {
     emitInsert(currentToken, target, 'remove')
@@ -328,9 +248,19 @@ function toggleInsert(item: LoraItem, target: PromptTarget): void {
     return
   }
 
-  const nextToken = buildToken(item)
+  const nextToken = buildToken(item, weight)
   if (!nextToken) return
   emitInsert(nextToken, target, 'add')
   setSelected(item, target, nextToken)
+}
+
+function buildToken(item: LoraItem, currentWeight: number): string {
+  const tokenName = resolveTokenName(item)
+  if (!tokenName) {
+    loadError.value = `LoRA '${item.name || item.path}' has no valid filename; refresh and retry.`
+    return ''
+  }
+  const resolvedWeight = normalizeInsertWeight(currentWeight)
+  return `<lora:${tokenName}:${resolvedWeight.toFixed(2)}>`
 }
 </script>

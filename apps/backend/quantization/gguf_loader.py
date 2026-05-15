@@ -6,9 +6,9 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: GGUF → state_dict loader with optional dequantization and CodexPack auto-detection.
-Loads tensors+metadata via `GGUFReader`, returning float tensors, deferred `CodexParameter` tensors, or CodexPack packed-weight containers.
-Fails loud if CodexPack files contain raw quant tensors outside `__codexpack__.*` (prevents silent per-forward dequant fallback).
+Purpose: GGUF → state_dict loader with optional dequantization.
+Loads tensors+metadata via `GGUFReader`, returning float tensors or deferred `CodexParameter` tensors.
+Fails loud when a packed `codex.pack.*` artifact is loaded through the root GGUF path.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_numpy_to_frozen_parameter` (function): Converts a NumPy tensor blob into a read-only `nn.Parameter` on the requested device.
@@ -18,6 +18,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 import warnings
@@ -29,7 +30,7 @@ import torch
 from apps.backend.infra.config.env_flags import env_flag
 from apps.backend.runtime.memory import memory_management
 
-logger = logging.getLogger("backend.quantization.gguf_loader")
+logger = get_backend_logger("backend.quantization.gguf_loader")
 
 
 def _trace_load_patch_debug_enabled() -> bool:
@@ -114,15 +115,7 @@ def load_gguf_state_dict(
     Returns:
         Dictionary mapping tensor names to PyTorch tensors.
     """
-    from apps.backend.quantization.codexpack_keymaps import SUPPORTED_CODEXPACK_KEYMAP_IDS, is_supported_codexpack_keymap_id
-    from apps.backend.quantization.codexpack_tensor import CodexPackLinearQ4KTilepackV1Parameter
     from apps.backend.quantization.gguf import GGMLQuantizationType, GGUFReader
-    from apps.backend.quantization.gguf.codexpack import (
-        CODEXPACK_SCHEMA_VERSION,
-        KERNEL_ID_CUDA_GGML_Q4K_LINEAR_TILEPACK_V1,
-        is_codexpack_gguf,
-        load_codexpack_manifest_v1,
-    )
     from .api import dequantize as quant_dequantize
     from .tensor import CodexParameter
     
@@ -130,146 +123,11 @@ def load_gguf_state_dict(
     logger.info("Loading GGUF file: %s (target_device=%s)", gguf_path, target_device)
     reader = GGUFReader(gguf_path)
 
-    if is_codexpack_gguf(reader):
-        if dequantize:
-            raise RuntimeError(
-                "CodexPack GGUF does not support load-time dequantization. "
-                "Load the base GGUF file when explicit dequantized loading is required."
-            )
-        if computation_dtype != torch.float16:
-            raise RuntimeError(
-                "CodexPack GGUF v1 only supports fp16 runtime compute for packed linears. "
-                f"got computation_dtype={computation_dtype}."
-            )
-
-        pack = load_codexpack_manifest_v1(reader)
-        if pack.schema_version != CODEXPACK_SCHEMA_VERSION:
-            raise RuntimeError(
-                f"CodexPack schema_version mismatch: expected {CODEXPACK_SCHEMA_VERSION}, got {pack.schema_version}"
-            )
-        if pack.kernel_id != KERNEL_ID_CUDA_GGML_Q4K_LINEAR_TILEPACK_V1:
-            raise RuntimeError(
-                "CodexPack v1 loader only supports kernel_id "
-                f"{KERNEL_ID_CUDA_GGML_Q4K_LINEAR_TILEPACK_V1!r}; got: {pack.kernel_id!r}"
-            )
-        if not is_supported_codexpack_keymap_id(pack.keymap_id):
-            allowed = ", ".join(sorted(SUPPORTED_CODEXPACK_KEYMAP_IDS))
-            raise RuntimeError(
-                "CodexPack keymap_id is unknown to this build. "
-                f"got: {pack.keymap_id!r}. allowed: {allowed}"
-            )
-
-        tensors_by_name = {t.name: t for t in reader.tensors}
-        packed_param_keys: set[str] = set()
-        packed_internal_names: set[str] = set()
-        packed_weights: dict[str, torch.Tensor] = {}
-
-        manifest = pack.manifest
-        entries = manifest.get("entries", [])
-        if not isinstance(entries, list):
-            raise RuntimeError("CodexPack manifest.entries must be a list (post-validation invariant).")
-
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            if entry.get("kind") != "linear_weight":
-                continue
-            param_key = entry.get("param_key")
-            if not isinstance(param_key, str) or not param_key.strip():
-                raise RuntimeError("CodexPack manifest entry has invalid param_key (post-validation invariant).")
-            if param_key in packed_param_keys:
-                raise RuntimeError(f"CodexPack manifest contains duplicate param_key: {param_key!r}")
-
-            shape = entry.get("shape")
-            if not isinstance(shape, list) or len(shape) != 2:
-                raise RuntimeError(f"CodexPack entry {param_key!r} has invalid shape (post-validation invariant).")
-            out_features, in_features = int(shape[0]), int(shape[1])
-
-            tensors = entry.get("tensors")
-            if not isinstance(tensors, dict):
-                raise RuntimeError(f"CodexPack entry {param_key!r} has invalid tensors (post-validation invariant).")
-            packed_name = tensors.get("packed")
-            if not isinstance(packed_name, str):
-                raise RuntimeError(f"CodexPack entry {param_key!r} has invalid tensors.packed (post-validation invariant).")
-            dora_norm_name = tensors.get("dora_norm_out")
-            if not isinstance(dora_norm_name, str):
-                raise RuntimeError(
-                    f"CodexPack entry {param_key!r} has invalid tensors.dora_norm_out (post-validation invariant)."
-                )
-
-            packed_internal_names.add(packed_name)
-            packed_internal_names.add(dora_norm_name)
-
-            packed_tensor = tensors_by_name[packed_name]
-            dora_tensor = tensors_by_name[dora_norm_name]
-
-            # GGUFReader exposes memmap-backed arrays which may be non-writable; keep no-copy tensor views while
-            # suppressing the expected non-writable warning, and only move to target device when requested.
-            packed_blob = _numpy_to_tensor_no_copy(packed_tensor.data.reshape(-1))
-            dora_norm_out = _numpy_to_tensor_no_copy(dora_tensor.data).reshape(-1)
-            if target_device.type != "cpu":
-                packed_blob = packed_blob.to(device=target_device, non_blocking=True)
-                dora_norm_out = dora_norm_out.to(device=target_device, non_blocking=True)
-
-            packed_weights[param_key] = CodexPackLinearQ4KTilepackV1Parameter(
-                packed_blob,
-                keymap_id=pack.keymap_id,
-                kernel_id=pack.kernel_id,
-                out_features=out_features,
-                in_features=in_features,
-                computation_dtype=computation_dtype,
-                dora_norm_out=dora_norm_out,
-            )
-            packed_param_keys.add(param_key)
-
-        state_dict: dict[str, torch.Tensor] = {}
-        for tensor in reader.tensors:
-            name = tensor.name
-
-            # Never surface internal CodexPack payload tensors to the model state_dict.
-            if name in packed_internal_names or name.startswith("__codexpack__."):
-                continue
-
-            # Reject ambiguous files: the payload owns param_key names; the GGUF tensor table must not.
-            if name in packed_param_keys:
-                raise RuntimeError(
-                    "CodexPack GGUF is ambiguous: found a GGUF tensor with a packed param_key name. "
-                    f"name={name!r}."
-                )
-
-            ggml_type = tensor.tensor_type
-            real_shape = tuple(int(v) for v in reversed(tensor.shape.tolist()))
-
-            if ggml_type in {
-                GGMLQuantizationType.F16,
-                GGMLQuantizationType.BF16,
-                GGMLQuantizationType.F32,
-                GGMLQuantizationType.F64,
-                GGMLQuantizationType.I8,
-                GGMLQuantizationType.I16,
-                GGMLQuantizationType.I32,
-                GGMLQuantizationType.I64,
-            }:
-                if ggml_type == GGMLQuantizationType.BF16:
-                    state_dict[name] = _bf16_numpy_to_frozen_parameter(
-                        tensor.data,
-                        logical_shape=real_shape,
-                        target_device=target_device,
-                    )
-                else:
-                    state_dict[name] = _numpy_to_frozen_parameter(tensor.data, target_device=target_device)
-                continue
-
-            # CodexPack is an optimized artifact; leaving raw quant tensors would silently reintroduce
-            # per-forward dequantization. Fail loud so the pack generator can be fixed.
-            raise RuntimeError(
-                "CodexPack GGUF must not contain raw quantized tensors outside `__codexpack__.*`. "
-                f"found {ggml_type.name} tensor {name!r} with logical shape {real_shape}."
-            )
-
-        state_dict.update(packed_weights)
-        logger.info("Loaded %d tensors from CodexPack GGUF", len(state_dict))
-        return state_dict
+    if any(str(field_name).startswith("codex.pack.") for field_name in reader.fields):
+        raise RuntimeError(
+            "Packed GGUF artifacts with `codex.pack.*` metadata are not supported by the root loader. "
+            "Load the base `.gguf` artifact instead."
+        )
     
     state_dict = {}
     

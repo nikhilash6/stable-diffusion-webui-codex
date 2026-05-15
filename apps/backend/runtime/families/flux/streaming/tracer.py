@@ -18,6 +18,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import emit_backend_message, get_backend_logger
 
 import logging
 from typing import List, Tuple, TYPE_CHECKING
@@ -30,7 +31,7 @@ from .specs import BlockInfo, BlockType, ExecutionPlan, Segment, calculate_modul
 if TYPE_CHECKING:
     from apps.backend.runtime.families.flux.model import FluxTransformer2DModel
 
-logger = logging.getLogger("backend.runtime.flux.streaming.tracer")
+logger = get_backend_logger("backend.runtime.flux.streaming.tracer")
 
 
 def _enumerate_blocks(core: FluxTransformer2DModel) -> Tuple[List[BlockInfo], List[BlockInfo]]:
@@ -52,10 +53,12 @@ def _enumerate_blocks(core: FluxTransformer2DModel) -> Tuple[List[BlockInfo], Li
                 param_bytes=calculate_module_bytes(module),
             )
             double_blocks.append(info)
-            logger.debug(
-                "Enumerated double_block[%d]: %.2f MB",
-                idx,
-                info.param_bytes / (1024 * 1024),
+            emit_backend_message(
+                "Enumerated double block",
+                logger=logger.name,
+                level=logging.DEBUG,
+                index=idx,
+                mb=info.param_bytes / (1024 * 1024),
             )
 
     # Access single_blocks ModuleList
@@ -68,10 +71,12 @@ def _enumerate_blocks(core: FluxTransformer2DModel) -> Tuple[List[BlockInfo], Li
                 param_bytes=calculate_module_bytes(module),
             )
             single_blocks.append(info)
-            logger.debug(
-                "Enumerated single_block[%d]: %.2f MB",
-                idx,
-                info.param_bytes / (1024 * 1024),
+            emit_backend_message(
+                "Enumerated single block",
+                logger=logger.name,
+                level=logging.DEBUG,
+                index=idx,
+                mb=info.param_bytes / (1024 * 1024),
             )
 
     return double_blocks, single_blocks
@@ -109,11 +114,13 @@ def _group_blocks_into_segments(
             param_bytes=total_bytes,
         )
         segments.append(segment)
-        logger.debug(
-            "Created segment '%s' with %d blocks (%.2f MB)",
-            name,
-            len(chunk),
-            total_bytes / (1024 * 1024),
+        emit_backend_message(
+            "Created streaming segment",
+            logger=logger.name,
+            level=logging.DEBUG,
+            name=name,
+            blocks=len(chunk),
+            mb=total_bytes / (1024 * 1024),
         )
 
     return segments
@@ -148,7 +155,11 @@ def trace_execution_plan(
     Raises:
         ValueError: If validation fails or core structure is unexpected.
     """
-    logger.info("Tracing execution plan for Flux core (blocks_per_segment=%d)", blocks_per_segment)
+    emit_backend_message(
+        "Tracing execution plan for Flux core",
+        logger=logger.name,
+        blocks_per_segment=blocks_per_segment,
+    )
 
     # Enumerate all blocks
     double_blocks, single_blocks = _enumerate_blocks(core)
@@ -172,12 +183,13 @@ def trace_execution_plan(
         single_block_count=len(single_blocks),
     )
 
-    logger.info(
-        "Execution plan created: %d segments (%d double, %d single), %.2f MB total",
-        len(plan),
-        len(double_segments),
-        len(single_segments),
-        plan.total_bytes / (1024 * 1024),
+    emit_backend_message(
+        "Execution plan created",
+        logger=logger.name,
+        segments=len(plan),
+        double_segments=len(double_segments),
+        single_segments=len(single_segments),
+        total_mb=plan.total_bytes / (1024 * 1024),
     )
 
     return plan
@@ -213,7 +225,11 @@ def trace_execution_plan_with_hooks(
     Returns:
         ExecutionPlan with segments ordered by actual forward execution.
     """
-    logger.info("Tracing execution plan via hooks (blocks_per_segment=%d)", blocks_per_segment)
+    emit_backend_message(
+        "Tracing execution plan via hooks",
+        logger=logger.name,
+        blocks_per_segment=blocks_per_segment,
+    )
 
     execution_order: List[Tuple[BlockType, int, nn.Module]] = []
     hooks = []
@@ -270,7 +286,12 @@ def trace_execution_plan_with_hooks(
         for h in hooks:
             h.remove()
 
-    logger.debug("Hook trace captured %d block executions", len(execution_order))
+    emit_backend_message(
+        "Hook trace captured block executions",
+        logger=logger.name,
+        level=logging.DEBUG,
+        count=len(execution_order),
+    )
 
     # Build BlockInfo list from execution order
     all_blocks: List[BlockInfo] = []
@@ -311,11 +332,12 @@ def trace_execution_plan_with_hooks(
         single_block_count=single_count,
     )
 
-    logger.info(
-        "Hook-traced plan: %d segments, %d blocks (%.2f MB)",
-        len(plan),
-        plan.total_blocks,
-        plan.total_bytes / (1024 * 1024),
+    emit_backend_message(
+        "Hook-traced plan created",
+        logger=logger.name,
+        segments=len(plan),
+        blocks=plan.total_blocks,
+        total_mb=plan.total_bytes / (1024 * 1024),
     )
 
     return plan

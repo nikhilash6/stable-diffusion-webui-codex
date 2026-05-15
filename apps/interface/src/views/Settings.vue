@@ -7,7 +7,8 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Settings route view.
-Fetches the settings schema/options and renders the Settings UI (settings form + paths panel).
+Fetches the settings schema/options and renders the Settings UI (settings form + paths panel), passing the current `/api/options` revision into the
+form so settings writes fail loud on stale pages instead of overwriting newer option state.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `Settings` (component): Settings route view component.
@@ -31,7 +32,7 @@ Symbols (top-level; keep in sync; no ghosts):
               <div class="toolbar">
                 <input class="ui-input" v-model="q" placeholder="Search settings" />
               </div>
-              <SettingsForm :fields="visibleFields" :values="values" />
+              <SettingsForm :fields="visibleFields" :values="values" :revision="revision" />
             </div>
             <div class="right">
               <div class="panel subtle">
@@ -70,6 +71,7 @@ const categories = ref<SettingsCategory[]>([])
 const sections = ref<SettingsSection[]>([])
 const fields = ref<SettingsField[]>([])
 const values = ref<Record<string, unknown>>({})
+const revision = ref(0)
 
 const activeCategory = ref<string>('sd')
 const activeSection = ref<string>('sd')
@@ -81,6 +83,7 @@ onMounted(async () => {
     sections.value = schema.sections
     fields.value = schema.fields
     values.value = opts.values
+    revision.value = Number.isFinite((opts as any).revision) ? Math.max(0, Math.trunc((opts as any).revision)) : 0
     // Default selection
     activeCategory.value = schema.categories[0]?.id ?? 'sd'
     const firstSection = schema.sections.find(s => s.category_id === activeCategory.value) || schema.sections[0]

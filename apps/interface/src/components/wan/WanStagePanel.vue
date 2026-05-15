@@ -7,10 +7,11 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: WAN stage parameter panel (High/Low).
-Renders sampler/scheduler/steps/cfg/seed controls for a WAN stage and emits a `stage` patch to the parent view.
+Renders sampler/scheduler/steps/cfg/seed controls for a WAN stage, forwards optional sampler/scheduler recommendation lists into shared selectors, keeps scheduler selection explicit/non-empty, and preserves the same grouped recommendation/risk UI contract used by image tabs before emitting stage patches to the parent view.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `WanStagePanel` (component): High/Low stage panel for WAN generation parameters.
+- `recommendedSamplers` / `recommendedSchedulers` (props): Optional recommendation arrays forwarded into shared selectors.
 - `updateStage` (function): Emits a patch for the stage params (`update:stage`).
 - `randomizeSeed` (function): Stores the previous seed and sets seed to `-1` (random).
 - `reuseSeed` (function): Reuses the last non-random seed when available.
@@ -26,6 +27,7 @@ Symbols (top-level; keep in sync; no ghosts):
       <SamplerSelector
         class="gc-col"
         :samplers="samplers"
+        :recommended-names="recommendedSamplers"
         :modelValue="stage.sampler"
         :label="samplerLabel"
         :allow-empty="true"
@@ -36,10 +38,9 @@ Symbols (top-level; keep in sync; no ghosts):
       <SchedulerSelector
         class="gc-col"
         :schedulers="schedulers"
+        :recommended-names="recommendedSchedulers"
         :modelValue="stage.scheduler"
         :label="schedulerLabel"
-        :allow-empty="true"
-        emptyLabel="Inherit"
         :disabled="disabled"
         @update:modelValue="(v) => updateStage({ scheduler: v })"
       />
@@ -108,6 +109,8 @@ const props = withDefaults(defineProps<{
   stage: WanStageParams
   samplers: SamplerInfo[]
   schedulers: SchedulerInfo[]
+  recommendedSamplers?: string[] | null
+  recommendedSchedulers?: string[] | null
   showModelDir?: boolean
   embedded?: boolean
   disabled?: boolean

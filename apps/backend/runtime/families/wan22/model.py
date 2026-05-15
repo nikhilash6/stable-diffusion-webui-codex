@@ -19,37 +19,36 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_wan22_resolve_ffn_chunk_tokens` (function): Determines token chunk size for FFN to reduce peak VRAM on long sequences.
 - `WanRMSNorm` (class): RMSNorm with optional GGUF dequantization and env-controlled compute policy (`fp32` vs native dtype).
 - `WanFP32LayerNorm` (class): LayerNorm with env-controlled compute policy (`fp32` vs native dtype).
-- `_build_1d_rope_embeddings` (function): Builds 1D RoPE tensors shaped `[1,S,1,D]` for fused cross-attention Q/K contracts.
 - `WanRotaryPosEmbed` (class): Rotary positional embedding (RoPE) cache + per-input embedding builder (fp32 caches).
 - `WanSelfAttention` (class): Self-attention block for WAN (QKV projection + SDPA implementation).
-- `WanCrossAttention` (class): Cross-attention block for WAN (text context attention path with optional fused dispatch).
+- `WanCrossAttention` (class): Cross-attention block for WAN (text context attention path).
 - `WanFFN` (class): Feed-forward (MLP) block used in WAN transformer blocks.
 - `WanTransformerBlock` (class): One transformer block combining attention + FFN + norms/residuals.
 - `WanTransformer2DModel` (class): Full WAN transformer stack (embeddings/blocks/forward); used by `runtime/wan22/wan22.py`.
-- `remap_wan22_gguf_state_dict` (function): Remaps WAN22 transformer state-dict keys into this module’s expected parameter keys (Diffusers/WAN-export/Codex).
+- `resolve_wan22_gguf_keyspace` (function): Resolves WAN22 transformer checkpoint keys into this module’s expected parameter lookup space (Diffusers/WAN-export/Codex).
 - `infer_wan_architecture_from_state_dict` (function): Infers `WanArchitectureConfig` from a loaded state dict (dims/layers/heads).
 - `load_wan_transformer_from_state_dict` (function): Constructs `WanTransformer2DModel` and loads weights from a state dict (with strict fail-loud key mismatch handling).
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from apps.backend.infra.config.env_flags import env_flag, env_str
-from apps.backend.runtime.attention.wan_fused_v1 import (
-    WanFusedContractError,
-    is_extension_available,
-    resolve_effective_wan_fused_attn_core,
-    try_fused_cross_attention,
-    try_fused_self_attention,
+from apps.backend.runtime.attention.sram import (
+    SramAttentionContractError,
+    is_rope_helper_available,
+    try_attention_pre_shaped,
 )
 from apps.backend.runtime.misc.autocast import autocast_disabled
 from apps.backend.runtime.ops.operations import get_operation_context
@@ -57,9 +56,9 @@ from apps.backend.runtime.ops.operations_gguf import CodexParameter, dequantize_
 from apps.backend.runtime.sampling.block_progress import resolve_block_progress_callback
 
 from .inference import infer_wan22_latent_channels, infer_wan22_patch_embedding, infer_wan22_patch_size_and_in_channels
-from .sdpa import get_wan_fused_mode, sdpa as wan_sdpa
+from .sdpa import get_sram_attention_mode, sdpa as wan_sdpa
 
-logger = logging.getLogger("backend.runtime.wan22.model")
+logger = get_backend_logger("backend.runtime.wan22.model")
 
 
 def _wan_trace_verbose_enabled() -> bool:
@@ -122,10 +121,6 @@ def _wan22_resolve_ffn_chunk_tokens(*, x_blc: torch.Tensor, hidden_dim: int) -> 
         if candidate <= max_tokens:
             return candidate
     return 1
-
-
-def _resolve_wan_fused_attn_core_trace_fields(*, fused_mode: str) -> tuple[str, str, str]:
-    return resolve_effective_wan_fused_attn_core(fused_mode)
 
 
 def _module_parameter_dtype(module: nn.Module) -> str:
@@ -262,26 +257,6 @@ def _wan_1d_rope_cos_sin(
     return freqs_cos, freqs_sin
 
 
-def _build_1d_rope_embeddings(
-    *,
-    seq_len: int,
-    head_dim: int,
-    device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if int(seq_len) <= 0:
-        raise ValueError(f"WAN RoPE: seq_len must be > 0 for 1D RoPE; got seq_len={seq_len}")
-    cos, sin = _wan_1d_rope_cos_sin(
-        int(head_dim),
-        int(seq_len),
-        freqs_dtype=torch.float32,
-        device=device,
-    )
-    return (
-        cos.view(1, int(seq_len), 1, int(head_dim)).contiguous(),
-        sin.view(1, int(seq_len), 1, int(head_dim)).contiguous(),
-    )
-
-
 class WanRotaryPosEmbed(nn.Module):
     def __init__(
         self,
@@ -388,7 +363,7 @@ class WanSelfAttention(nn.Module):
         self.v = nn.Linear(dim, dim, bias=qkv_bias)
         self.o = nn.Linear(dim, dim, bias=True)
 
-        # Diffusers/Comfy WAN uses q/k RMSNorm across heads (dim = head_dim * heads).
+        # q/k RMSNorm is applied across the full packed head dimension (dim = head_dim * heads).
         self.norm_q = WanRMSNorm(dim)
         self.norm_k = WanRMSNorm(dim)
 
@@ -397,6 +372,8 @@ class WanSelfAttention(nn.Module):
         hidden_states: torch.Tensor,  # [B, L, H, D]
         freqs_cos: torch.Tensor,
         freqs_sin: torch.Tensor,
+        *,
+        sram_mode: str,
     ) -> torch.Tensor:
         if not hidden_states.is_floating_point():
             raise TypeError(
@@ -423,11 +400,8 @@ class WanSelfAttention(nn.Module):
         ):
             # Prefer the fused CUDA RoPE op when available. This is an in-place update
             # of [B,L,H,D] hidden_states and avoids fp32 full-tensor materialization.
-            if not hasattr(torch.ops.wan_fused_v1, "rope_blhd_"):
-                # Try loading the extension once (prebuilt/in-place; JIT if enabled).
-                is_extension_available()
-            if hasattr(torch.ops.wan_fused_v1, "rope_blhd_"):
-                torch.ops.wan_fused_v1.rope_blhd_(hidden_states, freqs_cos, freqs_sin)
+            if is_rope_helper_available(mode=sram_mode):
+                torch.ops.attention_sram_v1.rope_blhd_(hidden_states, freqs_cos, freqs_sin)
                 return hidden_states
 
         with autocast_disabled(hidden_states.device.type):
@@ -461,67 +435,7 @@ class WanSelfAttention(nn.Module):
         trace_mem_detail = bool(trace_enabled and trace_block_idx is not None and int(trace_block_idx) == 0)
         block_tag = "?" if trace_block_idx is None else str(int(trace_block_idx) + 1)
 
-        fused_mode = get_wan_fused_mode()
-        attn_core = attn_core_source = attn_core_raw = "n/a"
-        if trace_enabled and fused_mode != "off":
-            attn_core, attn_core_source, attn_core_raw = _resolve_wan_fused_attn_core_trace_fields(fused_mode=fused_mode)
-        if fused_mode != "off":
-            rope_cos_qk: torch.Tensor | None = None
-            rope_sin_qk: torch.Tensor | None = None
-            if rotary_emb is not None:
-                rope_cos_qk, rope_sin_qk = rotary_emb
-            try:
-                fused_result = try_fused_self_attention(
-                    mode=fused_mode,
-                    x=x,
-                    q_proj=self.q,
-                    k_proj=self.k,
-                    v_proj=self.v,
-                    o_proj=self.o,
-                    norm_q_weight=self.norm_q.weight,
-                    norm_k_weight=self.norm_k.weight,
-                    rope_cos_qk=rope_cos_qk,
-                    rope_sin_qk=rope_sin_qk,
-                    dropout_p=0.0,
-                )
-                if fused_result.output is not None:
-                    if trace_enabled:
-                        logger.debug(
-                            "[wan22.trace] block[%s] self_attn fused path used: mode=%s attn_core=%s "
-                            "attn_core_source=%s attn_core_raw=%s",
-                            block_tag,
-                            fused_mode,
-                            attn_core,
-                            attn_core_source,
-                            attn_core_raw,
-                        )
-                    return fused_result.output
-                if trace_enabled:
-                    logger.debug(
-                        "[wan22.trace] block[%s] self_attn fused fallback: mode=%s attn_core=%s "
-                        "attn_core_source=%s attn_core_raw=%s reason=%s detail=%s",
-                        block_tag,
-                        fused_mode,
-                        attn_core,
-                        attn_core_source,
-                        attn_core_raw,
-                        fused_result.reason_code,
-                        fused_result.reason_detail,
-                    )
-            except WanFusedContractError as ex:
-                if fused_mode == "force":
-                    raise
-                if trace_enabled:
-                    logger.debug(
-                        "[wan22.trace] block[%s] self_attn fused contract fallback: mode=%s attn_core=%s "
-                        "attn_core_source=%s attn_core_raw=%s detail=%s",
-                        block_tag,
-                        fused_mode,
-                        attn_core,
-                        attn_core_source,
-                        attn_core_raw,
-                        str(ex),
-                    )
+        sram_mode = get_sram_attention_mode()
 
         # QKV projections
         q = self.norm_q(self.q(x))
@@ -561,14 +475,14 @@ class WanSelfAttention(nn.Module):
                     _cuda_mem_snapshot_str(x.device),
                 )
             freqs_cos, freqs_sin = rotary_emb
-            q = self._apply_rope(q, freqs_cos, freqs_sin)
+            q = self._apply_rope(q, freqs_cos, freqs_sin, sram_mode=sram_mode)
             if trace_mem_detail:
                 logger.debug(
                     "[wan22.trace] block[%s] self_attn post_rope_q: %s",
                     block_tag,
                     _cuda_mem_snapshot_str(x.device),
                 )
-            k = self._apply_rope(k, freqs_cos, freqs_sin)
+            k = self._apply_rope(k, freqs_cos, freqs_sin, sram_mode=sram_mode)
             if trace_mem_detail:
                 logger.debug(
                     "[wan22.trace] block[%s] self_attn post_rope_k: %s",
@@ -580,8 +494,46 @@ class WanSelfAttention(nn.Module):
         k = k.permute(0, 2, 1, 3)
         v = v.permute(0, 2, 1, 3)
 
-        # Scaled dot-product attention
-        attn_out = wan_sdpa(q, k, v, causal=False)
+        if sram_mode != "off":
+            try:
+                sram_result = try_attention_pre_shaped(
+                    mode=sram_mode,
+                    q=q,
+                    k=k,
+                    v=v,
+                    is_causal=False,
+                )
+                if sram_result.output is not None:
+                    if trace_enabled:
+                        logger.debug(
+                            "[wan22.trace] block[%s] self_attn sram path used: mode=%s",
+                            block_tag,
+                            sram_mode,
+                        )
+                    attn_out = sram_result.output
+                else:
+                    if trace_enabled:
+                        logger.debug(
+                            "[wan22.trace] block[%s] self_attn sram fallback: mode=%s reason=%s detail=%s",
+                            block_tag,
+                            sram_mode,
+                            sram_result.reason_code,
+                            sram_result.reason_detail,
+                        )
+                    attn_out = wan_sdpa(q, k, v, causal=False)
+            except SramAttentionContractError as ex:
+                if sram_mode == "force":
+                    raise
+                if trace_enabled:
+                    logger.debug(
+                        "[wan22.trace] block[%s] self_attn sram contract fallback: mode=%s detail=%s",
+                        block_tag,
+                        sram_mode,
+                        str(ex),
+                    )
+                attn_out = wan_sdpa(q, k, v, causal=False)
+        else:
+            attn_out = wan_sdpa(q, k, v, causal=False)
         if trace_mem_detail:
             logger.debug(
                 "[wan22.trace] block[%s] self_attn post_sdpa: %s",
@@ -621,7 +573,7 @@ class WanCrossAttention(nn.Module):
         self.v = nn.Linear(context_dim, dim, bias=qkv_bias)
         self.o = nn.Linear(dim, dim, bias=True)
 
-        # Diffusers/Comfy WAN uses q/k RMSNorm across heads (dim = head_dim * heads).
+        # q/k RMSNorm is applied across the full packed head dimension (dim = head_dim * heads).
         self.norm_q = WanRMSNorm(dim)
         self.norm_k = WanRMSNorm(dim)
 
@@ -629,7 +581,6 @@ class WanCrossAttention(nn.Module):
         self,
         x: torch.Tensor,
         context: torch.Tensor,
-        rotary_emb: Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None,
         *,
         trace_debug: bool = False,
         trace_block_idx: int | None = None,
@@ -639,72 +590,7 @@ class WanCrossAttention(nn.Module):
         trace_enabled = bool(trace_debug and logger.isEnabledFor(logging.DEBUG))
         block_tag = "?" if trace_block_idx is None else str(int(trace_block_idx) + 1)
 
-        fused_mode = get_wan_fused_mode()
-        attn_core = attn_core_source = attn_core_raw = "n/a"
-        if trace_enabled and fused_mode != "off":
-            attn_core, attn_core_source, attn_core_raw = _resolve_wan_fused_attn_core_trace_fields(fused_mode=fused_mode)
-        if fused_mode != "off":
-            rope_cos_q: torch.Tensor | None = None
-            rope_sin_q: torch.Tensor | None = None
-            rope_cos_k: torch.Tensor | None = None
-            rope_sin_k: torch.Tensor | None = None
-            if rotary_emb is not None:
-                rope_cos_q, rope_sin_q, rope_cos_k, rope_sin_k = rotary_emb
-            try:
-                fused_result = try_fused_cross_attention(
-                    mode=fused_mode,
-                    x=x,
-                    context=context,
-                    q_proj=self.q,
-                    k_proj=self.k,
-                    v_proj=self.v,
-                    o_proj=self.o,
-                    norm_q_weight=self.norm_q.weight,
-                    norm_k_weight=self.norm_k.weight,
-                    rope_cos_q=rope_cos_q,
-                    rope_sin_q=rope_sin_q,
-                    rope_cos_k=rope_cos_k,
-                    rope_sin_k=rope_sin_k,
-                    dropout_p=0.0,
-                )
-                if fused_result.output is not None:
-                    if trace_enabled:
-                        logger.debug(
-                            "[wan22.trace] block[%s] cross_attn fused path used: mode=%s attn_core=%s "
-                            "attn_core_source=%s attn_core_raw=%s",
-                            block_tag,
-                            fused_mode,
-                            attn_core,
-                            attn_core_source,
-                            attn_core_raw,
-                        )
-                    return fused_result.output
-                if trace_enabled:
-                    logger.debug(
-                        "[wan22.trace] block[%s] cross_attn fused fallback: mode=%s attn_core=%s "
-                        "attn_core_source=%s attn_core_raw=%s reason=%s detail=%s",
-                        block_tag,
-                        fused_mode,
-                        attn_core,
-                        attn_core_source,
-                        attn_core_raw,
-                        fused_result.reason_code,
-                        fused_result.reason_detail,
-                    )
-            except WanFusedContractError as ex:
-                if fused_mode == "force":
-                    raise
-                if trace_enabled:
-                    logger.debug(
-                        "[wan22.trace] block[%s] cross_attn fused contract fallback: mode=%s attn_core=%s "
-                        "attn_core_source=%s attn_core_raw=%s detail=%s",
-                        block_tag,
-                        fused_mode,
-                        attn_core,
-                        attn_core_source,
-                        attn_core_raw,
-                        str(ex),
-                    )
+        sram_mode = get_sram_attention_mode()
 
         # QKV projections
         q = self.norm_q(self.q(x))
@@ -737,6 +623,13 @@ class WanCrossAttention(nn.Module):
         q = q.view(B, L, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
         k = k.view(B, S, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
         v = v.view(B, S, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+
+        if trace_enabled and sram_mode != "off":
+            logger.debug(
+                "[wan22.trace] block[%s] cross_attn sram bypass: mode=%s detail=phase1_self_only",
+                block_tag,
+                sram_mode,
+            )
 
         # Scaled dot-product attention
         attn_out = wan_sdpa(q, k, v, causal=False)
@@ -828,7 +721,6 @@ class WanTransformerBlock(nn.Module):
         context: torch.Tensor,
         time_emb: torch.Tensor,  # [B, 6, dim]
         rotary_emb: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
-        cross_rotary_emb: Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None,
         *,
         trace_block_idx: int | None = None,
         trace_debug: bool = False,
@@ -906,7 +798,6 @@ class WanTransformerBlock(nn.Module):
         ca_out = self.cross_attn(
             x_ca,
             context,
-            rotary_emb=cross_rotary_emb,
             trace_debug=trace_enabled,
             trace_block_idx=trace_block_idx,
         )
@@ -1087,7 +978,7 @@ class WanTransformer2DModel(nn.Module):
         # Diffusers `Timesteps(..., downscale_freq_shift=0)` => denominator is `half_dim`.
         div_term = torch.exp(-math.log(10000.0) * freq / float(half))
         angles = t.to(dtype=torch.float32)[:, None] * div_term[None, :]
-        # Match Diffusers `Timesteps(..., flip_sin_to_cos=True)` and Comfy/WAN exports.
+        # Use cosine-first sinusoidal ordering on the timestep embedding.
         emb = torch.cat([torch.cos(angles), torch.sin(angles)], dim=1)
         if emb.shape[1] != base_dim:
             emb = torch.nn.functional.pad(emb, (0, base_dim - emb.shape[1]))
@@ -1134,15 +1025,6 @@ class WanTransformer2DModel(nn.Module):
 
         # Text embedding projection
         ctx = self.text_embed(context.to(dtype))  # [B, L, d_model]
-        cross_rotary_emb: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None = None
-        if get_wan_fused_mode() != "off":
-            cross_k_cos, cross_k_sin = _build_1d_rope_embeddings(
-                seq_len=int(ctx.shape[1]),
-                head_dim=(self.config.d_model // self.config.n_heads),
-                device=device,
-            )
-            cross_rotary_emb = (rotary_emb[0], rotary_emb[1], cross_k_cos, cross_k_sin)
-
         # Patch embed: [B, C, T, H, W] -> [B, d_model, T', H', W'] -> [B, T'*H'*W', d_model]
         tokens = self.patch_embed(x)
         _, _, t_grid, h_grid, w_grid = tokens.shape
@@ -1199,7 +1081,6 @@ class WanTransformer2DModel(nn.Module):
                 ctx,
                 t_proj,
                 rotary_emb=rotary_emb,
-                cross_rotary_emb=cross_rotary_emb,
                 trace_block_idx=block_idx,
                 trace_debug=trace_debug,
             )
@@ -1255,26 +1136,28 @@ class WanTransformer2DModel(nn.Module):
 
 
 # Weight loading helper
-def remap_wan22_gguf_state_dict(state_dict: dict) -> dict:
-    """Remap WAN transformer checkpoint keys to WanTransformer2DModel keys.
+def resolve_wan22_gguf_keyspace(state_dict: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Resolve WAN transformer checkpoint keys to WanTransformer2DModel lookup keys.
 
     Supported input styles:
     - Diffusers-style keys (e.g. `condition_embedder.*`, `blocks.N.attn1/attn2.*`, `ffn.net.*`, `proj_out.*`).
-    - WAN export / Comfy-style keys (e.g. `patch_embedding.*`, `time_embedding.*`, `head.head.*`, `head.modulation`).
+    - WAN export-style keys (e.g. `patch_embedding.*`, `time_embedding.*`, `head.head.*`, `head.modulation`).
     - Codex-native keys (e.g. `patch_embed.*`, `time_embed.*`, `head.*`, `head_modulation`).
 
     This function is strict and fails loud on unknown/ambiguous layouts.
     """
 
-    from apps.backend.runtime.state_dict.keymap_wan22_transformer import remap_wan22_transformer_state_dict
+    from apps.backend.runtime.state_dict.keymap_wan22_transformer import resolve_wan22_transformer_keyspace
 
-    style, view = remap_wan22_transformer_state_dict(state_dict)
-    logger.debug("WAN22 remap: detected style=%s", style.value)
-    return dict(view)
+    resolved = resolve_wan22_transformer_keyspace(state_dict)
+    style = resolved.style
+    style_label = style.value if hasattr(style, "value") else str(style)
+    logger.debug("WAN22 keyspace: detected style=%s", style_label)
+    return resolved.view
 
 
 def infer_wan_architecture_from_state_dict(state_dict: dict) -> WanArchitectureConfig:
-    """Infer WAN architecture parameters from a (remapped) state_dict."""
+    """Infer WAN architecture parameters from a resolved WAN keyspace."""
 
     def _shape(key: str) -> tuple[int, ...] | None:
         value = state_dict.get(key)

@@ -66,13 +66,30 @@ def _convert_clip(tensors: Dict[str, torch.Tensor], context):
 
 def _validate_unet_channels(context):
     unet = context.require("unet").tensors
-    weight = unet.get("input_blocks.0.0.weight")
-    if not isinstance(weight, torch.Tensor):
-        raise ValidationError("Expected 'input_blocks.0.0.weight' in UNet state dict", component="unet")
-    expected = context.signature.core.channels_in
-    if weight.shape[1] != expected:
+    key = "input_blocks.0.0.weight"
+    shape_getter = getattr(unet, "shape_of", None)
+    weight_shape: tuple[int, ...] | None = None
+    if callable(shape_getter):
+        try:
+            shape_raw = shape_getter(key)
+            if shape_raw is not None:
+                weight_shape = tuple(int(v) for v in shape_raw)
+        except Exception:
+            weight_shape = None
+    if weight_shape is None:
+        weight = unet.get(key)
+        if not isinstance(weight, torch.Tensor):
+            raise ValidationError(f"Expected '{key}' in UNet state dict", component="unet")
+        weight_shape = tuple(int(v) for v in weight.shape)
+    if len(weight_shape) < 2:
         raise ValidationError(
-            f"UNet channels_in mismatch: expected {expected}, found {weight.shape[1]}",
+            f"UNet weight shape for '{key}' is invalid: {weight_shape}",
+            component="unet",
+        )
+    expected = context.signature.core.channels_in
+    if int(weight_shape[1]) != expected:
+        raise ValidationError(
+            f"UNet channels_in mismatch: expected {expected}, found {int(weight_shape[1])}",
             component="unet",
         )
 

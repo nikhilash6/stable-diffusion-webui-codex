@@ -13,11 +13,12 @@ Sampling-path latent decode uses the shared canonical VAE memory target helper t
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_ZImagePromptList` (class): List-like prompt wrapper that carries per-run metadata (CFG scale, smart-cache policy, negative marker).
-- `ZImageEngine` (class): `CodexDiffusionEngine` implementation for Z Image txt2img; loads/keeps runtime, formats prompts, builds conditioning,
+- `ZImageEngine` (class): `CodexDiffusionEngine` implementation for Z Image txt2img/img2img; loads/keeps runtime, formats prompts, builds conditioning,
   runs the shared txt2img pipeline, and records cache/timeline telemetry (contains nested helpers for prompt metadata and capability gating).
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from typing import Any, Mapping, Optional
@@ -35,11 +36,12 @@ from apps.backend.runtime.memory.config import DeviceRole
 from apps.backend.runtime.models.loader import DiffusionModelBundle
 from apps.backend.runtime.diagnostics.timeline import timeline_node
 from apps.backend.runtime.families.zimage.debug import env_flag, env_int, truncate_text
+from apps.backend.runtime.model_registry.specs import ModelFamily
 
 from .factory import CodexZImageFactory
 from .spec import ZImageEngineRuntime
 
-logger = logging.getLogger("backend.engines.zimage.zimage")
+logger = get_backend_logger("backend.engines.zimage.zimage")
 
 
 class _ZImagePromptList(PromptListBase):
@@ -61,6 +63,7 @@ class ZImageEngine(CodexDiffusionEngine):
     """Z Image engine (Turbo/Base variants)."""
 
     engine_id = "zimage"
+    expected_family = ModelFamily.ZIMAGE
 
     def __init__(self) -> None:
         super().__init__()
@@ -111,14 +114,14 @@ class ZImageEngine(CodexDiffusionEngine):
         except Exception:
             inferred = None
 
-        if inferred is not None:
-            if variant and variant != inferred:
-                logger.warning(
-                    "Z-Image: requested zimage_variant=%r conflicts with trusted GGUF metadata variant=%r; using metadata.",
-                    variant,
-                    inferred,
-                )
+        if not variant and inferred is not None:
             variant = inferred
+        elif inferred is not None and variant != inferred:
+            logger.warning(
+                "Z-Image: explicit request zimage_variant=%r overrides trusted GGUF metadata variant=%r.",
+                variant,
+                inferred,
+            )
 
         if variant not in {"turbo", "base"}:
             raise RuntimeError(
@@ -304,11 +307,11 @@ class ZImageEngine(CodexDiffusionEngine):
 
     @timeline_node("vae", "encode_first_stage")
     @torch.inference_mode()
-    def encode_first_stage(self, x: torch.Tensor) -> torch.Tensor:
+    def encode_first_stage(self, x: torch.Tensor, *, encode_seed: int | None = None) -> torch.Tensor:
         # Match Flux/Z-Image Flow16 VAE semantics:
         # - VAE wrapper expects pixel samples as BHWC in [0, 1]
         # - Latents used by the flow core must be normalized via process_in()
-        return super().encode_first_stage(x)
+        return super().encode_first_stage(x, encode_seed=encode_seed)
 
     @timeline_node("vae", "decode_first_stage")
     @torch.inference_mode()

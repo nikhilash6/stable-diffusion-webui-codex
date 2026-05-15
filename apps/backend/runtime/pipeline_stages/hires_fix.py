@@ -14,21 +14,33 @@ global upscalers runtime, and computes correct `start_at_step` semantics from `d
 Symbols (top-level; keep in sync; no ghosts):
 - `HiresFillCropPlan` (dataclass): Aspect-preserving hires resize plan (internal fill size + crop offsets).
 - `HiresPreparation` (dataclass): Prepared hires inputs and continuation mode for the second pass (`init_latent` or `image_latents`).
+- `PipelineTelemetryContext` (dataclass): Canonical telemetry context for pipeline events (`mode`, `task_id`, `correlation_id`, source).
 - `compute_hires_fill_crop_plan` (function): Compute a fill-then-crop plan for hires pass (Forge-like semantics).
 - `start_at_step_from_denoise` (function): Maps `denoise` in [0..1] to `start_at_step` (0..steps-1) with correct monotonic semantics.
-- `prepare_hires_latents_and_conditioning` (function): Prepares hires inputs via family-dispatched backends (SD, flow-like, Kontext).
+- `resolve_pipeline_telemetry_context` (function): Resolve and persist canonical task-scoped correlation context (fail loud on missing mode).
+- `resolve_hires_family_strategy` (function): Global family strategy + capability gate for hires compatibility checks.
+- `resolve_zimage_hires_pixel_multiple` (function): Resolve the exact-family zimage pixel-alignment multiple required by hires targets.
+- `prepare_hires_latents_and_conditioning` (function): Prepares hires inputs via family-dispatched backends (SD, flow-like, Kontext, FLUX.2).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import threading
 from typing import Any, Callable, Literal, Optional
 
 import torch
 
+from apps.backend.runtime.logging import emit_backend_event
+from apps.backend.runtime.model_registry.capabilities import (
+    ENGINE_SURFACES,
+    primary_family_for_engine_id,
+    semantic_engine_for_engine_id,
+)
+from apps.backend.runtime.model_registry.family_runtime import get_family_spec
+from apps.backend.runtime.model_registry.specs import ModelFamily
 from apps.backend.runtime.processing.conditioners import decode_latent_batch, encode_image_batch
-from apps.backend.runtime.processing.datatypes import HiResPlan
 from apps.backend.runtime.vision.upscalers.registry import upscale_image_tensor, upscale_latent_tensor
 from apps.backend.runtime.vision.upscalers.specs import LATENT_UPSCALE_MODES, TileConfig, default_tile_config
 
@@ -56,7 +68,7 @@ class HiresFillCropPlan:
 
 
 HiresContinuationMode = Literal["init_latent", "image_latents"]
-HiresBackend = Literal["sd", "flow", "kontext"]
+HiresBackend = Literal["sd", "flow", "kontext", "flux2"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +78,84 @@ class HiresPreparation:
     latents: torch.Tensor
     image_conditioning: torch.Tensor | None
     continuation_mode: HiresContinuationMode
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineTelemetryContext:
+    """Canonical telemetry context for pipeline events."""
+
+    mode: str
+    task_id: str | None
+    correlation_id: str
+    correlation_source: Literal["task_id", "processing", "thread_object"]
+
+
+def _extract_task_id_from_thread_name(thread_name: str) -> str | None:
+    marker = "-task-"
+    text = str(thread_name or "").strip()
+    if marker not in text:
+        return None
+    task_id = text.split(marker, 1)[1].strip()
+    return task_id or None
+
+
+def resolve_pipeline_telemetry_context(
+    processing: Any,
+    *,
+    default_mode: str | None = None,
+    require_mode: bool = True,
+) -> PipelineTelemetryContext:
+    """Resolve and persist canonical task-scoped telemetry context."""
+
+    if processing is None:
+        raise RuntimeError("Pipeline telemetry context requires a non-null processing object.")
+
+    mode = str(getattr(processing, "_codex_pipeline_mode", "") or "").strip()
+    if mode == "" and default_mode is not None:
+        mode = str(default_mode).strip()
+        if mode:
+            setattr(processing, "_codex_pipeline_mode", mode)
+    if require_mode and mode == "":
+        raise RuntimeError(
+            "Pipeline telemetry context is missing required `_codex_pipeline_mode`."
+        )
+
+    thread_name = str(threading.current_thread().name or "").strip() or "unknown-thread"
+    task_id = str(getattr(processing, "_codex_task_id", "") or "").strip()
+    if task_id == "":
+        parsed_task_id = _extract_task_id_from_thread_name(thread_name)
+        if parsed_task_id is not None:
+            task_id = parsed_task_id
+            setattr(processing, "_codex_task_id", task_id)
+
+    existing_correlation = str(
+        getattr(processing, "_codex_correlation_id", "")
+        or getattr(processing, "_codex_hires_correlation_id", "")
+        or ""
+    ).strip()
+    if task_id != "":
+        correlation_id = task_id
+        correlation_source: Literal["task_id", "processing", "thread_object"] = "task_id"
+    elif existing_correlation != "":
+        correlation_id = existing_correlation
+        correlation_source = "processing"
+    else:
+        correlation_id = f"{thread_name}:{id(processing):x}"
+        correlation_source = "thread_object"
+
+    if correlation_id == "":
+        raise RuntimeError("Pipeline telemetry context failed to resolve correlation_id.")
+
+    setattr(processing, "_codex_correlation_id", correlation_id)
+    setattr(processing, "_codex_hires_correlation_id", correlation_id)
+    setattr(processing, "_codex_correlation_source", correlation_source)
+
+    return PipelineTelemetryContext(
+        mode=mode,
+        task_id=(task_id if task_id != "" else None),
+        correlation_id=correlation_id,
+        correlation_source=correlation_source,
+    )
 
 
 def _ceil_div(num: int, den: int) -> int:
@@ -192,9 +282,46 @@ def _resolve_hires_backend(engine_id: str) -> HiresBackend:
         return "flow"
     if normalized_engine_id == "flux1_kontext":
         return "kontext"
+    if normalized_engine_id == "flux2":
+        return "flux2"
     raise NotImplementedError(
         f"Hires preparation backend is not implemented for engine '{normalized_engine_id}'."
     )
+
+
+def resolve_hires_family_strategy(engine_id: str) -> HiresBackend:
+    """Resolve a hires family strategy and fail loud when the engine is incompatible."""
+
+    normalized_engine_id = str(engine_id or "").strip()
+    if normalized_engine_id == "":
+        raise RuntimeError("Hires compatibility check requires a non-empty engine id.")
+    try:
+        semantic_engine = semantic_engine_for_engine_id(normalized_engine_id)
+    except KeyError as exc:
+        raise NotImplementedError(
+            f"Hires is not supported for engine '{normalized_engine_id}' because no semantic capability surface is registered."
+        ) from exc
+    if not ENGINE_SURFACES[semantic_engine].supports_hires:
+        raise NotImplementedError(f"Hires is not supported for engine '{normalized_engine_id}'.")
+    return _resolve_hires_backend(normalized_engine_id)
+
+
+def resolve_zimage_hires_pixel_multiple(engine_id: str) -> int | None:
+    normalized_engine_id = str(engine_id or "").strip()
+    if normalized_engine_id == "":
+        raise RuntimeError("Z-Image hires pixel multiple resolution requires a non-empty engine id.")
+    family = primary_family_for_engine_id(normalized_engine_id)
+    if family is not ModelFamily.ZIMAGE:
+        return None
+    spec = get_family_spec(family)
+    scale = int(spec.latent_scale_factor)
+    patch = int(spec.patch_size)
+    if scale <= 0 or patch <= 0:
+        raise RuntimeError(
+            "Z-Image hires pixel multiple resolution requires positive latent_scale_factor and patch_size. "
+            f"Got family={family.value} scale={scale} patch={patch}."
+        )
+    return scale * patch
 
 
 def _prepare_flow_hires_latents(
@@ -280,7 +407,9 @@ def prepare_hires_latents_and_conditioning(
     *,
     base_samples: torch.Tensor,
     base_decoded: torch.Tensor | None,
-    hires_plan: HiResPlan,
+    target_width: int,
+    target_height: int,
+    upscaler_id: str,
     tile: TileConfig | None = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> HiresPreparation:
@@ -292,14 +421,22 @@ def prepare_hires_latents_and_conditioning(
     sd_model = getattr(processing, "sd_model", None)
     if sd_model is None:
         raise ValueError("processing.sd_model is required for hires")
+    engine_id = str(getattr(sd_model, "engine_id", "") or "").strip()
+    zimage_pixel_multiple = resolve_zimage_hires_pixel_multiple(engine_id)
+    if zimage_pixel_multiple is not None:
+        if int(target_width) % zimage_pixel_multiple != 0 or int(target_height) % zimage_pixel_multiple != 0:
+            raise ValueError(
+                "Z-Image hires target dimensions must be multiples of "
+                f"{zimage_pixel_multiple}. Got target={int(target_width)}x{int(target_height)}."
+            )
 
     base_latent_h = int(base_samples.shape[-2])
     base_latent_w = int(base_samples.shape[-1])
     resize_plan = compute_hires_fill_crop_plan(
         base_width=base_latent_w * 8,
         base_height=base_latent_h * 8,
-        target_width=int(hires_plan.target_width),
-        target_height=int(hires_plan.target_height),
+        target_width=int(target_width),
+        target_height=int(target_height),
     )
     if resize_plan.needs_crop():
         processing.update_extra_param(
@@ -309,8 +446,22 @@ def prepare_hires_latents_and_conditioning(
         processing.update_extra_param("Hires crop left", int(resize_plan.crop_left))
         processing.update_extra_param("Hires crop top", int(resize_plan.crop_top))
 
-    engine_id = str(getattr(sd_model, "engine_id", "") or "").strip()
-    backend = _resolve_hires_backend(engine_id)
+    backend = resolve_hires_family_strategy(engine_id)
+    telemetry = resolve_pipeline_telemetry_context(processing, require_mode=True)
+    emit_backend_event(
+        "pipeline.hires.prepare.dispatch",
+        logger="backend.runtime.pipeline_stages.hires_fix",
+        mode=telemetry.mode,
+        stage="hires.prepare.dispatch",
+        correlation_id=telemetry.correlation_id,
+        correlation_source=telemetry.correlation_source,
+        task_id=telemetry.task_id,
+        engine_id=engine_id,
+        strategy=backend,
+        upscaler_id=str(upscaler_id),
+        target_width=int(resize_plan.target_width),
+        target_height=int(resize_plan.target_height),
+    )
 
     if backend == "sd":
         from apps.backend.runtime.families.sd.hires_fix import prepare_hires_latents_and_conditioning as _sd_prepare
@@ -321,12 +472,30 @@ def prepare_hires_latents_and_conditioning(
             base_decoded=base_decoded,
             target_width=int(resize_plan.target_width),
             target_height=int(resize_plan.target_height),
-            upscaler_id=str(hires_plan.upscaler_id),
+            upscaler_id=str(upscaler_id),
             tile=tile,
-            image_mask=getattr(processing, "image_mask", None),
-            round_mask=bool(getattr(processing, "round_image_mask", True)),
+            image_mask=getattr(processing, "mask", None),
+            round_mask=bool(getattr(processing, "mask_round", True)),
             progress_callback=progress_callback,
             resize_plan=resize_plan,
+        )
+        emit_backend_event(
+            "pipeline.hires.prepare.ready",
+            logger="backend.runtime.pipeline_stages.hires_fix",
+            mode=telemetry.mode,
+            stage="hires.prepare.ready",
+            correlation_id=telemetry.correlation_id,
+            correlation_source=telemetry.correlation_source,
+            task_id=telemetry.task_id,
+            engine_id=engine_id,
+            strategy=backend,
+            continuation_mode="init_latent",
+            latents_shape=tuple(int(dim) for dim in latents.shape),
+            image_conditioning_shape=(
+                tuple(int(dim) for dim in image_conditioning.shape)
+                if isinstance(image_conditioning, torch.Tensor)
+                else None
+            ),
         )
         return HiresPreparation(
             latents=latents,
@@ -339,10 +508,24 @@ def prepare_hires_latents_and_conditioning(
             sd_model,
             base_samples=base_samples,
             base_decoded=base_decoded,
-            upscaler_id=str(hires_plan.upscaler_id),
+            upscaler_id=str(upscaler_id),
             tile=tile,
             progress_callback=progress_callback,
             resize_plan=resize_plan,
+        )
+        emit_backend_event(
+            "pipeline.hires.prepare.ready",
+            logger="backend.runtime.pipeline_stages.hires_fix",
+            mode=telemetry.mode,
+            stage="hires.prepare.ready",
+            correlation_id=telemetry.correlation_id,
+            correlation_source=telemetry.correlation_source,
+            task_id=telemetry.task_id,
+            engine_id=engine_id,
+            strategy=backend,
+            continuation_mode="init_latent",
+            latents_shape=tuple(int(dim) for dim in latents.shape),
+            image_conditioning_shape=None,
         )
         return HiresPreparation(
             latents=latents,
@@ -355,10 +538,64 @@ def prepare_hires_latents_and_conditioning(
             sd_model,
             base_samples=base_samples,
             base_decoded=base_decoded,
-            upscaler_id=str(hires_plan.upscaler_id),
+            upscaler_id=str(upscaler_id),
             tile=tile,
             progress_callback=progress_callback,
             resize_plan=resize_plan,
+        )
+        emit_backend_event(
+            "pipeline.hires.prepare.ready",
+            logger="backend.runtime.pipeline_stages.hires_fix",
+            mode=telemetry.mode,
+            stage="hires.prepare.ready",
+            correlation_id=telemetry.correlation_id,
+            correlation_source=telemetry.correlation_source,
+            task_id=telemetry.task_id,
+            engine_id=engine_id,
+            strategy=backend,
+            continuation_mode="image_latents",
+            latents_shape=tuple(int(dim) for dim in latents.shape),
+            image_conditioning_shape=None,
+        )
+        return HiresPreparation(
+            latents=latents,
+            image_conditioning=None,
+            continuation_mode="image_latents",
+        )
+
+    if backend == "flux2":
+        if int(resize_plan.internal_width) % 16 != 0 or int(resize_plan.internal_height) % 16 != 0:
+            raise ValueError(
+                "FLUX.2 hires internal dimensions must be multiples of 16. "
+                f"Got internal={resize_plan.internal_width}x{resize_plan.internal_height}."
+            )
+        if int(resize_plan.target_width) % 16 != 0 or int(resize_plan.target_height) % 16 != 0:
+            raise ValueError(
+                "FLUX.2 hires target dimensions must be multiples of 16. "
+                f"Got target={resize_plan.target_width}x{resize_plan.target_height}."
+            )
+        latents = _prepare_flow_hires_latents(
+            sd_model,
+            base_samples=base_samples,
+            base_decoded=base_decoded,
+            upscaler_id=str(upscaler_id),
+            tile=tile,
+            progress_callback=progress_callback,
+            resize_plan=resize_plan,
+        )
+        emit_backend_event(
+            "pipeline.hires.prepare.ready",
+            logger="backend.runtime.pipeline_stages.hires_fix",
+            mode=telemetry.mode,
+            stage="hires.prepare.ready",
+            correlation_id=telemetry.correlation_id,
+            correlation_source=telemetry.correlation_source,
+            task_id=telemetry.task_id,
+            engine_id=engine_id,
+            strategy=backend,
+            continuation_mode="image_latents",
+            latents_shape=tuple(int(dim) for dim in latents.shape),
+            image_conditioning_shape=None,
         )
         return HiresPreparation(
             latents=latents,
@@ -372,7 +609,11 @@ def prepare_hires_latents_and_conditioning(
 __all__ = [
     "HiresFillCropPlan",
     "HiresPreparation",
+    "PipelineTelemetryContext",
     "compute_hires_fill_crop_plan",
     "prepare_hires_latents_and_conditioning",
+    "resolve_hires_family_strategy",
+    "resolve_pipeline_telemetry_context",
+    "resolve_zimage_hires_pixel_multiple",
     "start_at_step_from_denoise",
 ]

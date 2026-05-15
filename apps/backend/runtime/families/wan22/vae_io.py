@@ -11,15 +11,13 @@ Loads WAN VAE weights via explicit native lanes (`2d_native` or `3d_native`), ap
 I2V init-image preprocessing is deterministic and no-stretch (`scale + crop + resize`) across tensor/PIL/ndarray paths before VAE encode,
 with optional image scale (`img2vid_image_scale > 0` when provided; omitted = auto-fit minimum) and normalized crop offsets (`x/y` in `[0,1]`)
 aligned to the frontend guide projection contract.
-Includes strict finite checks and explicit dtype/device retry logic (no silent fallbacks). Model key remap ownership is delegated to `runtime/state_dict/keymap_wan22_vae.py`.
+Includes strict finite checks and explicit dtype/device retry logic (no silent fallbacks). Model keyspace ownership and lane detection are delegated to `runtime/state_dict/keymap_wan22_vae.py`.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `WAN22VAEContractError` (exception): Deterministic WAN VAE path/config contract failure (non-retryable by dtype fallback loops).
 - `WanVAEDecodeSession` (dataclass): Reusable loaded WAN VAE decode session (device/dtype/lane) for multi-chunk decode passes.
 - `_is_cuda_device_name` (function): Canonical CUDA device-type check that accepts indexed forms (`cuda:0`, etc.) for retry/cleanup paths.
 - `_format_exception_message` (function): Stable exception-text formatter used by retry/fallback logs and terminal fail-loud error messages.
-- `_detect_wan_vae_lane` (function): Resolves canonical WAN VAE lane (`2d_native`/`3d_native`) from core convolution weights.
-- `_normalize_vae_state_dict_keys` (function): Normalizes wrapper prefixes in VAE checkpoints before style-specific load paths.
 - `load_vae` (function): Loads the WAN VAE component (from directory bundles or single-file weights with sibling/override config dir).
 - `_cuda_bf16_supported` (function): Best-effort BF16 support probe for CUDA (used for dtype fallbacks).
 - `_vae_dtype_candidates` (function): Ordered dtype candidates for VAE encode/decode attempts (requested dtype first).
@@ -34,7 +32,7 @@ from __future__ import annotations
 
 import os
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -48,11 +46,7 @@ from apps.backend.runtime.common.vae_codex3d import (
     AutoencoderCodex3D,
     sanitize_codex3d_vae_config,
 )
-from apps.backend.runtime.state_dict.keymap_wan22_vae import (
-    remap_wan22_vae_2d_state_dict,
-    remap_wan22_vae_3d_state_dict,
-)
-from apps.backend.runtime.state_dict.key_mapping import strip_repeated_prefixes
+from apps.backend.runtime.state_dict.keymap_wan22_vae import resolve_wan22_vae_keyspace
 
 from .config import RunConfig, as_torch_dtype, resolve_device_name
 from .diagnostics import cuda_empty_cache, get_logger, log_numerics_enabled, summarize_numerics, warn_fallback
@@ -60,7 +54,6 @@ from .wan_latent_norms import resolve_norm
 
 _SUPPORTED_WAN_VAE_LATENT_CHANNELS = (16, 48)
 _SUPPORTED_WAN_VAE_LANES = ("2d_native", "3d_native")
-_VAE_WRAPPER_PREFIXES = ("module.", "vae.", "first_stage_model.")
 
 
 class WAN22VAEContractError(RuntimeError):
@@ -109,67 +102,6 @@ def _format_exception_message(exc: BaseException | None) -> str:
     return repr(exc)
 
 
-def _detect_wan_vae_lane(state_dict: Mapping[str, Any]) -> str:
-    evidence_keys = (
-        "encoder.conv_in.weight",
-        "decoder.conv_in.weight",
-        "encoder.conv1.weight",
-        "decoder.conv1.weight",
-    )
-    observed: set[str] = set()
-    seen: list[tuple[str, int, tuple[int, ...]]] = []
-    for key in evidence_keys:
-        tensor = state_dict.get(key)
-        if not torch.is_tensor(tensor):
-            continue
-        ndim = int(tensor.ndim)
-        shape = tuple(int(dim) for dim in tensor.shape)
-        seen.append((key, ndim, shape))
-        if ndim == 4:
-            observed.add("2d_native")
-            continue
-        if ndim == 5:
-            observed.add("3d_native")
-            continue
-        raise WAN22VAEContractError(
-            "WAN22 GGUF: unsupported core VAE kernel rank "
-            f"key={key!r} ndim={ndim} shape={shape} (expected 4D or 5D)."
-        )
-    if not seen:
-        fallback = [
-            (str(key), tuple(int(dim) for dim in tensor.shape))
-            for key, tensor in state_dict.items()
-            if torch.is_tensor(tensor)
-            and str(key).endswith(".weight")
-            and (
-                str(key).startswith("encoder.conv")
-                or str(key).startswith("decoder.conv")
-                or str(key).startswith("encoder.head.2")
-                or str(key).startswith("decoder.head.2")
-            )
-        ]
-        if not fallback:
-            raise WAN22VAEContractError(
-                "WAN22 GGUF: cannot detect VAE lane (missing canonical core convolution weights)."
-            )
-        for key, shape in fallback:
-            if len(shape) == 4:
-                observed.add("2d_native")
-            elif len(shape) == 5:
-                observed.add("3d_native")
-            else:
-                raise WAN22VAEContractError(
-                    "WAN22 GGUF: unsupported fallback VAE kernel rank "
-                    f"key={key!r} shape={shape} (expected rank 4 or 5)."
-                )
-    if len(observed) != 1:
-        raise WAN22VAEContractError(
-            "WAN22 GGUF: mixed VAE lane evidence in core kernels "
-            f"(lanes={sorted(observed)} evidence={seen[:8]})."
-        )
-    return next(iter(observed))
-
-
 def _infer_latent_channels_from_state_dict(state_dict: Mapping[str, Any]) -> int | None:
     candidates: tuple[tuple[str, int], ...] = (
         ("post_quant_conv.weight", 0),
@@ -196,19 +128,6 @@ def _infer_latent_channels_from_state_dict(state_dict: Mapping[str, Any]) -> int
     return None
 
 
-def _normalize_vae_state_dict_keys(state_dict: Mapping[str, Any]) -> dict[str, Any]:
-    normalized: dict[str, Any] = {}
-    for key, value in state_dict.items():
-        normalized_key = strip_repeated_prefixes(str(key), _VAE_WRAPPER_PREFIXES)
-        if normalized_key in normalized:
-            raise WAN22VAEContractError(
-                "WAN22 GGUF: normalized VAE state_dict contains duplicate keys after prefix stripping "
-                f"(key={normalized_key!r})."
-            )
-        normalized[normalized_key] = value
-    return normalized
-
-
 def load_vae(
     vae_path: Optional[str],
     *,
@@ -227,24 +146,28 @@ def load_vae(
     def _instantiate_with_state_dict(state_dict_path: str, config_dir: str) -> Any:
         try:
             raw_state_dict = load_torch_file(state_dict_path, device="cpu")
-            if not isinstance(raw_state_dict, Mapping):
+            if not isinstance(raw_state_dict, MutableMapping):
                 raise WAN22VAEContractError(
-                    "WAN22 GGUF: VAE checkpoint loader returned non-mapping state_dict "
+                    "WAN22 GGUF: VAE checkpoint loader returned non-mutable-mapping state_dict "
                     f"(type={type(raw_state_dict).__name__})."
                 )
-            normalized_state_dict = _normalize_vae_state_dict_keys(raw_state_dict)
-            lane = _detect_wan_vae_lane(normalized_state_dict)
+            resolved_vae = resolve_wan22_vae_keyspace(raw_state_dict)
+            lane = str(resolved_vae.metadata.get("lane", "")).strip()
             if lane not in _SUPPORTED_WAN_VAE_LANES:
                 raise WAN22VAEContractError(
                     "WAN22 GGUF: unsupported VAE lane "
                     f"{lane!r} (supported={list(_SUPPORTED_WAN_VAE_LANES)})."
                 )
+            resolved_style_obj = resolved_vae.style
+            resolved_style = (
+                resolved_style_obj.value if hasattr(resolved_style_obj, "value") else str(resolved_style_obj)
+            )
+            resolved_state_dict_view = resolved_vae.view
 
             if lane == "2d_native":
-                remap_style, state_dict = remap_wan22_vae_2d_state_dict(dict(normalized_state_dict))
                 config = AutoencoderKL_LDM.load_config(config_dir)
                 native_config = sanitize_ldm_vae_config(config)
-                inferred_latent_channels = _infer_latent_channels_from_state_dict(state_dict)
+                inferred_latent_channels = _infer_latent_channels_from_state_dict(resolved_state_dict_view)
                 if inferred_latent_channels is not None:
                     configured_channels = native_config.get("latent_channels")
                     if configured_channels is None:
@@ -252,26 +175,30 @@ def load_vae(
                     elif int(configured_channels) != int(inferred_latent_channels):
                         raise WAN22VAEContractError(
                             "WAN22 GGUF: VAE config/state_dict latent channel mismatch "
-                            f"(lane=2d_native style={remap_style} config latent_channels={int(configured_channels)} "
+                            f"(lane=2d_native keyspace_style={resolved_style} "
+                            f"config latent_channels={int(configured_channels)} "
                             f"inferred={int(inferred_latent_channels)})."
                         )
                 vae = AutoencoderKL_LDM.from_config(native_config)
-                missing, unexpected = safe_load_state_dict(vae, state_dict, log_name="WAN22 VAE (2d_native)")
+                missing, unexpected = safe_load_state_dict(
+                    vae,
+                    resolved_state_dict_view,
+                    log_name="WAN22 VAE (2d_native)",
+                )
                 if missing or unexpected:
                     raise WAN22VAEContractError(
                         "WAN22 GGUF: native VAE load failed strict validation "
                         f"(lane=2d_native missing={len(missing)} unexpected={len(unexpected)} "
                         f"missing_sample={missing[:10]} unexpected_sample={unexpected[:10]})."
-                )
+                    )
                 setattr(vae, "_codex_vae_lane", "2d_native")
-                setattr(vae, "_codex_vae_style", remap_style)
+                setattr(vae, "_codex_vae_style", resolved_style)
                 return vae
 
-            remap_style, remapped_state_dict = remap_wan22_vae_3d_state_dict(dict(normalized_state_dict))
             config = AutoencoderCodex3D.load_config(config_dir)
 
             native_config = sanitize_codex3d_vae_config(config)
-            inferred_latent_channels = _infer_latent_channels_from_state_dict(remapped_state_dict)
+            inferred_latent_channels = _infer_latent_channels_from_state_dict(resolved_state_dict_view)
             if inferred_latent_channels is not None:
                 configured_channels = native_config.get("z_dim")
                 if configured_channels is None:
@@ -279,19 +206,24 @@ def load_vae(
                 elif int(configured_channels) != int(inferred_latent_channels):
                     raise WAN22VAEContractError(
                         "WAN22 GGUF: VAE config/state_dict latent channel mismatch "
-                        f"(lane=3d_native style={remap_style} config z_dim={int(configured_channels)} "
+                        f"(lane=3d_native keyspace_style={resolved_style} config z_dim={int(configured_channels)} "
                         f"inferred={int(inferred_latent_channels)})."
                     )
             vae = AutoencoderCodex3D.from_config(native_config)
-            missing, unexpected = safe_load_state_dict(vae, remapped_state_dict, log_name="WAN22 VAE (3d_native)")
+            missing, unexpected = safe_load_state_dict(
+                vae,
+                resolved_state_dict_view,
+                log_name="WAN22 VAE (3d_native)",
+            )
             if missing or unexpected:
                 raise WAN22VAEContractError(
                     "WAN22 GGUF: native VAE load failed strict validation "
-                    f"(lane=3d_native style={remap_style} missing={len(missing)} unexpected={len(unexpected)} "
-                    f"missing_sample={missing[:10]} unexpected_sample={unexpected[:10]})."
+                    f"(lane=3d_native keyspace_style={resolved_style} missing={len(missing)} "
+                    f"unexpected={len(unexpected)} missing_sample={missing[:10]} "
+                    f"unexpected_sample={unexpected[:10]})."
                 )
             setattr(vae, "_codex_vae_lane", "3d_native")
-            setattr(vae, "_codex_vae_style", remap_style)
+            setattr(vae, "_codex_vae_style", resolved_style)
             return vae
         except WAN22VAEContractError:
             raise
@@ -661,9 +593,13 @@ def _assert_supported_wan_vae_latent_channels(channels: int, *, context: str) ->
 
 
 def _resolve_loaded_vae_lane(vae: Any) -> str:
-    # Runtime-loaded WAN VAEs are always stamped with `_codex_vae_lane`.
-    # Keep a deterministic default for stubs/fixtures that do not set it.
-    lane = str(getattr(vae, "_codex_vae_lane", "3d_native")).strip().lower()
+    raw_lane = getattr(vae, "_codex_vae_lane", None)
+    if raw_lane is None:
+        raise RuntimeError(
+            "WAN22 GGUF: loaded VAE is missing required lane marker `_codex_vae_lane`. "
+            "Runtime-loaded WAN VAEs must be stamped by `load_vae()` before encode/decode."
+        )
+    lane = str(raw_lane).strip().lower()
     if lane not in _SUPPORTED_WAN_VAE_LANES:
         raise RuntimeError(
             "WAN22 GGUF: loaded VAE exposes unsupported lane marker "
@@ -815,8 +751,8 @@ def vae_encode_video_condition(
             vae = vae.to(device=target, dtype=torch_dtype)
             lane = _resolve_loaded_vae_lane(vae)
             last_lane = lane
-            style = str(getattr(vae, "_codex_vae_style", "unknown")).strip().lower() or "unknown"
-            log.info("[wan22.gguf] VAE lane=%s style=%s", lane, style)
+            keyspace_style = str(getattr(vae, "_codex_vae_style", "unknown")).strip().lower() or "unknown"
+            log.info("[wan22.gguf] VAE lane=%s keyspace_style=%s", lane, keyspace_style)
 
             image = _prepare_init_image_tensor(
                 init_image,

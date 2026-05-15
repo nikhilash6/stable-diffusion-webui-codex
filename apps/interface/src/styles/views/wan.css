@@ -1,48 +1,4 @@
 @layer components {
-  /* WAN prefers a slightly wider results column. */
-  .wan-panels {
-    grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
-    align-items: stretch;
-  }
-
-  @media (max-width: 68.75rem) {
-    .wan-panels {
-      grid-template-columns: 1fr;
-    }
-  }
-
-  .wan-header-actions {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 0.4rem;
-  }
-
-  .wan-results-panel {
-    flex: 1 1 auto;
-    min-height: 0;
-  }
-
-  .wan-results-panel video {
-    display: block;
-    width: auto;
-    max-width: 100%;
-    max-height: 30dvh;
-    margin-inline: auto;
-    object-fit: contain;
-  }
-
-  .wan-results-summary {
-    opacity: 0.85;
-  }
-
-  .wan-summary-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
-    gap: var(--space-sm);
-  }
-
   .wan-subheader {
     display: flex;
     align-items: center;
@@ -171,28 +127,4 @@
     justify-content: flex-start;
   }
 
-  .wan-results-empty {
-    display: flex;
-    flex-direction: column;
-    gap: 0.6rem;
-    max-width: 34rem;
-    text-align: left;
-    opacity: 1;
-  }
-
-  .wan-empty-title {
-    font-weight: 800;
-    font-size: 1rem;
-    opacity: 0.95;
-  }
-
-  .wan-empty-steps {
-    margin: 0;
-    padding-left: 1.25rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
-    font-size: 0.85rem;
-    opacity: 0.85;
-  }
 }

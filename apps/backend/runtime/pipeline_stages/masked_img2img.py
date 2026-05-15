@@ -6,7 +6,7 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Masked img2img (“inpaint”) helpers for SD-family pipelines.
+Purpose: Masked img2img (“inpaint”) helpers for request-driven latent-mask pipelines.
 Normalizes masks (RGBA alpha semantics), applies invert/blur/round options, optionally builds an inpaint-full-res crop plan
 (Forge-style zoom-crop + paste-back overlay), and produces latent-space masks for sampler enforcement.
 Keeps init/mask at the original image resolution and resizes only the cropped patch to `processing.width/height` for
@@ -15,14 +15,17 @@ sampling (Forge/A1111 “Only masked” semantics).
 Symbols (top-level; keep in sync; no ghosts):
 - `InpaintFullResPlan` (dataclass): Full-res inpaint plan (crop region + overlay composite inputs).
 - `MaskedImg2ImgBundle` (dataclass): Prepared init tensor/latents + latent masks + optional full-res plan.
-- `LatentMaskEnforcer` (class): Latent masking helper implementing post-blend and per-step clamp hooks.
+- `MaskEnforcerHooks` (dataclass): Centralized generic masked-runtime hook set returned by `resolve_mask_enforcer_hooks(...)`.
+- `LatentMaskEnforcer` (class): Latent masking helper implementing post-sample/per-step blend hooks.
 - `compute_mask_connected_component_bboxes` (function): Returns connected-component bounding boxes for a binary inpaint mask (for multi-region flows).
+- `resolve_mask_enforcer_hooks` (function): Resolve the runtime hook set for a validated generic inpaint mode.
 - `prepare_masked_img2img_bundle` (function): Build a masked img2img bundle from a processing object and sampling plan.
 - `apply_inpaint_full_res_composite` (function): Paste-back + overlay composite for full-res inpaint outputs.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence, Tuple
 
@@ -31,21 +34,20 @@ import torch
 import torch.nn.functional as F
 from PIL import Image, ImageFilter, ImageOps
 
-from apps.backend.runtime.processing.conditioners import encode_image_batch, encode_inpaint_latent_pair
+from apps.backend.runtime.processing.conditioners import (
+    encode_image_batch,
+    normalize_torch_manual_seed,
+    resolve_processing_encode_seed,
+)
 from apps.backend.runtime.pipeline_stages.image_io import pil_to_tensor
 
 _RESAMPLE_LANCZOS = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
 _RESAMPLE_NEAREST = Image.Resampling.NEAREST if hasattr(Image, "Resampling") else Image.NEAREST
-_MAX_TORCH_SEED = (1 << 63) - 1
 
-
-def _normalize_manual_seed(value: int) -> int:
-    return int(value) & _MAX_TORCH_SEED
-
-MaskEnforcementMode = str
-MASK_ENFORCEMENT_POST_BLEND = "post_blend"
-MASK_ENFORCEMENT_PER_STEP_CLAMP = "per_step_clamp"
-ALLOWED_MASK_ENFORCEMENTS = frozenset({MASK_ENFORCEMENT_POST_BLEND, MASK_ENFORCEMENT_PER_STEP_CLAMP})
+InpaintMode = str
+INPAINT_MODE_POST_SAMPLE_BLEND = "post_sample_blend"
+INPAINT_MODE_PER_STEP_BLEND = "per_step_blend"
+ALLOWED_INPAINT_MODES = frozenset({INPAINT_MODE_POST_SAMPLE_BLEND, INPAINT_MODE_PER_STEP_BLEND})
 
 
 @dataclass(slots=True)
@@ -63,14 +65,24 @@ class MaskedImg2ImgBundle:
 
     init_tensor: torch.Tensor
     init_latent: torch.Tensor
-    image_conditioning: torch.Tensor
+    image_conditioning: torch.Tensor | None
     latent_masked: torch.Tensor  # 1 inside mask, 0 outside (shape 1x1xHlatentxWlatent)
     latent_unmasked: torch.Tensor  # 1 outside mask, 0 inside (shape 1x1xHlatentxWlatent)
     full_res: InpaintFullResPlan | None = None
 
 
+@dataclass(slots=True, frozen=True)
+class MaskEnforcerHooks:
+    """Centralized masked-enforcement hook set."""
+
+    pre_denoiser: Callable[[torch.Tensor, torch.Tensor, int, int | None], torch.Tensor] | None = None
+    post_denoiser: Callable[[torch.Tensor, torch.Tensor, int, int | None], torch.Tensor] | None = None
+    post_step: Callable[[torch.Tensor, int, int | None], None] | None = None
+    post_sample: Callable[[torch.Tensor], torch.Tensor] | None = None
+
+
 class LatentMaskEnforcer:
-    """Applies latent masking constraints (post-blend and/or per-step clamp)."""
+    """Applies latent masking constraints (post-sample blend and/or per-step blend)."""
 
     def __init__(
         self,
@@ -78,21 +90,32 @@ class LatentMaskEnforcer:
         init_latent: torch.Tensor,
         latent_masked: torch.Tensor,
         latent_unmasked: torch.Tensor,
+        per_step_blend_strength: float,
+        per_step_blend_steps: int | None,
         noise_scaling: Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
         noise_seeds: Sequence[int] | None = None,
     ) -> None:
+        strength = float(per_step_blend_strength)
+        if not math.isfinite(strength):
+            raise ValueError("per_step_blend_strength must be finite")
+        if strength < 0.0 or strength > 1.0:
+            raise ValueError("per_step_blend_strength must be between 0.0 and 1.0")
+        configured_steps = self._parse_configured_steps(per_step_blend_steps)
         self._init_latent = init_latent
         self._latent_masked = latent_masked
         self._latent_unmasked = latent_unmasked
+        self._per_step_blend_strength = strength
+        self._per_step_blend_steps = configured_steps
         self._noise_scaling = noise_scaling
         raw_seeds = [int(seed) for seed in (noise_seeds or [0])]
         if not raw_seeds:
             raw_seeds = [0]
-        self._noise_seeds = tuple(_normalize_manual_seed(seed) for seed in raw_seeds)
+        self._noise_seeds = tuple(normalize_torch_manual_seed(seed) for seed in raw_seeds)
         self._cache: dict[
             tuple[torch.device, torch.dtype, int],
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
         ] = {}
+        self._pre_denoiser_noise_calls = 0
 
     @staticmethod
     def _expand_batch(tensor: torch.Tensor, *, batch: int) -> torch.Tensor:
@@ -113,11 +136,11 @@ class LatentMaskEnforcer:
         generator.manual_seed(seed)
         return generator
 
-    def _build_base_noise(self, init_latent: torch.Tensor) -> torch.Tensor:
+    def _build_noise_sample(self, init_latent: torch.Tensor, *, call_index: int) -> torch.Tensor:
         batch = int(init_latent.shape[0])
         samples: list[torch.Tensor] = []
         for index in range(batch):
-            seed = self._noise_seeds[index % len(self._noise_seeds)]
+            seed = (self._noise_seeds[index % len(self._noise_seeds)] + int(call_index)) % (1 << 64)
             generator = self._new_generator(device=init_latent.device, seed=seed)
             sample = torch.randn(
                 tuple(init_latent[index : index + 1].shape),
@@ -128,7 +151,12 @@ class LatentMaskEnforcer:
             samples.append(sample)
         return torch.cat(samples, dim=0)
 
-    def _materialize(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _next_pre_denoiser_noise(self, init_latent: torch.Tensor) -> torch.Tensor:
+        call_index = self._pre_denoiser_noise_calls
+        self._pre_denoiser_noise_calls += 1
+        return self._build_noise_sample(init_latent, call_index=call_index)
+
+    def _materialize(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         batch = int(x.shape[0])
         key = (x.device, x.dtype, batch)
         cached = self._cache.get(key)
@@ -167,8 +195,7 @@ class LatentMaskEnforcer:
             )
 
         init_unmasked = init_latent * unmasked
-        base_noise = self._build_base_noise(init_latent)
-        self._cache[key] = (masked, unmasked, init_latent, init_unmasked, base_noise)
+        self._cache[key] = (masked, unmasked, init_latent, init_unmasked)
         return self._cache[key]
 
     @staticmethod
@@ -183,8 +210,80 @@ class LatentMaskEnforcer:
             sigma = sigma.expand(batch)
         return sigma.to(device=device, dtype=dtype).view(batch, 1, 1, 1)
 
-    def pre_denoiser(self, x: torch.Tensor, sigma: torch.Tensor, step: int, steps: int) -> torch.Tensor:  # noqa: ARG002
-        masked, unmasked, init_latent, _init_unmasked, base_noise = self._materialize(x)
+    @staticmethod
+    def _parse_configured_steps(per_step_blend_steps: int | None) -> int:
+        if per_step_blend_steps is None:
+            raise ValueError("per_step_blend_steps must be provided explicitly")
+        if isinstance(per_step_blend_steps, bool):
+            raise ValueError("per_step_blend_steps must be an integer >= 0, got boolean")
+        if isinstance(per_step_blend_steps, int):
+            parsed = per_step_blend_steps
+        elif isinstance(per_step_blend_steps, float):
+            if not per_step_blend_steps.is_integer():
+                raise ValueError(f"per_step_blend_steps must be an integer >= 0, got {per_step_blend_steps!r}")
+            parsed = int(per_step_blend_steps)
+        else:
+            raise ValueError(
+                f"per_step_blend_steps must be an integer >= 0, got {type(per_step_blend_steps).__name__}"
+            )
+        if parsed < 0:
+            raise ValueError(f"per_step_blend_steps must be >= 0, got {parsed}")
+        return parsed
+
+    @staticmethod
+    def _parse_step_index(step: int) -> int:
+        if isinstance(step, bool):
+            raise ValueError("step must be an integer >= 1, got boolean")
+        parsed = int(step)
+        if parsed < 1:
+            raise ValueError(f"step must be >= 1, got {parsed}")
+        return parsed
+
+    @staticmethod
+    def _parse_total_steps(steps: int | None) -> int | None:
+        if steps is None:
+            return None
+        if isinstance(steps, bool):
+            raise ValueError("steps must be an integer >= 1 when provided, got boolean")
+        parsed = int(steps)
+        if parsed < 1:
+            raise ValueError(f"steps must be >= 1 when provided, got {parsed}")
+        return parsed
+
+    def resolve_active_step_limit(self, steps: int | None) -> int | None:
+        total_steps = self._parse_total_steps(steps)
+        if self._per_step_blend_steps == 0:
+            return total_steps
+        if total_steps is None:
+            return self._per_step_blend_steps
+        return min(self._per_step_blend_steps, total_steps)
+
+    def is_step_active(self, *, step: int, steps: int | None) -> bool:
+        current_step = self._parse_step_index(step)
+        active_limit = self.resolve_active_step_limit(steps)
+        if active_limit is None:
+            return True
+        return current_step <= active_limit
+
+    def uses_total_per_step_blend(self) -> bool:
+        return self._per_step_blend_strength == 1.0 and self._per_step_blend_steps == 0
+
+    @staticmethod
+    def _blend_toward_target(
+        current: torch.Tensor,
+        *,
+        target: torch.Tensor,
+        unmasked: torch.Tensor,
+        strength: float,
+    ) -> torch.Tensor:
+        if strength <= 0.0:
+            return current
+        current.add_((target - current) * unmasked * strength)
+        return current
+
+    def pre_denoiser(self, x: torch.Tensor, sigma: torch.Tensor, step: int, steps: int | None) -> torch.Tensor:  # noqa: ARG002
+        masked, unmasked, init_latent, _init_unmasked = self._materialize(x)
+        noise_sample = self._next_pre_denoiser_noise(init_latent)
         sigma_view = self._sigma_to_latent_shape(
             sigma,
             batch=int(x.shape[0]),
@@ -192,29 +291,57 @@ class LatentMaskEnforcer:
             dtype=x.dtype,
         )
         if self._noise_scaling is not None:
-            noisy_init = self._noise_scaling(sigma_view, base_noise, init_latent)
+            noisy_init = self._noise_scaling(sigma_view, noise_sample, init_latent)
         else:
-            noisy_init = init_latent + sigma_view * base_noise
+            noisy_init = init_latent + sigma_view * noise_sample
         x.mul_(masked)
         x.add_(noisy_init * unmasked)
         return x
 
-    def post_denoiser(self, denoised: torch.Tensor, sigma: torch.Tensor, step: int, steps: int) -> torch.Tensor:  # noqa: ARG002
-        masked, _unmasked, _init_latent, init_unmasked, _base_noise = self._materialize(denoised)
+    def post_denoiser(self, denoised: torch.Tensor, sigma: torch.Tensor, step: int, steps: int | None) -> torch.Tensor:  # noqa: ARG002
+        masked, _unmasked, _init_latent, init_unmasked = self._materialize(denoised)
         denoised.mul_(masked)
         denoised.add_(init_unmasked)
         return denoised
 
-    def post_step(self, x: torch.Tensor, step: int, steps: int) -> None:  # noqa: ARG002 - hook signature
-        masked, _unmasked, _init_latent, init_unmasked, _base_noise = self._materialize(x)
-        x.mul_(masked)
-        x.add_(init_unmasked)
+    def post_step(self, x: torch.Tensor, step: int, steps: int | None) -> None:
+        if not self.is_step_active(step=step, steps=steps):
+            return
+        _masked, unmasked, init_latent, _init_unmasked = self._materialize(x)
+        self._blend_toward_target(
+            x,
+            target=init_latent,
+            unmasked=unmasked,
+            strength=self._per_step_blend_strength,
+        )
 
     def post_sample(self, x: torch.Tensor) -> torch.Tensor:
-        masked, _unmasked, _init_latent, init_unmasked, _base_noise = self._materialize(x)
+        masked, _unmasked, _init_latent, init_unmasked = self._materialize(x)
         x.mul_(masked)
         x.add_(init_unmasked)
         return x
+
+
+def resolve_mask_enforcer_hooks(
+    enforcer: LatentMaskEnforcer,
+    *,
+    enforce_mode: InpaintMode,
+) -> MaskEnforcerHooks:
+    enforcement_value = str(enforce_mode).strip()
+    if enforcement_value == INPAINT_MODE_PER_STEP_BLEND:
+        if enforcer.uses_total_per_step_blend():
+            return MaskEnforcerHooks(
+                pre_denoiser=enforcer.pre_denoiser,
+                post_denoiser=enforcer.post_denoiser,
+                post_sample=enforcer.post_sample,
+            )
+        return MaskEnforcerHooks(
+            post_step=enforcer.post_step,
+            post_sample=enforcer.post_sample,
+        )
+    if enforcement_value == INPAINT_MODE_POST_SAMPLE_BLEND:
+        return MaskEnforcerHooks(post_sample=enforcer.post_sample)
+    raise ValueError(f"Unknown mask enforcement '{enforcement_value}' (internal validation bug)")
 
 
 def _create_binary_mask(mask: Image.Image, *, round_mask: bool) -> Image.Image:
@@ -434,20 +561,25 @@ def compute_mask_connected_component_bboxes(
 
 
 def _overlay_from_mask(*, image: Image.Image, mask_for_overlay: Image.Image) -> Image.Image:
-    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    inv = ImageOps.invert(mask_for_overlay.convert("L"))
-    overlay.paste(image.convert("RGBA"), (0, 0), inv)
-    return overlay
+    return _preserved_region_scaffold(image=image, mask=mask_for_overlay).convert("RGBA")
+
+
+def _preserved_region_scaffold(*, image: Image.Image, mask: Image.Image) -> Image.Image:
+    """Build a premultiplied-alpha preserved-region scaffold for soft mask edges."""
+    preserved = Image.new("RGBa", image.size)
+    preserved.paste(
+        image.convert("RGBA").convert("RGBa"),
+        mask=ImageOps.invert(mask.convert("L")),
+    )
+    return preserved.convert("RGBa")
 
 
 def _fill_masked_regions(image: Image.Image, *, mask: Image.Image) -> Image.Image:
-    """Best-effort masked-region fill (blur-smear) used for `inpainting_fill` parity."""
+    """Forge/A1111-parity masked-region fill (blur-smear) for `inpainting_fill`."""
     base = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    inv = ImageOps.invert(mask.convert("L"))
-    scaffold = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    scaffold.paste(image.convert("RGBA"), (0, 0), inv)
+    scaffold = _preserved_region_scaffold(image=image, mask=mask)
 
-    for radius, repeats in ((128, 1), (32, 1), (16, 1), (8, 2), (4, 4), (2, 2), (0, 1)):
+    for radius, repeats in ((256, 1), (64, 1), (16, 2), (4, 4), (2, 2), (0, 1)):
         blurred = scaffold.filter(ImageFilter.GaussianBlur(radius)).convert("RGBA")
         for _ in range(repeats):
             base.alpha_composite(blurred)
@@ -474,11 +606,11 @@ def _latent_mask_from_image(
     return tensor
 
 
-def _validate_mask_enforcement(mode: Any) -> MaskEnforcementMode:
+def _validate_inpaint_mode(mode: Any) -> InpaintMode:
     value = str(mode or "").strip()
-    if value not in ALLOWED_MASK_ENFORCEMENTS:
+    if value not in ALLOWED_INPAINT_MODES:
         raise ValueError(
-            f"Invalid mask_enforcement '{value}'. Allowed: {sorted(ALLOWED_MASK_ENFORCEMENTS)}"
+            f"Invalid inpaint_mode '{value}'. Allowed: {sorted(ALLOWED_INPAINT_MODES)}"
         )
     return value
 
@@ -488,6 +620,7 @@ def prepare_masked_img2img_bundle(
     plan: Any,
     *,
     enforce_mode: Any,
+    include_image_conditioning: bool = True,
 ) -> tuple[MaskedImg2ImgBundle, LatentMaskEnforcer]:
     """Prepare masked img2img inputs (mask processing + optional full-res plan + latent masks).
 
@@ -500,11 +633,11 @@ def prepare_masked_img2img_bundle(
     if init_image is None:
         raise ValueError("masked img2img requires processing.init_image")
 
-    raw_mask = getattr(processing, "mask", None) or getattr(processing, "image_mask", None)
+    raw_mask = getattr(processing, "mask", None)
     if raw_mask is None:
-        raise ValueError("masked img2img requires processing.mask (or processing.image_mask)")
+        raise ValueError("masked img2img requires processing.mask")
 
-    _validate_mask_enforcement(enforce_mode)
+    _validate_inpaint_mode(enforce_mode)
 
     width = int(getattr(processing, "width", 0) or 0)
     height = int(getattr(processing, "height", 0) or 0)
@@ -566,23 +699,19 @@ def prepare_masked_img2img_bundle(
             processing.update_extra_param("Masked content", "fill")
 
     init_tensor = pil_to_tensor([image_for_sampling])
-    round_conditioning_mask = bool(getattr(processing, "round_image_mask", True))
-    conditioning_latent: torch.Tensor | None = None
-    if getattr(processing.sd_model, "is_inpaint", False):
-        init_latent, conditioning_latent, _conditioning_mask = encode_inpaint_latent_pair(
-            processing.sd_model,
-            init_tensor,
-            image_mask=mask_for_sampling,
-            round_mask=round_conditioning_mask,
-            stage_prefix="runtime.pipeline_stages.masked_img2img.prepare_masked_img2img_bundle",
-        )
-        del _conditioning_mask
-    else:
-        init_latent = encode_image_batch(
-            processing.sd_model,
-            init_tensor,
-            stage="runtime.pipeline_stages.masked_img2img.prepare_masked_img2img_bundle.encode",
-        )
+    round_conditioning_mask = bool(getattr(processing, "mask_round", True))
+    per_step_blend_strength = float(getattr(processing, "per_step_blend_strength"))
+    per_step_blend_steps = LatentMaskEnforcer._parse_configured_steps(getattr(processing, "per_step_blend_steps", None))
+    if not math.isfinite(per_step_blend_strength):
+        raise ValueError("processing.per_step_blend_strength must be finite")
+    if per_step_blend_strength < 0.0 or per_step_blend_strength > 1.0:
+        raise ValueError("processing.per_step_blend_strength must be between 0.0 and 1.0")
+    init_latent = encode_image_batch(
+        processing.sd_model,
+        init_tensor,
+        encode_seed=resolve_processing_encode_seed(processing),
+        stage="runtime.pipeline_stages.masked_img2img.prepare_masked_img2img_bundle.encode",
+    )
 
     latent_h = int(init_latent.shape[2])
     latent_w = int(init_latent.shape[3])
@@ -603,7 +732,7 @@ def prepare_masked_img2img_bundle(
         gens = []
         for seed in noise_seeds:
             gen = torch.Generator(device=init_latent.device)
-            gen.manual_seed(_normalize_manual_seed(int(seed)))
+            gen.manual_seed(normalize_torch_manual_seed(int(seed)))
             gens.append(torch.randn(tuple(init_latent.shape[1:]), generator=gen, device=init_latent.device, dtype=init_latent.dtype))
         noise = torch.stack(gens, dim=0)
         init_latent = init_latent * latent_unmasked + noise * latent_masked
@@ -612,16 +741,17 @@ def prepare_masked_img2img_bundle(
         init_latent = init_latent * latent_unmasked
         processing.update_extra_param("Masked content", "latent nothing")
 
-    from apps.backend.runtime.processing.conditioners import img2img_conditioning
+    image_conditioning: torch.Tensor | None = None
+    if include_image_conditioning:
+        from apps.backend.runtime.processing.conditioners import img2img_conditioning
 
-    image_conditioning = img2img_conditioning(
-        processing.sd_model,
-        init_tensor,
-        init_latent,
-        image_mask=mask_for_sampling,
-        round_mask=round_conditioning_mask,
-        precomputed_conditioning_latent=conditioning_latent,
-    )
+        image_conditioning = img2img_conditioning(
+            processing.sd_model,
+            init_tensor,
+            init_latent,
+            image_mask=mask_for_sampling,
+            round_mask=round_conditioning_mask,
+        )
 
     bundle = MaskedImg2ImgBundle(
         init_tensor=init_tensor,
@@ -645,10 +775,19 @@ def prepare_masked_img2img_bundle(
 
         noise_scaling = _predictor_noise_scaling
 
+    if str(enforce_mode).strip() == INPAINT_MODE_PER_STEP_BLEND:
+        processing.update_extra_param("Per-step blend strength", float(per_step_blend_strength))
+        processing.update_extra_param(
+            "Per-step blend steps",
+            "all" if per_step_blend_steps == 0 else int(per_step_blend_steps),
+        )
+
     enforcer = LatentMaskEnforcer(
         init_latent=init_latent,
         latent_masked=latent_masked,
         latent_unmasked=latent_unmasked,
+        per_step_blend_strength=per_step_blend_strength,
+        per_step_blend_steps=per_step_blend_steps,
         noise_scaling=noise_scaling,
         noise_seeds=noise_seeds,
     )
@@ -680,13 +819,15 @@ def apply_inpaint_full_res_composite(
 
 
 __all__ = [
-    "ALLOWED_MASK_ENFORCEMENTS",
+    "ALLOWED_INPAINT_MODES",
     "compute_mask_connected_component_bboxes",
     "InpaintFullResPlan",
     "LatentMaskEnforcer",
-    "MASK_ENFORCEMENT_PER_STEP_CLAMP",
-    "MASK_ENFORCEMENT_POST_BLEND",
+    "MaskEnforcerHooks",
+    "INPAINT_MODE_PER_STEP_BLEND",
+    "INPAINT_MODE_POST_SAMPLE_BLEND",
     "MaskedImg2ImgBundle",
     "apply_inpaint_full_res_composite",
     "prepare_masked_img2img_bundle",
+    "resolve_mask_enforcer_hooks",
 ]

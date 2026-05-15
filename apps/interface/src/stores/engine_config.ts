@@ -8,10 +8,11 @@ Required Notice: see NOTICE
 
 Purpose: Static engine configs (defaults + capability flags) for the WebUI.
 Defines engine types and per-engine defaults/capabilities used by dynamic tabs and composables to pick UI defaults and gate fields.
-Variant-dependent engines (e.g. Z-Image Turbo/Base) must be gated by per-tab params in views/payload builders, not by these static flags.
+Variant-dependent engines (for example Z-Image Turbo/Base and FLUX.2 Klein distilled/base-4B) must be gated by per-tab checkpoint state
+in views/payload builders, not by these static flags.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `EngineType` (type): Known engine identifiers used by the UI config (includes `anima`).
+- `EngineType` (type): Known engine identifiers used by the UI config (includes `flux2`, `anima`, and `ltx2`).
 - `TaskType` (type): Supported task identifiers (txt2img/img2img/txt2vid/img2vid).
 - `EngineCapabilities` (interface): Capability flags used to gate UI controls (CFG/negative prompt/etc.).
 - `EngineDefaults` (interface): Default generation parameters (width/height/steps/cfg/etc.).
@@ -28,9 +29,11 @@ export type EngineType =
   | 'sd15' 
   | 'sdxl' 
   | 'flux1' 
+  | 'flux2'
   | 'zimage' 
   | 'chroma'
   | 'anima'
+  | 'ltx2'
   | 'wan22_14b' 
   | 'wan22_5b'
 
@@ -123,6 +126,25 @@ const ENGINE_CONFIGS: Record<EngineType, EngineConfig> = {
       distilledCfg: 3.5,
     },
   },
+
+  flux2: {
+    id: 'flux2',
+    label: 'FLUX.2',
+    capabilities: {
+      tasks: ['txt2img', 'img2img'],
+      usesCfg: true,
+      usesDistilledCfg: true,
+      usesNegativePrompt: true,
+      isVideoEngine: false,
+    },
+    defaults: {
+      width: 1024,
+      height: 1024,
+      steps: 20,
+      cfg: 4,
+      distilledCfg: 4,
+    },
+  },
   
   zimage: {
     id: 'zimage',
@@ -176,6 +198,24 @@ const ENGINE_CONFIGS: Record<EngineType, EngineConfig> = {
       height: 1024,
       steps: 30,
       cfg: 4,
+    },
+  },
+
+  ltx2: {
+    id: 'ltx2',
+    label: 'LTX 2.3',
+    capabilities: {
+      tasks: ['txt2vid', 'img2vid'],
+      usesCfg: true,
+      usesDistilledCfg: false,
+      usesNegativePrompt: true,
+      isVideoEngine: true,
+    },
+    defaults: {
+      width: 768,
+      height: 512,
+      steps: 3,
+      cfg: 1,
     },
   },
   

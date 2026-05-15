@@ -13,7 +13,7 @@ This module keeps a stable import surface for callers while delegating implement
 Symbols (top-level; keep in sync; no ghosts):
 - `KeyPrefixView` (class): Mapping view that exposes `base` keys under a fixed prefix without materializing values.
 - `FilterPrefixView` (class): Mapping view that filters keys by prefix and optionally re-prefixes them lazily.
-- `RemapKeysView` (class): Mapping view that remaps keys through a mapping dict (useful for on-the-fly state_dict key conversion).
+- `KeyspaceLookupView` (class): Mapping view that exposes one keyspace through source-key lookup without mutating the underlying state dict.
 - `CastOnGetView` (class): Mapping view that casts tensors/values on access (`__getitem__`) to a target dtype/device (no eager conversion).
 - `read_arbitrary_config` (function): Reads a best-effort config from a directory (supports JSON/YAML-like inputs where present).
 - `load_torch_file` (function): Loads a torch checkpoint with safe-load options (prefers safe loaders, falls back to pickle loader when allowed).
@@ -55,14 +55,14 @@ from .checkpoint.io import (
 )
 from .nested import dtype_to_element_size, fp16_fix, nested_compute_size, nested_move_to_device
 from .state_dict.tools import calculate_parameters, beautiful_print_gguf_state_dict_statics, get_state_dict_after_quant
-from .state_dict.views import CastOnGetView, FilterPrefixView, KeyPrefixView, LazySafetensorsDict, RemapKeysView
+from .state_dict.views import CastOnGetView, FilterPrefixView, KeyPrefixView, KeyspaceLookupView, LazySafetensorsDict
 
 __all__ = [
     "CastOnGetView",
     "FilterPrefixView",
     "KeyPrefixView",
     "LazySafetensorsDict",
-    "RemapKeysView",
+    "KeyspaceLookupView",
     "_load_gguf_state_dict",
     "_load_pickled_checkpoint",
     "beautiful_print_gguf_state_dict_statics",

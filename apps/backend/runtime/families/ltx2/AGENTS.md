@@ -1,0 +1,41 @@
+# apps/backend/runtime/families/ltx2 Overview
+<!-- tags: backend, runtime, families, ltx2, video, audio, gemma3 -->
+Date: 2026-03-11
+Last Review: 2026-03-31
+Status: Active
+
+## Purpose
+- Host the native LTX2 runtime bring-up seam under `apps/**`.
+- Freeze the parser-owned component contract (`transformer`, `connectors`, `vae`, `audio_vae`, `vocoder`) and the external Gemma3 text-encoder handoff while assembling the real LTX2 backend runtime used by the exposed `txt2vid` / `img2vid` slice.
+
+## Key Files
+- `apps/backend/runtime/families/ltx2/config.py` — Immutable LTX2 component names, required text-encoder slot, and vendored metadata path resolution.
+- `apps/backend/runtime/families/ltx2/model.py` — Typed bundle-planning dataclasses for components, external text encoder, vendored metadata, and the exact wrapped-vocoder config carried out of the real audio bundle metadata.
+- `apps/backend/runtime/families/ltx2/text_encoder.py` — Strict one-asset Gemma3 resolution plus model/tokenizer loading from the vendored LTX2 metadata repo; GGUF loads use the text-only `Gemma3TextModel` path with a strict Gemma3 GGUF keyspace view under Codex GGUF ops, and `mmproj` projector files are rejected explicitly.
+- `apps/backend/runtime/families/ltx2/loader.py` — Loader-side planner that turns parser output into a typed LTX2 bundle contract plus stable metadata.
+- `apps/backend/runtime/families/ltx2/runtime.py` — Bundle rehydration helper, native component assembly/execution bridge, and the family-local `Ltx2RunResult` contract (`frames + audio_asset + metadata`).
+- `apps/backend/runtime/families/ltx2/native/AGENTS.md` — Ownership note for the native LTX2 transformer/VAE/connector/vocoder/scheduler/pipeline modules.
+- `apps/backend/runtime/families/ltx2/streaming/AGENTS.md` — Ownership note for the family-local transformer-core streaming wrapper/controller/config seam.
+- `apps/backend/runtime/families/ltx2/vae.py` — Video-VAE bundle contract validation.
+- `apps/backend/runtime/families/ltx2/audio.py` — Audio-VAE/vocoder bundle validation for the supported legacy raw and real 2.3 wrapped vocoder layouts, plus generated-audio WAV materialization into the shared `AudioExportAsset` contract.
+
+## Notes
+- This directory is not a compatibility shim. Do not import `.refs/**` from active code and do not add runtime key remap helpers.
+- The current slice is no longer backend-only or unadvertised: engine registration, canonical use-case execution, semantic capability exposure, and the dedicated LTX UI tab are landed, but the supported public mode surface is still only `txt2vid` / `img2vid`.
+- The external text encoder is exactly one `gemma3_12b` asset. Any ambiguous or missing override resolution must fail loud.
+- Native execution is strict: no active-code LTX2 path may import LTX2-specific Diffusers runtime/model/pipeline classes. Keep model, scheduler, and pipeline execution inside `apps/backend/runtime/families/ltx2/**`.
+- The local LTX slice does not implement pad/crop adaptation for non-aligned geometry/frame counts. Frontend/router layers must reject invalid `32px` / `8n+1` requests instead of silently snapping or pretending the runtime will fix them.
+- The explicit `two_stage` profile is truthful-only: it is limited to dev/full SafeTensors checkpoints, requires one resolved `distilled-lora-384` asset plus one resolved `spatial-upscaler-x2` asset, additionally requires vendored `latent_upsampler/config.json`, and keeps public width/height as final output dimensions with a hard `%64` boundary because stage 1 runs at half resolution.
+- The explicit `two_stage` x2 spatial upsampler is a side-asset-owned source-style seam: resolve the file from the sanctioned LTX side-asset roots, and when the SafeTensors header carries a `config` JSON payload, treat that payload as the authoritative architecture/config surface instead of forcing the vendored diffusers-style config onto a legacy `LatentUpsampler` state dict.
+- `runtime.py` now owns the single request-scoped generator seam for both `one_stage` and `two_stage`: native helpers consume caller-owned generators only, stage 1 and stage 2 must reuse the same `torch.Generator`, stage-2 LoRA application stays temporary/in-place on the unwrapped native transformer owner even when core streaming wraps that transformer under `_base`, public stage helpers must not expose alternate transformer owners, and the x2 latent upsampler stays in `native/latent_upsampler.py`.
+- `runtime.py` now also owns the `two_stage` distilled-LoRA structural preflight seam: when the side asset is SafeTensors, run the cheap header pass first; for every supported side-asset format (`.safetensors`, `.pt`, `.bin`), run materialized shape validation against the live native transformer before mutating any parameter.
+- Side-asset config metadata is opportunistic, not universal: `runtime.py` reads `config` only from SafeTensors headers, and non-SafeTensors two-stage side assets must fall back to the vendored `latent_upsampler/config.json` contract instead of pretending header metadata exists.
+- The external text-encoder seam stays text-only for the current backend lane. `text_encoder.py` accepts exactly one `gemma3_12b` asset, rejects `mmproj` projectors, and for GGUF assets must load through the strict Gemma3 text keyspace resolver plus the Codex-aware embedding shim under GGUF operations support.
+- `runtime.py` must assemble through the local native package only: `load_ltx2_connectors(...)`, `load_ltx2_vocoder(...)`, and `load_strict_state_dict(...)` on transformer/video/audio VAEs. `load_ltx2_connectors(...)` owns optional `connectors.*` wrapper handling, must load the real 2.3 merged connector surface (`video_embeddings_connector.*` + `audio_embeddings_connector.*` + `text_embedding_projection.*`) without renaming keys, and must fail loud on mixed direct/wrapped surfaces. Do not reintroduce a generic `from_config(...)+load_state_dict(...)` path.
+- The current core-streaming tranche is transformer-only and wrapper-backed. `runtime.py` may conditionally wrap only the native transformer when normalized `core_streaming_enabled` is true; `native/pipelines.py` owns generation-boundary reset/evict cleanup, and this slice must not add public result-metadata fields for streaming state.
+- The real LTX 2.3 combined audio side asset is a wrapper bundle, not a flat raw vocoder. `audio.py` must validate the stored nested groups (`bwe_generator.*`, `mel_stft.*`, `vocoder.*`) without renaming keys, `loader.py` / `runtime.py` must carry the exact wrapped `vocoder` config from SafeTensors metadata through the bundle contract, and `native/vocoder.py` must load that wrapper layout directly instead of hardcoding BWE defaults.
+- Gemma3 GGUF loads must be assembled under Codex GGUF operations support; do not bypass that context with raw HF model construction.
+- The current LTX2 runtime lane is still fixed to the native FlowMatchEuler path, but the public contract is now checkpoint-aware and profile-based: `dev` checkpoints expose `one_stage` plus the explicit `two_stage` lane, distilled checkpoints expose only `distilled`, both currently derive to the live `euler` / `simple` runtime lane, and `unknown` checkpoints stay blocked. Accept only empty/default runtime values or explicit `euler` / `simple`, report the actual effective scheduler in metadata, and fail loud on other overrides.
+- Negative LTX seeds are request-level random sentinels, not real runtime seeds. Frontend state may keep `-1` visibly, but route/runtime seams must normalize negative seed values to unset/random semantics instead of seeding deterministically.
+- 2026-03-16: `loader.py` core-only GGUF planning now treats the parser-owned `transformer` component as transformer-only truth. Connector tensors must come from the external `ltx2_connectors` sidecar; unexpected embedded connector keys are a fail-loud contract violation, not something to merge around.
+- 2026-03-16: `runtime.py` now materializes generated LTX2 audio only when the canonical use-case passes a `GeneratedAudioExportPolicy` that actually needs a muxable saved output. No-save runs keep frame results without writing temp WAVs, while unsupported saved containers fail before generation.

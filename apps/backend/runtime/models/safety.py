@@ -6,9 +6,10 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Secure checkpoint validation and restricted `torch.load` wrapper for legacy `.ckpt/.pt`.
-Validates pickled checkpoints via a restricted unpickler before deserialization, and provides a safer `safe_torch_load` wrapper that can use
-`weights_only` and mmap when supported. Used by the backend when `safe_load=True`.
+Purpose: Secure checkpoint validation and native-safe `torch.load` wrapper for pickle-backed checkpoints.
+Uses native `torch.load(..., weights_only=True)` when the active torch build supports it, adds `mmap=True` only for zip/new-serialization
+checkpoints when supported, and keeps restricted pre-validation plus restricted pickle fallback for older torch builds that lack native
+weights-only loading. Used by the backend when `safe_load=True`.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `UnsafeCheckpointError` (class): Raised when checkpoint validation fails.
@@ -16,7 +17,10 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_validate_zip_checkpoint` (function): Validates zip-format checkpoints and their `data.pkl` payload.
 - `_validate_legacy_pickle` (function): Validates legacy multi-pickle checkpoint format.
 - `validate_checkpoint` (function): Validates a checkpoint path and raises `UnsafeCheckpointError` on failure.
+- `_is_zip_checkpoint` (function): Detects whether a checkpoint uses torch's zip/new-serialization container.
 - `_torch_supports_weights_only` (function): Detects whether this torch build supports `torch.load(..., weights_only=...)`.
+- `_torch_supports_mmap` (function): Detects whether this torch build supports `torch.load(..., mmap=...)`.
+- `_native_safe_torch_load` (function): Loads a checkpoint through torch's native weights-only path when available.
 - `_restricted_pickle_module` (function): Builds a pickle module wrapper using the restricted unpickler.
 - `safe_torch_load` (function): Safer `torch.load` wrapper with validation and conservative defaults.
 - `extra_globals` (contextmanager): Temporarily allows additional globals during restricted unpickling.
@@ -129,8 +133,27 @@ def validate_checkpoint(path: str, *, extra_handler: Callable[[str, str], Any] |
     _validate_legacy_pickle(path, extra_handler=extra_handler)
 
 
+def _is_zip_checkpoint(path: str) -> bool:
+    with open(path, "rb") as fp:
+        return fp.read(4) == b"PK\x03\x04"
+
+
 def _torch_supports_weights_only() -> bool:
     return "weights_only" in torch.load.__code__.co_varnames  # type: ignore[attr-defined]
+
+
+def _torch_supports_mmap() -> bool:
+    return "mmap" in torch.load.__code__.co_varnames  # type: ignore[attr-defined]
+
+
+def _native_safe_torch_load(path: str, *, map_location: torch.device | str | None = None) -> Any:
+    load_kwargs: dict[str, Any] = {
+        "map_location": map_location or "cpu",
+        "weights_only": True,
+    }
+    if _torch_supports_mmap() and _is_zip_checkpoint(path):
+        load_kwargs["mmap"] = True
+    return torch.load(path, **load_kwargs)
 
 
 def _restricted_pickle_module(extra_handler: Callable[[str, str], Any] | None = None):
@@ -157,9 +180,16 @@ def safe_torch_load(
 ) -> Any:
     """Safely load a torch checkpoint.
 
-    When ``strict`` is true the checkpoint is validated with
-    :func:`validate_checkpoint` prior to calling :func:`torch.load`.
+    When native weights-only loading is available, it is the authoritative safe
+    path because it understands real torch archive metadata and persistent
+    storage references. Native mmap is only enabled for zip/new-serialization
+    checkpoints. ``strict`` only applies to the legacy restricted-pickle
+    fallback path used on older torch builds without ``weights_only`` support.
     """
+
+    map_location = map_location or "cpu"
+    if _torch_supports_weights_only():
+        return _native_safe_torch_load(path, map_location=map_location)
 
     if strict:
         try:
@@ -168,9 +198,6 @@ def safe_torch_load(
             runtime_errors.report_error(f"Unsafe checkpoint rejected: {path}", exc_info=False, context="checkpoint_safety")
             raise
 
-    map_location = map_location or "cpu"
-    if _torch_supports_weights_only():
-        return torch.load(path, map_location=map_location, weights_only=True)
     # Fallback to restricted pickle module if weights_only is unsupported.
     pickle_module = _restricted_pickle_module(extra_handler)
     return torch.load(path, map_location=map_location, pickle_module=pickle_module)

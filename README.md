@@ -40,10 +40,25 @@
 
 ## Preview screenshots
 
-| Launcher (Services tab) | WebUI (SDXL tab) |
-|---|---|
-| ![Launcher services tab showing installed service controls](assets/launcher_services_tab.png) | ![WebUI SDXL tab showing generation controls](assets/interface-sdxl-tab.png) |
-| Manage API/UI services and runtime startup state from one place. | Run SDXL workflows with generation controls and model/runtime options. |
+### Latest
+
+![WebUI Z-Image tab showing the current generation workspace and controls](assets/interface-zimage-tab1.png)
+
+Current Z-Image workspace with prompt, generation, and runtime controls.
+
+![WebUI Z-Image tab showing the current results and preview layout](assets/interface-zimage-tab2.png)
+
+Current Z-Image results view with the updated preview and output layout.
+
+### Earlier
+
+![Launcher services tab showing installed service controls](assets/launcher_services_tab.png)
+
+Manage API/UI services and runtime startup state from one place.
+
+![WebUI SDXL tab showing generation controls](assets/interface-sdxl-tab.png)
+
+Run SDXL workflows with generation controls and model/runtime options.
 
 ## Custom PyTorch builds (FlashAttention2)
 

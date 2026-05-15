@@ -7,20 +7,24 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Full-screen inpaint mask editor overlay for img2img/inpaint workflows.
-Provides practical mask tools (brush, eraser, circle, polygon), zoom/pan viewport controls,
-undo/redo with deep history, mask upload import (auto-stretched to init-image dimensions), and apply/close semantics while
-keeping state presentational (props/emits only).
+Provides practical mask tools (brush, eraser, circle, polygon), shared blur/padding sliders, WYSIWYG invert-mask editing over the visible effective mask,
+zoom/pan viewport controls, undo/redo with deep history, mask upload import (auto-stretched to init-image dimensions), and
+apply/close semantics while keeping state presentational (props/emits only) and requiring explicit processing dimensions for crop preview math.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `InpaintMaskEditorOverlay` (component): Full-screen inpaint mask editor overlay.
 - `loadMaskPlaneFromSources` (function): Loads/validates init+mask sources and initializes draft state.
-- `renderMaskCanvas` (function): Renders current draft mask and active shape previews.
+- `scheduleMaskEditorRender` (function): Coalesces hot-path editor repaints into one animation-frame render, promoting to a full preview pass when needed.
+- `renderMaskCanvas` (function): Renders current draft mask and active shape previews, with optional full preview refresh.
+- `renderPreviewCanvas` (function): Renders blur-spill and crop-region preview layers from the current working mask.
+- `commitDisplayMaskToStorage` (function): Converts the visible effective mask back into raw storage semantics before committing history.
 - `onStagePointerDown` (function): Handles drawing/panning pointer-down interactions.
 - `onStagePointerMove` (function): Handles drawing/panning pointer-move interactions.
 - `onStagePointerUp` (function): Commits or ends active interactions on pointer-up.
 - `onMaskUploadInputChange` (function): Imports an uploaded mask image, stretches it to canvas dimensions, and commits it to history.
 - `applyDraftMask` (function): Exports current draft mask and emits `apply`.
 - `resetDraftFromSource` (function): Discards local draft and reloads source-derived baseline.
+- `previewCropStyle` (ref): Pixel-space crop-box style for the current effective masked region.
 -->
 
 <template>
@@ -55,10 +59,21 @@ Symbols (top-level; keep in sync; no ghosts):
             @load="onBaseImageLoad"
           >
           <canvas
+            ref="previewCanvasEl"
+            class="inpaint-mask-editor-preview-canvas"
+            :width="imageWidth"
+            :height="imageHeight"
+          />
+          <canvas
             ref="maskCanvasEl"
             class="inpaint-mask-editor-mask-canvas"
             :width="imageWidth"
             :height="imageHeight"
+          />
+          <div
+            v-if="previewCropStyle"
+            class="inpaint-mask-editor-crop-box"
+            :style="previewCropStyle"
           />
           <div
             v-if="showBrushCursor"
@@ -110,6 +125,32 @@ Symbols (top-level; keep in sync; no ghosts):
         </div>
       </div>
 
+      <div class="toolbar-group inpaint-mask-editor-toolbar__param-sliders">
+        <SliderField
+          label="Masked padding"
+          :modelValue="maskedPadding"
+          :min="0"
+          :max="256"
+          :step="1"
+          :inputStep="1"
+          inputClass="cdx-input-w-xs"
+          :disabled="!engine || loadingSource"
+          @update:modelValue="(value) => emit('update:maskedPadding', value)"
+        />
+
+        <SliderField
+          label="Mask blur"
+          :modelValue="maskBlur"
+          :min="0"
+          :max="64"
+          :step="1"
+          :inputStep="1"
+          inputClass="cdx-input-w-xs"
+          :disabled="!engine || loadingSource"
+          @update:modelValue="(value) => emit('update:maskBlur', value)"
+        />
+      </div>
+
       <div class="toolbar-group inpaint-mask-editor-toolbar__actions">
         <button class="btn btn-sm btn-outline" type="button" @click="resetView">Fit</button>
         <button class="btn btn-sm btn-outline" type="button" @click="setZoom(1)">1:1</button>
@@ -148,6 +189,7 @@ Symbols (top-level; keep in sync; no ghosts):
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch, type CSSProperties } from 'vue'
+import SliderField from './SliderField.vue'
 import {
   InpaintMaskEditorEngine,
   MASK_VALUE_EMPTY,
@@ -159,6 +201,13 @@ import {
   rgbaToMaskPlane,
   type MaskPoint,
 } from './inpaint_mask_editor_engine'
+import {
+  computeInpaintMaskBlurSpillAlphaPlane,
+  computeInpaintMaskPreviewGeometry,
+  resolveInpaintDisplayMaskPlane,
+  resolveInpaintStorageMaskPlane,
+  tintAlphaPlaneToRgba,
+} from '../../utils/inpaint_mask_preview'
 
 type ToolName = 'brush' | 'eraser' | 'circle' | 'polygon'
 
@@ -175,20 +224,41 @@ interface CirclePreviewState {
   radius: number
 }
 
+type EditorRenderPass = 'full' | 'mask_only'
+
+const PREVIEW_BLUR_TINT = {
+  red: 255,
+  green: 178,
+  blue: 68,
+  opacity: 0.62,
+} as const
+
 const props = withDefaults(defineProps<{
   modelValue: boolean
   initImageData: string
   initialMaskData?: string
   imageWidth: number
   imageHeight: number
+  processingWidth?: number
+  processingHeight?: number
+  maskBlur?: number
+  maskedPadding?: number
+  maskInvert?: boolean
 }>(), {
   initialMaskData: '',
+  processingWidth: 0,
+  processingHeight: 0,
+  maskBlur: 0,
+  maskedPadding: 0,
+  maskInvert: false,
 })
 
 const emit = defineEmits<{
   (e: 'update:modelValue', value: boolean): void
   (e: 'apply', maskDataUrl: string): void
   (e: 'external-reset', message: string): void
+  (e: 'update:maskBlur', value: number): void
+  (e: 'update:maskedPadding', value: number): void
 }>()
 
 const ZOOM_MIN = 0.1
@@ -212,6 +282,7 @@ const brushSize = ref<number>(32)
 const stageEl = ref<HTMLElement | null>(null)
 const contentEl = ref<HTMLElement | null>(null)
 const initImageEl = ref<HTMLImageElement | null>(null)
+const previewCanvasEl = ref<HTMLCanvasElement | null>(null)
 const maskCanvasEl = ref<HTMLCanvasElement | null>(null)
 const maskUploadInputEl = ref<HTMLInputElement | null>(null)
 
@@ -237,6 +308,24 @@ const strokePoints = ref<MaskPoint[] | null>(null)
 const circlePreview = ref<CirclePreviewState | null>(null)
 const polygonPoints = ref<MaskPoint[]>([])
 const transientMask = ref<Uint8Array | null>(null)
+const previewCropStyle = ref<CSSProperties | null>(null)
+
+let maskLayerImageData: ImageData | null = null
+let previewLayerImageData: ImageData | null = null
+let scheduledRenderFrameId: number | null = null
+let scheduledRenderNeedsPreview = false
+
+const effectiveProcessingWidth = computed(() => {
+  const width = Number(props.processingWidth)
+  return Number.isFinite(width) && width > 0 ? Math.trunc(width) : 0
+})
+
+const effectiveProcessingHeight = computed(() => {
+  const height = Number(props.processingHeight)
+  return Number.isFinite(height) && height > 0 ? Math.trunc(height) : 0
+})
+
+const hasProcessingDimensions = computed(() => effectiveProcessingWidth.value > 0 && effectiveProcessingHeight.value > 0)
 
 const isOpen = computed(() => Boolean(props.modelValue) && Boolean(props.initImageData))
 const hasRenderableSource = computed(() => Boolean(props.initImageData) && props.imageWidth > 0 && props.imageHeight > 0)
@@ -283,6 +372,7 @@ watch(
       return
     }
     window.removeEventListener('keydown', onWindowKeydown)
+    cancelScheduledRender()
     resetInteractionState(false)
   },
   { immediate: true },
@@ -297,11 +387,37 @@ watch(
 )
 
 watch(
+  [() => props.maskBlur, () => props.maskedPadding, () => props.maskInvert, () => props.processingWidth, () => props.processingHeight],
+  () => {
+    if (!hasInitializedSource.value) return
+    if (!isOpen.value) return
+    scheduleMaskEditorRender('full')
+  },
+)
+
+watch(
   hasRenderableSource,
   (renderable) => {
     if (renderable) return
     if (!props.modelValue) return
-    emit('external-reset', 'Mask editor closed: init image source is unavailable.')
+    const hasInitImageSource = Boolean(String(props.initImageData || '').trim())
+    emit(
+      'external-reset',
+      hasInitImageSource
+        ? 'Mask editor closed: init image dimensions are unavailable.'
+        : 'Mask editor closed: init image source is unavailable.',
+    )
+    emit('update:modelValue', false)
+  },
+)
+
+watch(
+  hasProcessingDimensions,
+  (ready) => {
+    if (ready) return
+    previewCropStyle.value = null
+    if (!props.modelValue) return
+    emit('external-reset', 'Mask editor closed: processing dimensions are unavailable.')
     emit('update:modelValue', false)
   },
 )
@@ -336,6 +452,7 @@ async function ensureLoadedAndRender(notifyResetWhenOpen: boolean): Promise<void
     const hadExistingDraft = hasInitializedSource.value
     baselineMask.value = maskPlane
     loadedSourceFingerprint.value = nextFingerprint
+    resetRenderBuffers()
     engine.value = new InpaintMaskEditorEngine({
       width: props.imageWidth,
       height: props.imageHeight,
@@ -418,13 +535,98 @@ function getMaskContext(): CanvasRenderingContext2D | null {
   return canvas.getContext('2d', { willReadFrequently: true })
 }
 
-function resolveWorkingMask(): Uint8Array {
-  if (transientMask.value) return transientMask.value
-  const current = engine.value?.currentMask
-  return current ? current : new Uint8Array(props.imageWidth * props.imageHeight)
+function getPreviewContext(): CanvasRenderingContext2D | null {
+  const canvas = previewCanvasEl.value
+  if (!canvas) return null
+  return canvas.getContext('2d', { willReadFrequently: true })
 }
 
-function renderMaskCanvas(): void {
+function buildPolygonPreviewPoints(): MaskPoint[] | null {
+  if (activeTool.value !== TOOL_VALUE_POLYGON) return null
+  if (previewPointerPoint.value) {
+    const previewPoints = [
+      ...polygonPoints.value,
+      normalizePoint(previewPointerPoint.value),
+    ]
+    return previewPoints.length >= 3 ? previewPoints : null
+  }
+  return polygonPoints.value.length >= 3 ? polygonPoints.value : null
+}
+
+function resolveWorkingMask(): Uint8Array {
+  const current = engine.value?.currentMask
+  const baseMask = transientMask.value
+    ? transientMask.value
+    : current
+      ? Uint8Array.from(resolveInpaintDisplayMaskPlane(current, props.maskInvert))
+      : new Uint8Array(props.imageWidth * props.imageHeight)
+
+  if (activeTool.value === TOOL_VALUE_CIRCLE && circlePreview.value) {
+    const previewMask = new Uint8Array(baseMask)
+    applyCircleToMask(
+      previewMask,
+      props.imageWidth,
+      props.imageHeight,
+      circlePreview.value.center,
+      circlePreview.value.radius,
+      MASK_VALUE_FILLED,
+    )
+    return previewMask
+  }
+
+  const polygonPreviewPoints = buildPolygonPreviewPoints()
+  if (polygonPreviewPoints) {
+    const previewMask = new Uint8Array(baseMask)
+    applyPolygonToMask(
+      previewMask,
+      props.imageWidth,
+      props.imageHeight,
+      polygonPreviewPoints,
+      MASK_VALUE_FILLED,
+    )
+    return previewMask
+  }
+
+  return baseMask
+}
+
+function resetRenderBuffers(): void {
+  maskLayerImageData = null
+  previewLayerImageData = null
+}
+
+function cancelScheduledRender(): void {
+  if (scheduledRenderFrameId !== null) {
+    window.cancelAnimationFrame(scheduledRenderFrameId)
+    scheduledRenderFrameId = null
+  }
+  scheduledRenderNeedsPreview = false
+}
+
+function scheduleMaskEditorRender(pass: EditorRenderPass = 'full'): void {
+  if (pass === 'full') scheduledRenderNeedsPreview = true
+  if (scheduledRenderFrameId !== null) return
+  scheduledRenderFrameId = window.requestAnimationFrame(() => {
+    scheduledRenderFrameId = null
+    const nextPass: EditorRenderPass = scheduledRenderNeedsPreview ? 'full' : 'mask_only'
+    scheduledRenderNeedsPreview = false
+    renderMaskCanvas(nextPass)
+  })
+}
+
+function ensureImageDataBuffer(
+  context: CanvasRenderingContext2D,
+  currentBuffer: ImageData | null,
+  width: number,
+  height: number,
+): ImageData {
+  if (currentBuffer && currentBuffer.width === width && currentBuffer.height === height) {
+    return currentBuffer
+  }
+  return context.createImageData(width, height)
+}
+
+function renderMaskCanvas(pass: EditorRenderPass = 'full'): void {
   const width = props.imageWidth
   const height = props.imageHeight
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return
@@ -432,11 +634,15 @@ function renderMaskCanvas(): void {
   const context = getMaskContext()
   if (!context) return
 
-  const mask = resolveWorkingMask()
-  const rgba = new Uint8ClampedArray(width * height * 4)
-  for (let pixel = 0; pixel < mask.length; pixel += 1) {
+  const displayMask = resolveWorkingMask()
+  if (pass === 'full') {
+    renderPreviewCanvas(displayMask)
+  }
+  maskLayerImageData = ensureImageDataBuffer(context, maskLayerImageData, width, height)
+  const rgba = maskLayerImageData.data
+  for (let pixel = 0; pixel < displayMask.length; pixel += 1) {
     const baseIndex = pixel * 4
-    if (mask[pixel] >= MASK_VALUE_FILLED) {
+    if (displayMask[pixel] >= MASK_VALUE_FILLED) {
       rgba[baseIndex] = 255
       rgba[baseIndex + 1] = 56
       rgba[baseIndex + 2] = 56
@@ -450,8 +656,64 @@ function renderMaskCanvas(): void {
   }
 
   context.clearRect(0, 0, width, height)
-  context.putImageData(new ImageData(rgba, width, height), 0, 0)
+  context.putImageData(maskLayerImageData, 0, 0)
   renderShapePreview(context)
+}
+
+function renderPreviewCanvas(mask: Uint8Array | Uint8ClampedArray): void {
+  const width = props.imageWidth
+  const height = props.imageHeight
+  const context = getPreviewContext()
+  if (!context) return
+
+  context.clearRect(0, 0, width, height)
+  previewCropStyle.value = null
+  if (effectiveProcessingWidth.value <= 0 || effectiveProcessingHeight.value <= 0) return
+
+  let geometry = null
+  try {
+    geometry = computeInpaintMaskPreviewGeometry(mask, {
+      imageWidth: width,
+      imageHeight: height,
+      processingWidth: effectiveProcessingWidth.value,
+      processingHeight: effectiveProcessingHeight.value,
+      maskBlur: props.maskBlur,
+      maskedPadding: props.maskedPadding,
+    })
+  } catch (error) {
+    console.error('[InpaintMaskEditorOverlay] Failed to compute mask preview geometry.', error)
+    return
+  }
+
+  if (!geometry) return
+
+  previewCropStyle.value = {
+    left: `${geometry.cropRegion.x1}px`,
+    top: `${geometry.cropRegion.y1}px`,
+    width: `${geometry.cropRegion.width}px`,
+    height: `${geometry.cropRegion.height}px`,
+  }
+
+  try {
+    const alphaPlane = computeInpaintMaskBlurSpillAlphaPlane(mask, {
+      imageWidth: width,
+      imageHeight: height,
+      maskBlur: props.maskBlur,
+    })
+    if (!alphaPlane) return
+
+    previewLayerImageData = ensureImageDataBuffer(context, previewLayerImageData, width, height)
+    previewLayerImageData.data.set(tintAlphaPlaneToRgba(alphaPlane, width, height, PREVIEW_BLUR_TINT))
+    context.putImageData(previewLayerImageData, 0, 0)
+  } catch (error) {
+    console.error('[InpaintMaskEditorOverlay] Failed to compute blur spill preview.', error)
+  }
+}
+
+function commitDisplayMaskToStorage(displayMask: Uint8Array | Uint8ClampedArray): void {
+  const currentEngine = engine.value
+  if (!currentEngine) return
+  currentEngine.replaceMask(resolveInpaintStorageMaskPlane(displayMask, props.maskInvert))
 }
 
 function renderShapePreview(context: CanvasRenderingContext2D): void {
@@ -523,16 +785,18 @@ function normalizePoint(point: MaskPoint): MaskPoint {
 }
 
 function eventToImagePoint(event: PointerEvent): MaskPoint | null {
+  const maskCanvas = maskCanvasEl.value
   const content = contentEl.value
-  if (!content) return null
-  const rect = content.getBoundingClientRect()
+  const rect = maskCanvas?.getBoundingClientRect() ?? content?.getBoundingClientRect()
+  if (!rect) return null
   if (rect.width <= 0 || rect.height <= 0) return null
-
-  const xRatio = (event.clientX - rect.left) / rect.width
-  const yRatio = (event.clientY - rect.top) / rect.height
+  const backingWidth = maskCanvas?.width ?? props.imageWidth
+  const backingHeight = maskCanvas?.height ?? props.imageHeight
+  const x = (event.clientX - rect.left) * (backingWidth / rect.width)
+  const y = (event.clientY - rect.top) * (backingHeight / rect.height)
   return normalizePoint({
-    x: xRatio * props.imageWidth,
-    y: yRatio * props.imageHeight,
+    x,
+    y,
   })
 }
 
@@ -576,12 +840,14 @@ function beginDraw(event: PointerEvent, point: MaskPoint): void {
       radius: 0,
     }
     transientMask.value = currentEngine.currentMask
-    renderMaskCanvas()
+      ? Uint8Array.from(resolveInpaintDisplayMaskPlane(currentEngine.currentMask, props.maskInvert))
+      : new Uint8Array(props.imageWidth * props.imageHeight)
+    scheduleMaskEditorRender('full')
     return
   }
 
   strokePoints.value = [point]
-  transientMask.value = currentEngine.currentMask
+  transientMask.value = resolveWorkingMask()
   applyStrokeToMask(
     transientMask.value,
     props.imageWidth,
@@ -590,7 +856,7 @@ function beginDraw(event: PointerEvent, point: MaskPoint): void {
     Number(brushSize.value) / 2,
     activeTool.value === TOOL_VALUE_ERASER ? MASK_VALUE_EMPTY : MASK_VALUE_FILLED,
   )
-  renderMaskCanvas()
+  scheduleMaskEditorRender('mask_only')
 }
 
 function updateDraw(point: MaskPoint): void {
@@ -601,7 +867,7 @@ function updateDraw(point: MaskPoint): void {
     const dx = point.x - circlePreview.value.center.x
     const dy = point.y - circlePreview.value.center.y
     circlePreview.value.radius = Math.max(0.5, Math.hypot(dx, dy))
-    renderMaskCanvas()
+    scheduleMaskEditorRender('full')
     return
   }
 
@@ -623,7 +889,7 @@ function updateDraw(point: MaskPoint): void {
     Number(brushSize.value) / 2,
     activeTool.value === TOOL_VALUE_ERASER ? MASK_VALUE_EMPTY : MASK_VALUE_FILLED,
   )
-  renderMaskCanvas()
+  scheduleMaskEditorRender('mask_only')
 }
 
 function commitDraw(event: PointerEvent): void {
@@ -635,19 +901,16 @@ function commitDraw(event: PointerEvent): void {
   }
 
   if (activeTool.value === TOOL_VALUE_CIRCLE && circlePreview.value) {
-    currentEngine.applyCircle(circlePreview.value.center, circlePreview.value.radius, MASK_VALUE_FILLED)
+    const committedMask = resolveWorkingMask()
+    commitDisplayMaskToStorage(committedMask)
     resetInteractionState(true)
     syncHistoryFlags()
     renderMaskCanvas()
     return
   }
 
-  if (strokePoints.value && strokePoints.value.length > 0) {
-    currentEngine.applyStroke(
-      strokePoints.value,
-      Number(brushSize.value) / 2,
-      activeTool.value === TOOL_VALUE_ERASER ? MASK_VALUE_EMPTY : MASK_VALUE_FILLED,
-    )
+  if (strokePoints.value && strokePoints.value.length > 0 && transientMask.value) {
+    commitDisplayMaskToStorage(transientMask.value)
   }
 
   resetInteractionState(true)
@@ -739,7 +1002,9 @@ function commitPolygon(): void {
   const currentEngine = engine.value
   if (!currentEngine) return
   if (polygonPoints.value.length < 3) return
-  currentEngine.applyPolygon(polygonPoints.value, MASK_VALUE_FILLED)
+  const displayMask = resolveWorkingMask()
+  applyPolygonToMask(displayMask, props.imageWidth, props.imageHeight, polygonPoints.value, MASK_VALUE_FILLED)
+  commitDisplayMaskToStorage(displayMask)
   polygonPoints.value = []
   syncHistoryFlags()
   renderMaskCanvas()
@@ -759,7 +1024,7 @@ function popPolygonPoint(): void {
 
 function clearMask(): void {
   if (!engine.value) return
-  engine.value.clear(MASK_VALUE_EMPTY)
+  commitDisplayMaskToStorage(new Uint8Array(props.imageWidth * props.imageHeight))
   polygonPoints.value = []
   syncHistoryFlags()
   renderMaskCanvas()
@@ -1003,6 +1268,7 @@ function applyDraftMask(): void {
 }
 
 onBeforeUnmount(() => {
+  cancelScheduledRender()
   window.removeEventListener('keydown', onWindowKeydown)
 })
 </script>

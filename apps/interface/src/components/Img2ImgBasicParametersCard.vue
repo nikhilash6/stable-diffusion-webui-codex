@@ -7,9 +7,11 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Img2img-focused Basic Parameters card with hires-like structure.
-Renders sampler/scheduler/steps, dimensions, resize-mode + upscaler controls, and seed/CFG/denoise
-for init-image mode without hires-only prompt/checkpoint swap controls, plus optional advanced CFG/APG controls
-gated by per-engine capabilities.
+Renders sampler/scheduler/steps, dimensions, optional resize-mode + upscaler controls, and seed/CFG with optional denoise
+for init-image mode without hires-only prompt/checkpoint swap controls, backend recommendation-aware sampler/scheduler selector grouping, plus optional advanced CFG/APG controls
+gated by per-engine capabilities. When native SDXL SUPIR mode is enabled, the card swaps the generic sampler/scheduler row for the truthful SUPIR sampler surface
+and shows the locked native scheduler derived from backend SUPIR diagnostics, while the SUPIR-specific knobs stay on the dedicated `SupirModeCard.vue`.
+The resize-type selector can now receive an engine-scoped truthful option subset and hides the upscaler field when the active engine does not expose an upscaler-backed resize mode.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `Img2ImgBasicParametersCard` (component): Img2img parameters card used when init image mode is active.
@@ -24,8 +26,12 @@ Symbols (top-level; keep in sync; no ghosts):
 - `onSeedChange` (function): Handles manual seed input changes and emits a normalized integer seed.
 - `onResizeModeChange` (function): Emits normalized resize-mode updates from the resize-type select.
 - `onUpscalerChange` (function): Emits upscaler selection updates.
+- `showsUpscalerResizeMode` (const): Whether the active resize-mode option subset exposes an upscaler-backed mode.
+- `recommendedSamplers` / `recommendedSchedulers` (const): Optional recommendation arrays forwarded into selector components.
 - `patchGuidanceAdvanced` (function): Emits partial updates for nested advanced-guidance state.
 - `toggleGuidanceAdvanced` (function): Toggles Advanced guidance mode and auto-syncs APG/CFG trunc activation flags when supported.
+- `defaultSupirMode` / `SUPIR_PARAMETER_TOOLTIPS` (const): Canonical fallback SUPIR state instance and bounded tooltip copy for the SUPIR sampler/scheduler row.
+- `supir` / `supirEnabled` / `supirLockedScheduler` / `supirHasStaleSamplerSelection` (const): Derived SUPIR state used to swap the Basic Parameters sampler surface when SUPIR mode is active and keep stale saved selections visible.
 - `swapWH` (function): Swaps width/height while respecting min/max and step constraints.
 -->
 
@@ -34,24 +40,71 @@ Symbols (top-level; keep in sync; no ghosts):
     <WanSubHeader title="Basic Parameters" />
     <div class="gc-stack">
       <div class="gc-row">
-        <SamplerSelector
-          class="gc-col"
-          :samplers="samplers"
-          :modelValue="sampler"
-          label="Sampler"
-          :allow-empty="false"
-          :disabled="disabled"
-          @update:modelValue="(value) => emit('update:sampler', value)"
-        />
-        <SchedulerSelector
-          class="gc-col"
-          :schedulers="schedulers"
-          :modelValue="scheduler"
-          label="Scheduler"
-          :allow-empty="false"
-          :disabled="disabled"
-          @update:modelValue="(value) => emit('update:scheduler', value)"
-        />
+        <template v-if="supirEnabled">
+          <div class="gc-col field">
+            <label class="label-muted">
+              <HoverTooltip
+                class="cdx-slider-field__label-tooltip"
+                title="SUPIR Sampler"
+                :content="SUPIR_PARAMETER_TOOLTIPS.sampler"
+              >
+                <span class="cdx-slider-field__label-trigger">
+                  <span>Sampler</span>
+                  <span class="cdx-slider-field__label-help" aria-hidden="true">?</span>
+                </span>
+              </HoverTooltip>
+            </label>
+            <select
+              class="select-md"
+              :disabled="disabled"
+              :value="supir.sampler"
+              @change="emit('patch:supir', { sampler: ($event.target as HTMLSelectElement).value })"
+            >
+              <option v-if="supirSamplerChoices.length === 0" value="">No SUPIR samplers reported</option>
+              <option v-if="supirHasStaleSamplerSelection" :value="supir.sampler">Invalid selection: {{ supir.sampler }}</option>
+              <option v-for="choice in supirSamplerChoices" :key="choice.id" :value="choice.id">
+                {{ choice.label }}
+              </option>
+            </select>
+          </div>
+          <div class="gc-col field">
+            <label class="label-muted">
+              <HoverTooltip
+                class="cdx-slider-field__label-tooltip"
+                title="SUPIR Scheduler"
+                :content="SUPIR_PARAMETER_TOOLTIPS.scheduler"
+              >
+                <span class="cdx-slider-field__label-trigger">
+                  <span>Scheduler</span>
+                  <span class="cdx-slider-field__label-help" aria-hidden="true">?</span>
+                </span>
+              </HoverTooltip>
+            </label>
+            <input class="ui-input ui-input-sm" type="text" :value="supirLockedScheduler || 'Unavailable'" disabled readonly />
+          </div>
+        </template>
+        <template v-else>
+          <SamplerSelector
+            class="gc-col"
+            :samplers="samplers"
+            :recommended-names="recommendedSamplers"
+            :modelValue="sampler"
+            label="Sampler"
+            :allow-empty="false"
+            :disabled="disabled"
+            @update:modelValue="(value) => emit('update:sampler', value)"
+          />
+          <SchedulerSelector
+            class="gc-col"
+            :schedulers="schedulers"
+            :recommended-names="recommendedSchedulers"
+            :modelValue="scheduler"
+            label="Scheduler"
+            :allow-empty="false"
+            :disabled="disabled"
+            @update:modelValue="(value) => emit('update:scheduler', value)"
+          />
+        </template>
         <SliderField
           class="gc-col gc-col--wide"
           label="Steps"
@@ -66,6 +119,7 @@ Symbols (top-level; keep in sync; no ghosts):
           @update:modelValue="(value) => emit('update:steps', clampInt(value, minSteps, maxSteps))"
         />
       </div>
+      <p v-if="supirEnabled && supirBlockingReason" class="hr-hint">{{ supirBlockingReason }}</p>
 
       <div class="gc-row">
         <SliderField
@@ -134,7 +188,7 @@ Symbols (top-level; keep in sync; no ghosts):
         />
       </div>
 
-      <div class="gc-row">
+      <div v-if="props.showResizeMode !== false" class="gc-row">
         <div class="gc-col field">
           <label class="label-muted">Resize type</label>
           <select class="select-md" :disabled="disabled" :value="resizeModeValue" @change="onResizeModeChange">
@@ -144,7 +198,7 @@ Symbols (top-level; keep in sync; no ghosts):
           </select>
         </div>
 
-        <div class="gc-col field">
+        <div v-if="showsUpscalerResizeMode" class="gc-col field">
           <label class="label-muted">Upscaler</label>
           <select
             class="select-md"
@@ -231,6 +285,7 @@ Symbols (top-level; keep in sync; no ghosts):
         </SliderField>
 
         <SliderField
+          v-if="showDenoise"
           class="gc-col"
           label="Denoise"
           :modelValue="denoiseStrength"
@@ -401,17 +456,25 @@ Symbols (top-level; keep in sync; no ghosts):
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import type { GuidanceAdvancedCapabilities, SamplerInfo, SchedulerInfo, UpscalerDefinition } from '../api/types'
-import type { GuidanceAdvancedParams } from '../stores/model_tabs'
+import type {
+  GuidanceAdvancedCapabilities,
+  SamplerInfo,
+  SchedulerInfo,
+  SupirSamplerInfo,
+  UpscalerDefinition,
+} from '../api/types'
+import { createDefaultSupirModeFormState, type GuidanceAdvancedParams, type SupirModeFormState } from '../stores/model_tabs'
 
 import NumberStepperInput from './ui/NumberStepperInput.vue'
+import HoverTooltip from './ui/HoverTooltip.vue'
 import SliderField from './ui/SliderField.vue'
 import SamplerSelector from './SamplerSelector.vue'
 import SchedulerSelector from './SchedulerSelector.vue'
 import WanSubHeader from './wan/WanSubHeader.vue'
 import {
   IMG2IMG_RESIZE_MODE_OPTIONS,
-  normalizeImg2ImgResizeMode,
+  normalizeImg2ImgResizeModeFromOptions,
+  type Img2ImgResizeModeOption,
   type Img2ImgResizeMode,
 } from '../utils/img2img_resize'
 
@@ -488,9 +551,24 @@ const ADVANCED_GUIDANCE_TOOLTIPS = {
   ],
 } as const
 
+const SUPIR_PARAMETER_TOOLTIPS = {
+  sampler: [
+    'Selects the repo-owned SUPIR restore sampler surface.',
+    'The current public inventory is the stable sampler set reported by `/api/supir/models`.',
+    'The locked scheduler shown below comes from backend diagnostics for the selected SUPIR sampler.',
+  ],
+  scheduler: [
+    'Read-only.',
+    'Native SUPIR mode maps each public SUPIR sampler to one backend-owned SDXL sampler/scheduler tuple.',
+    'In the current stable public surface, every exposed SUPIR sampler maps to the `karras` scheduler.',
+  ],
+} as const
+
 const props = withDefaults(defineProps<{
   samplers: SamplerInfo[]
   schedulers: SchedulerInfo[]
+  recommendedSamplers?: string[] | null
+  recommendedSchedulers?: string[] | null
   upscalers?: UpscalerDefinition[]
   upscalersLoading?: boolean
   upscalersError?: string
@@ -499,11 +577,15 @@ const props = withDefaults(defineProps<{
   steps: number
   cfgScale: number
   denoiseStrength: number
+  showDenoise?: boolean
   seed: number
   width: number
   height: number
   upscaler: string
   resizeMode: Img2ImgResizeMode
+  resizeModeOptions?: readonly Img2ImgResizeModeOption[]
+  showResizeMode?: boolean
+  dimensionSnapMode?: 'nearest' | 'floor'
   disabled?: boolean
   minSteps?: number
   maxSteps?: number
@@ -526,6 +608,10 @@ const props = withDefaults(defineProps<{
   maxClipSkip?: number
   guidanceAdvanced?: GuidanceAdvancedParams
   guidanceSupport?: GuidanceAdvancedCapabilities | null
+  supir?: SupirModeFormState
+  supirSamplerChoices?: readonly SupirSamplerInfo[]
+  supirSelectedSamplerInfo?: SupirSamplerInfo | null
+  supirBlockingReason?: string
 }>(), {
   disabled: false,
   upscalers: () => [],
@@ -536,6 +622,7 @@ const props = withDefaults(defineProps<{
   minCfg: 0,
   maxCfg: 30,
   cfgStep: 0.5,
+  showDenoise: true,
   cfgLabel: 'CFG',
   minWidth: 64,
   maxWidth: 8192,
@@ -564,7 +651,16 @@ const props = withDefaults(defineProps<{
     renormCfg: 0,
   }),
   guidanceSupport: null,
+  supir: () => createDefaultSupirModeFormState(),
+  supirSamplerChoices: () => [],
+  supirSelectedSamplerInfo: null,
+  supirBlockingReason: '',
+  resizeModeOptions: () => [...IMG2IMG_RESIZE_MODE_OPTIONS],
+  showResizeMode: true,
+  dimensionSnapMode: 'nearest',
 })
+
+const defaultSupirMode = createDefaultSupirModeFormState()
 
 const emit = defineEmits<{
   (e: 'update:sampler', value: string): void
@@ -579,6 +675,7 @@ const emit = defineEmits<{
   (e: 'update:resizeMode', value: Img2ImgResizeMode): void
   (e: 'update:clipSkip', value: number): void
   (e: 'update:guidanceAdvanced', patch: Partial<GuidanceAdvancedParams>): void
+  (e: 'patch:supir', patch: Partial<SupirModeFormState>): void
   (e: 'random-seed'): void
   (e: 'reuse-seed'): void
   (e: 'sync-init-image-dims'): void
@@ -600,9 +697,22 @@ const heightInputStep = computed(() => Number.isFinite(props.heightInputStep) ? 
 const minClipSkip = computed(() => Number.isFinite(props.minClipSkip) ? Math.trunc(Number(props.minClipSkip)) : 0)
 const maxClipSkip = computed(() => Number.isFinite(props.maxClipSkip) ? Math.trunc(Number(props.maxClipSkip)) : 12)
 const showClipSkip = computed(() => props.showClipSkip === true)
+const recommendedSamplers = computed(() => (Array.isArray(props.recommendedSamplers) ? props.recommendedSamplers : null))
+const recommendedSchedulers = computed(() => (Array.isArray(props.recommendedSchedulers) ? props.recommendedSchedulers : null))
 const guidanceAdvanced = computed(() => props.guidanceAdvanced ?? DEFAULT_GUIDANCE_ADVANCED)
 const guidanceSupport = computed(() => props.guidanceSupport ?? null)
+const supir = computed(() => props.supir ?? defaultSupirMode)
+const supirEnabled = computed(() => Boolean(supir.value.enabled))
+const supirSamplerChoices = computed(() => (Array.isArray(props.supirSamplerChoices) ? props.supirSamplerChoices : []))
+const supirSelectedSamplerInfo = computed(() => props.supirSelectedSamplerInfo ?? null)
+const supirBlockingReason = computed(() => String(props.supirBlockingReason || '').trim())
+const supirLockedScheduler = computed(() => String(supirSelectedSamplerInfo.value?.native_scheduler || '').trim())
+const supirHasStaleSamplerSelection = computed(() => (
+  Boolean(String(supir.value.sampler || '').trim())
+  && supirSelectedSamplerInfo.value === null
+))
 const showGuidanceAdvancedToggle = computed(() => {
+  if (supirEnabled.value) return false
   const support = guidanceSupport.value
   if (!support) return false
   return Object.values(support).some((flag) => flag === true)
@@ -611,8 +721,14 @@ const showGuidanceAdvancedRow = computed(() => showGuidanceAdvancedToggle.value 
 const aspectRatioLocked = ref(false)
 const aspectRatio = ref(1)
 
-const resizeModeOptions = IMG2IMG_RESIZE_MODE_OPTIONS
-const resizeModeValue = computed<Img2ImgResizeMode>(() => normalizeImg2ImgResizeMode(props.resizeMode))
+const resizeModeOptions = computed<readonly Img2ImgResizeModeOption[]>(() => {
+  if (Array.isArray(props.resizeModeOptions) && props.resizeModeOptions.length > 0) {
+    return props.resizeModeOptions
+  }
+  return IMG2IMG_RESIZE_MODE_OPTIONS
+})
+const resizeModeValue = computed<Img2ImgResizeMode>(() => normalizeImg2ImgResizeModeFromOptions(props.resizeMode, resizeModeOptions.value))
+const showsUpscalerResizeMode = computed(() => resizeModeOptions.value.some((option) => option.value === 'upscaler'))
 const isUpscalerResizeMode = computed(() => resizeModeValue.value === 'upscaler')
 
 const upscalers = computed(() => Array.isArray(props.upscalers) ? props.upscalers : [])
@@ -630,10 +746,16 @@ function clampInt(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, numberValue))
 }
 
-function clampIntToStep(value: number, min: number, max: number, step: number): number {
+function clampIntToStep(
+  value: number,
+  min: number,
+  max: number,
+  step: number,
+  mode: 'nearest' | 'floor' = 'nearest',
+): number {
   const clamped = clampInt(value, min, max)
   if (!Number.isFinite(step) || step <= 0) return clamped
-  const snapped = Math.round(clamped / step) * step
+  const snapped = (mode === 'floor' ? Math.floor(clamped / step) : Math.round(clamped / step)) * step
   return Math.min(max, Math.max(min, snapped))
 }
 
@@ -666,12 +788,36 @@ function emitDimensions(widthValue: number, heightValue: number): void {
 function deriveLockedDimensions(nextValue: number, axis: 'width' | 'height'): { width: number; height: number } {
   const ratio = Number.isFinite(aspectRatio.value) && aspectRatio.value > 0 ? aspectRatio.value : 1
   if (axis === 'width') {
-    const widthValue = clampIntToStep(nextValue, minWidth.value, maxWidth.value, widthInputStep.value)
-    const heightValue = clampIntToStep(Math.round(widthValue / ratio), minHeight.value, maxHeight.value, heightInputStep.value)
+    const widthValue = clampIntToStep(
+      nextValue,
+      minWidth.value,
+      maxWidth.value,
+      widthInputStep.value,
+      props.dimensionSnapMode === 'floor' ? 'floor' : 'nearest',
+    )
+    const heightValue = clampIntToStep(
+      Math.round(widthValue / ratio),
+      minHeight.value,
+      maxHeight.value,
+      heightInputStep.value,
+      props.dimensionSnapMode === 'floor' ? 'floor' : 'nearest',
+    )
     return { width: widthValue, height: heightValue }
   }
-  const heightValue = clampIntToStep(nextValue, minHeight.value, maxHeight.value, heightInputStep.value)
-  const widthValue = clampIntToStep(Math.round(heightValue * ratio), minWidth.value, maxWidth.value, widthInputStep.value)
+  const heightValue = clampIntToStep(
+    nextValue,
+    minHeight.value,
+    maxHeight.value,
+    heightInputStep.value,
+    props.dimensionSnapMode === 'floor' ? 'floor' : 'nearest',
+  )
+  const widthValue = clampIntToStep(
+    Math.round(heightValue * ratio),
+    minWidth.value,
+    maxWidth.value,
+    widthInputStep.value,
+    props.dimensionSnapMode === 'floor' ? 'floor' : 'nearest',
+  )
   return { width: widthValue, height: heightValue }
 }
 
@@ -682,7 +828,16 @@ function toggleAspectRatioLock(): void {
 
 function onWidthDimensionChange(value: number): void {
   if (!aspectRatioLocked.value) {
-    emit('update:width', clampIntToStep(value, minWidth.value, maxWidth.value, widthInputStep.value))
+    emit(
+      'update:width',
+      clampIntToStep(
+        value,
+        minWidth.value,
+        maxWidth.value,
+        widthInputStep.value,
+        props.dimensionSnapMode === 'floor' ? 'floor' : 'nearest',
+      ),
+    )
     return
   }
   const next = deriveLockedDimensions(value, 'width')
@@ -691,7 +846,16 @@ function onWidthDimensionChange(value: number): void {
 
 function onHeightDimensionChange(value: number): void {
   if (!aspectRatioLocked.value) {
-    emit('update:height', clampIntToStep(value, minHeight.value, maxHeight.value, heightInputStep.value))
+    emit(
+      'update:height',
+      clampIntToStep(
+        value,
+        minHeight.value,
+        maxHeight.value,
+        heightInputStep.value,
+        props.dimensionSnapMode === 'floor' ? 'floor' : 'nearest',
+      ),
+    )
     return
   }
   const next = deriveLockedDimensions(value, 'height')
@@ -700,7 +864,7 @@ function onHeightDimensionChange(value: number): void {
 
 function onResizeModeChange(event: Event): void {
   const value = (event.target as HTMLSelectElement).value
-  emit('update:resizeMode', normalizeImg2ImgResizeMode(value))
+  emit('update:resizeMode', normalizeImg2ImgResizeModeFromOptions(value, resizeModeOptions.value))
 }
 
 function onUpscalerChange(event: Event): void {
@@ -724,8 +888,20 @@ function toggleGuidanceAdvanced(): void {
 }
 
 function swapWH(): void {
-  const nextWidth = clampIntToStep(props.height, minWidth.value, maxWidth.value, widthInputStep.value)
-  const nextHeight = clampIntToStep(props.width, minHeight.value, maxHeight.value, heightInputStep.value)
+  const nextWidth = clampIntToStep(
+    props.height,
+    minWidth.value,
+    maxWidth.value,
+    widthInputStep.value,
+    props.dimensionSnapMode === 'floor' ? 'floor' : 'nearest',
+  )
+  const nextHeight = clampIntToStep(
+    props.width,
+    minHeight.value,
+    maxHeight.value,
+    heightInputStep.value,
+    props.dimensionSnapMode === 'floor' ? 'floor' : 'nearest',
+  )
   syncAspectRatioFromValues(nextWidth, nextHeight)
   emitDimensions(nextWidth, nextHeight)
 }

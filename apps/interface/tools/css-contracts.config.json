@@ -1,0 +1,158 @@
+{
+  "paths": {
+    "bootstrapFile": "apps/interface/src/main.ts",
+    "runtimeCssEntryFile": "apps/interface/src/styles.css",
+    "stylesRoot": "apps/interface/src/styles",
+    "sourceRoot": "apps/interface/src",
+    "sourceExtensions": [".vue", ".ts", ".js", ".mjs"],
+    "topologySource": "apps/interface/tools/style-topology.mjs",
+    "reportOutputFile": "apps/interface/.reports/css-contract-report.json"
+  },
+  "contracts": {
+    "docsAudit": {
+      "authorityFiles": [
+        "apps/interface/package.json",
+        "apps/interface/README.md",
+        "apps/interface/AGENTS.md",
+        "apps/interface/tools/AGENTS.md",
+        "apps/interface/src/styles/AGENTS.md",
+        "apps/interface/src/components/results/AGENTS.md",
+        "apps/interface/src/components/ui/AGENTS.md",
+        ".sangoi/frontend/guidelines/frontend-style-guide.md",
+        ".sangoi/reference/ui/frontend-css-contracts.md"
+      ],
+      "forbiddenPatterns": [
+        {
+          "pattern": "report:ui-consistency",
+          "files": [
+            "apps/interface/package.json",
+            "apps/interface/README.md",
+            "apps/interface/AGENTS.md",
+            "apps/interface/tools/AGENTS.md",
+            "apps/interface/src/styles/AGENTS.md",
+            ".sangoi/frontend/guidelines/frontend-style-guide.md",
+            ".sangoi/reference/ui/frontend-css-contracts.md"
+          ],
+          "reason": "legacy public CSS verifier script name"
+        },
+        {
+          "pattern": "ui-consistency-report",
+          "files": [
+            "apps/interface/package.json",
+            "apps/interface/README.md",
+            "apps/interface/AGENTS.md",
+            "apps/interface/tools/AGENTS.md",
+            "apps/interface/src/styles/AGENTS.md",
+            ".sangoi/frontend/guidelines/frontend-style-guide.md",
+            ".sangoi/reference/ui/frontend-css-contracts.md"
+          ],
+          "reason": "legacy verifier owner name"
+        },
+        {
+          "pattern": "tailwind.config.ts",
+          "files": [
+            ".sangoi/frontend/guidelines/frontend-style-guide.md"
+          ],
+          "reason": "stale Tailwind config reference"
+        },
+        {
+          "pattern": "single source of truth",
+          "files": [
+            ".sangoi/frontend/guidelines/frontend-style-guide.md"
+          ],
+          "reason": "guidance docs must stay pointer-only under the reference authority split"
+        }
+      ]
+    },
+    "plainCssGuard": {
+      "forbiddenAtRules": ["@tailwind", "@config", "@plugin", "@screen", "@variants"],
+      "forbiddenImportPatterns": ["tailwind.config", "postcss.config"]
+    },
+    "budgets": {
+      "maxUnusedClasses": 0,
+      "maxMissingClasses": 0,
+      "maxDefinedOnlyVariables": 0,
+      "maxReferencedOnlyVariables": 0,
+      "maxDuplicateDeclarations": 0,
+      "maxConflictDeclarations": 0,
+      "maxNoEffectDeclarations": 0,
+      "maxSelectorDuplicates": 0,
+      "maxInlineStyleAttributes": 0,
+      "maxScopedStyleBlocks": 0,
+      "maxUnownedBoundStyleBindings": 0,
+      "maxUnownedDomStyleWrites": 0
+    },
+    "typedExceptions": {
+      "boundStyleBindings": [
+        {
+          "file": "apps/interface/src/components/results/RunCard.vue",
+          "expression": "actionMenuStyle",
+          "rationale": "Runtime-measured menu geometry for the split run-action dropdown."
+        },
+        {
+          "file": "apps/interface/src/components/results/RunCard.vue",
+          "expression": "batchMenuStyle",
+          "rationale": "Runtime-measured menu geometry for the batch settings dropdown."
+        },
+        {
+          "file": "apps/interface/src/components/InitialImageBlock.vue",
+          "expression": "previewCropStyle",
+          "rationale": "Image-space crop box projection for the initial-image inpaint preview overlay."
+        },
+        {
+          "file": "apps/interface/src/views/VideoModelTab.vue",
+          "expression": "wan.guidedTooltipStyle",
+          "rationale": "Viewport-aware guided-attention tooltip placement."
+        },
+        {
+          "file": "apps/interface/src/components/model-tabs/WanVideoWorkspace.vue",
+          "expression": "guidedTooltipStyle",
+          "rationale": "Frozen WAN reference still owns the viewport-aware guided-attention tooltip placement internally."
+        },
+        {
+          "file": "apps/interface/src/components/ui/ImageZoomOverlay.vue",
+          "expression": "zoomStyle",
+          "rationale": "Runtime zoom/pan transform for the image zoom canvas."
+        },
+        {
+          "file": "apps/interface/src/components/ui/ImageZoomOverlay.vue",
+          "expression": "frameGuideRectStyle",
+          "rationale": "Image-space frame-guide rectangle projection."
+        },
+        {
+          "file": "apps/interface/src/components/ui/VideoZoomOverlay.vue",
+          "expression": "zoomStyle",
+          "rationale": "Runtime zoom/pan transform for the video zoom canvas."
+        },
+        {
+          "file": "apps/interface/src/components/ui/InpaintMaskEditorOverlay.vue",
+          "expression": "contentTransformStyle",
+          "rationale": "Runtime zoom/pan transform for the inpaint editor stage."
+        },
+        {
+          "file": "apps/interface/src/components/ui/InpaintMaskEditorOverlay.vue",
+          "expression": "previewCropStyle",
+          "rationale": "Pixel-space crop box projection in the inpaint editor overlay."
+        },
+        {
+          "file": "apps/interface/src/components/ui/InpaintMaskEditorOverlay.vue",
+          "expression": "brushCursorStyle",
+          "rationale": "Brush cursor geometry follows pointer location and brush radius."
+        }
+      ],
+      "domStyleWrites": [],
+      "cssVariableWrites": [
+        {
+          "file": "apps/interface/src/App.vue",
+          "target": "--sticky-offset",
+          "rationale": "Root sticky offset tracks measured header height at runtime."
+        },
+        {
+          "file": "apps/interface/src/components/QuickSettingsBar.vue",
+          "target": "--qs-advanced-target-height",
+          "rationale": "QuickSettings advanced row writes one measured height variable and leaves open/closed transitions to CSS."
+        }
+      ]
+    }
+  }
+}

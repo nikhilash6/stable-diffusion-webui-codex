@@ -53,7 +53,7 @@ export const PromptToken = Node.create({
   },
 
   renderHTML({ HTMLAttributes }) {
-    return ['span', mergeAttributes(HTMLAttributes, { 'data-token': '1' }), 0]
+    return ['span', mergeAttributes(HTMLAttributes, { 'data-token': '1' })]
   },
 
   addNodeView() {

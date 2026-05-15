@@ -29,6 +29,7 @@ Symbols (top-level; keep in sync; no ghosts):
 
 import logging
 from typing import Any, Mapping
+from apps.backend.runtime.logging import get_backend_logger
 
 import torch
 import numpy as np
@@ -36,7 +37,7 @@ from apps.backend.runtime.attention import attention_function_single_head_spatia
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from torch import nn
 
-_log = logging.getLogger("backend.runtime.vae.ldm")
+_log = get_backend_logger("backend.runtime.vae.ldm")
 
 
 def nonlinearity(x):

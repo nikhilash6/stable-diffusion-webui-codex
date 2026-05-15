@@ -7,18 +7,24 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Central model loader for diffusion engines (checkpoint/diffusers parsing, component assembly, and runtime-friendly overrides).
-Resolves TE/VAE overrides (`tenc_path` shorthand), normalizes state_dict layouts, and selects storage/compute dtypes (storage defaults to weights primary SafeTensors dtype when detectable; compute defaults to fp32 for stability unless overridden).
+Resolves TE/VAE overrides (`tenc_path` shorthand), applies family-scoped keyspace interpretation plus source-key rewrite guards where needed, and selects storage/compute dtypes
+(storage defaults to weights primary SafeTensors dtype when detectable; compute defaults to fp32 for stability unless overridden).
 Includes core-only families (e.g., Anima) that are not diffusers repositories: the loader returns a minimal bundle and leaves external asset loading to engines.
+Partial-metadata fallback stays structural only; loader compatibility no longer invents inpaint-model semantics from channels or name hints.
 NF4/FP4 is not supported (fail loud); GGUF is the only supported pre-quant format.
 WAN22 variants use explicit families (`WAN22_5B`, `WAN22_14B`, `WAN22_ANIMATE`) with no shared family alias bucket.
 SDXL loads are strict: missing/unexpected keys are fatal to surface drift early.
-Flux T5 component loading now guarantees model construction before state-dict load for both GGUF and non-GGUF paths, and delegates T5 key normalization to a canonical keymap module.
-SDXL VAE conversion now preflights canonical projection keys after keymap remap so projection-lane shape violations surface explicitly (instead of collapsing into generic missing-key noise).
+Flux T5 component loading now guarantees model construction before state-dict load for both GGUF and non-GGUF paths, and delegates T5 keyspace interpretation to a canonical keymap module.
+FLUX.2 Klein 4B/base-4B expected-family loads use vendored HF metadata plus family-scoped keyspace resolution so native/source GGUF keys and
+legacy fused core slices land in the Diffusers `Flux2Transformer2DModel` lookup space without mutating the checkpoint; unsupported FLUX.2
+variants/configs fail loud.
+SDXL VAE conversion now preflights canonical projection keys after keyspace resolution so projection-lane shape violations surface explicitly (instead of collapsing into generic missing-key noise).
 GGUF smart-offload staging for large transformer classes now emits canonical INFO audit events via `backend.smart_offload`.
 Those staging events are tagged via the canonical `SmartOffloadAction.STAGE_LOAD` enum action.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `ParsedCheckpoint` (dataclass): Parsed checkpoint bundle (primary path + optional additional modules + extracted configs/metadata).
+- `CheckpointInspection` (dataclass): Checkpoint inspection envelope (format, key count, optional safetensors header/shape metadata).
 - `DiffusionModelBundle` (dataclass): Loaded model components and configs (UNet/VAE/text encoders + signature + quant/layout info).
 - `_supported_inference_dtypes` (function): Returns supported inference dtypes for a given model family.
 - `_prediction_type_value` (function): Converts a `PredictionKind` into the string value expected by configs/pipelines.
@@ -27,29 +33,39 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_clip_layout_metadata_to_cache` (function): Serializes resolved CLIP layout metadata for registry cache persistence.
 - `_clip_layout_hint_from_cache` (function): Applies precedence rules to decide when cached layout metadata may be consumed.
 - `_projection_module_layout` (function): Resolves the projection module layout (`linear`/`matmul`) from resolved CLIP metadata.
-- `_load_state_dict` (function): Loads a state dict from disk (handles supported formats) for downstream parsing.
+- `_coerce_safetensors_shape` (function): Normalizes safetensors header shape payloads into integer tuples.
+- `_inspect_checkpoint` (function): Inspects checkpoint metadata before loading (safetensors header-first; non-safetensors format probe).
+- `_attach_checkpoint_inspection` (function): Wires safetensors inspection metadata onto lazy mappings when supported.
+- `_load_state_dict` (function): Loads a state dict from disk using inspection metadata and emits materialization events for non-safetensors.
 - `_read_json` (function): Reads a required JSON metadata file with explicit errors (used by vendored-HF signature builders).
+- `_load_diffusers_model_index` (function): Reads a diffusers `model_index.json` natively from disk (no Diffusers config helper).
 - `_zimage_signature_from_vendored_hf` (function): Builds a Z-Image `ModelSignature` from vendored HF metadata (`Tongyi-MAI/Z-Image-Turbo` layout; no state-dict detector).
 - `_flux_signature_from_vendored_hf` (function): Builds a Flux `ModelSignature` from vendored HF metadata (no state-dict detector).
-- `_requires_sdxl_checkpoint_keymap` (function): Determines whether SDXL checkpoint keymap normalization must run for a checkpoint parse call.
+- `_resolve_flux2_repo_id_from_path` (function): Chooses the supported FLUX.2 4B/base-4B vendored repo id from a checkpoint path hint.
+- `_validate_supported_flux2_transformer_config` (function): Validates that a FLUX.2 transformer config matches the supported Klein 4B/base-4B slice.
+- `_flux2_signature_from_vendored_hf` (function): Builds a FLUX.2 `ModelSignature` from vendored HF metadata for the supported 4B/base-4B slice.
+- `_sdxl_expected_signature_from_state_dict` (function): Builds an SDXL/SDXL refiner signature from expected-family checkpoint truth, including core-only detection.
+- `_requires_sdxl_checkpoint_keymap` (function): Determines whether SDXL checkpoint keyspace resolution must run for a checkpoint parse call.
+- `_maybe_resolve_expected_family_keyspace` (function): Applies family-scoped GGUF/native keyspace interpretation for expected-family loads.
 - `_parse_checkpoint` (function): Parses one checkpoint (plus optional addons) into `ParsedCheckpoint` for bundle assembly.
 - `_build_diffusion_bundle` (function): Assembles a `DiffusionModelBundle` from a parsed checkpoint and loader options.
 - `_load_component_config` (function): Loads a component config dict from a diffusers component directory.
 - `_resolve_vae_class` (function): Picks the VAE class/loader path based on model signature and layout (`diffusers` vs legacy layouts).
 - `_maybe_convert_sdxl_vae_state_dict` (function): Applies SDXL-specific VAE key conversions and preflights canonical projection keys for explicit lane-shape failures.
-- `_detect_sdxl_vae_projection_lane` (function): Detects SDXL VAE canonical projection lane (`linear_2d` or `conv1x1_4d`) from remapped keys.
-- `_assert_flux_vae_state_dict_keyspace` (function): Validates Flux VAE keyspace and rejects non-VAE assets with explicit causality.
+- `_detect_sdxl_vae_projection_lane` (function): Detects SDXL VAE canonical projection lane (`linear_2d` or `conv1x1_4d`) from resolved canonical keys.
+- `_assert_vae_state_dict_keyspace_for_family` (function): Validates Flow-family VAE keyspace and rejects non-VAE assets with explicit causality.
 - `_Conv1x1Projection` (class): Native 1x1-conv projection module compatible with diffusers attention 3D inputs.
 - `_apply_sdxl_vae_conv_projection_lane` (function): Replaces SDXL VAE mid-attention projection modules with native 1x1-conv projections.
 - `_detect_vae_layout` (function): Detects VAE state dict layout (used to choose conversion/loading strategy).
-- `_assert_flux_core_gguf_vae_path_not_checkpoint` (function): Rejects Flux core-only requests where `vae_path` equals the core GGUF checkpoint path.
+- `_assert_core_only_vae_path_not_checkpoint` (function): Rejects core-only requests where `vae_path` equals the checkpoint path.
 - `_safetensors_primary_dtype_hint` (function): Best-effort safetensors dtype hint reader (header-only, whole-file).
 - `_log_weights_dtype_hint` (function): Emits pipeline-debug logs for (role, selected dtype, weights dtype hint).
-- `_load_huggingface_component` (function): Loads a diffusers component/pipeline from a local HF-style repo directory (including canonical keymap-owned T5 remap).
+- `_load_huggingface_component` (function): Loads a diffusers component/pipeline from a local HF-style repo directory (including canonical keymap-owned T5 keyspace resolution).
 - `_apply_prediction_type` (function): Applies prediction-type overrides to loaded components/configs when specified.
 - `codex_loader` (function): Primary loader entrypoint; coordinates checkpoint parsing, TE override resolution (incl. `tenc_path` shorthand),
   VAE layout handling, dtype selection, and memory-management integration to produce a `DiffusionModelBundle`.
 - `_SimpleEstimated` (class): Minimal estimate container used for config detection/compat when only partial metadata is available.
+- `resolve_sdxl_diffusers_surface` (function): Resolves SDXL base vs refiner diffusers repos from native JSON/config evidence and expected-family truth.
 - `_detect_engine_from_config` (function): Detects engine identifier from a diffusers config dict.
 - `load_engine_from_diffusers` (function): Loads a `DiffusionModelBundle` directly from a diffusers repo directory.
 - `resolve_diffusion_bundle` (function): Resolves and loads a diffusion bundle from either checkpoint paths or diffusers repos based on inputs.
@@ -63,6 +79,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, TYPE_CHECKING
+from apps.backend.runtime.logging import get_backend_logger
 
 import torch
 
@@ -79,7 +96,7 @@ from apps.backend.runtime.common.nn.t5 import IntegratedT5
 from apps.backend.runtime.common.vae_lane_policy import (
     detect_vae_layout,
     resolve_vae_layout_lane,
-    strip_known_vae_prefixes,
+    validate_vae_key_names,
     uses_ldm_native_lane,
 )
 from apps.backend.runtime.common.vae_ldm import AutoencoderKL_LDM, sanitize_ldm_vae_config
@@ -93,8 +110,11 @@ from apps.backend.runtime.memory.smart_offload import (
 from apps.backend.runtime.model_parser import parse_state_dict
 from apps.backend.runtime.model_parser.quantization import detect_state_dict_dtype
 from apps.backend.runtime.model_parser.specs import CodexEstimatedConfig
+from apps.backend.runtime.families.ltx2.config import LTX2_REQUIRED_TEXT_ENCODER_SLOT
+from apps.backend.runtime.families.ltx2.loader import build_ltx2_bundle_metadata, prepare_ltx2_bundle_inputs
 from apps.backend.runtime.model_registry.errors import ModelRegistryError
 from apps.backend.runtime.model_registry.loader import detect_from_state_dict as registry_detect
+from apps.backend.runtime.model_registry.signals import build_bundle, count_blocks
 from apps.backend.runtime.model_registry.specs import (
     CodexCoreArchitecture,
     CodexCoreSignature,
@@ -120,16 +140,21 @@ from apps.backend.runtime.checkpoint.io import load_torch_file, read_arbitrary_c
 from apps.backend.runtime.state_dict.tools import beautiful_print_gguf_state_dict_statics
 from apps.backend.runtime.state_dict.key_mapping import KeyMappingError
 from apps.backend.runtime.state_dict.keymap_sdxl_clip import ClipLayoutMetadata
-from apps.backend.runtime.checkpoint.safetensors_header import detect_safetensors_primary_dtype
+from apps.backend.runtime.checkpoint.safetensors_header import (
+    detect_safetensors_primary_dtype,
+    detect_safetensors_primary_dtype_from_header,
+    read_safetensors_header,
+)
 
-LOGGER = logging.getLogger(__name__)
-CLIP_LOG = logging.getLogger(__name__ + ".clip")
-_LOG = logging.getLogger(__name__)
+LOGGER = get_backend_logger(__name__)
+CLIP_LOG = get_backend_logger(__name__ + ".clip")
+_LOG = get_backend_logger(__name__)
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
 SUPPORTED_INFERENCE_DTYPES: Dict[ModelFamily, tuple[torch.dtype, ...]] = {
     ModelFamily.FLUX: (torch.bfloat16, torch.float16, torch.float32),
     ModelFamily.FLUX_KONTEXT: (torch.bfloat16, torch.float16, torch.float32),
+    ModelFamily.FLUX2: (torch.bfloat16, torch.float16, torch.float32),
     ModelFamily.CHROMA: (torch.bfloat16, torch.float16, torch.float32),
 }
 DEFAULT_SUPPORTED_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
@@ -156,6 +181,16 @@ class ParsedCheckpoint:
 
 
 @dataclass(frozen=True, slots=True)
+class CheckpointInspection:
+    path: str
+    format: str
+    key_count: int
+    shapes: Dict[str, tuple[int, ...]] = field(default_factory=dict)
+    header: Dict[str, object] | None = None
+    primary_dtype_hint: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class DiffusionModelBundle:
     """Fully materialised diffusion checkpoint ready for engine binding."""
 
@@ -173,12 +208,14 @@ ENGINE_KEY_TO_FAMILY: Dict[str, ModelFamily] = {
     "sdxl_refiner": ModelFamily.SDXL_REFINER,
     "flux1": ModelFamily.FLUX,
     "flux1_kontext": ModelFamily.FLUX_KONTEXT,
+    "flux2": ModelFamily.FLUX2,
     "sd35": ModelFamily.SD35,
     "sd3": ModelFamily.SD3,
     "flux1_chroma": ModelFamily.CHROMA,
     "sd20": ModelFamily.SD20,
     "sd15": ModelFamily.SD15,
     "anima": ModelFamily.ANIMA,
+    "ltx2": ModelFamily.LTX2,
     "wan22_5b": ModelFamily.WAN22_5B,
     "wan22_14b": ModelFamily.WAN22_14B,
     "wan22_14b_animate": ModelFamily.WAN22_ANIMATE,
@@ -189,6 +226,8 @@ FAMILY_TO_ENGINE_KEY: Dict[ModelFamily, str] = {
     ModelFamily.SDXL: "sdxl",
     ModelFamily.FLUX: "flux1",
     ModelFamily.FLUX_KONTEXT: "flux1_kontext",
+    ModelFamily.FLUX2: "flux2",
+    ModelFamily.LTX2: "ltx2",
     ModelFamily.SD35: "sd35",
     ModelFamily.SD3: "sd35",
     ModelFamily.CHROMA: "flux1_chroma",
@@ -207,6 +246,23 @@ _WAN22_FAMILIES: tuple[ModelFamily, ...] = (
 )
 
 _CLIP_LAYOUT_CACHE_PREFIX = "clip"
+
+_SUPPORTED_FLUX2_REPO_IDS: tuple[str, str] = (
+    "black-forest-labs/FLUX.2-klein-4B",
+    "black-forest-labs/FLUX.2-klein-base-4B",
+)
+
+_SUPPORTED_FLUX2_TRANSFORMER_CONFIG: Dict[str, object] = {
+    "attention_head_dim": 128,
+    "guidance_embeds": False,
+    "in_channels": 128,
+    "joint_attention_dim": 7680,
+    "num_attention_heads": 24,
+    "num_layers": 5,
+    "num_single_layers": 20,
+    "patch_size": 1,
+    "timestep_guidance_channels": 256,
+}
 
 _SDXL_VAE_CANONICAL_PROJECTION_KEYS = (
     "encoder.mid_block.attentions.0.to_q.weight",
@@ -331,15 +387,105 @@ def _projection_module_layout(add_projection: bool, layout: ClipLayoutMetadata) 
     return layout.projection_orientation
 
 
-def _load_state_dict(path: str) -> Mapping[str, Any]:
+def _coerce_safetensors_shape(raw_shape: object) -> tuple[int, ...] | None:
+    if not isinstance(raw_shape, (list, tuple)):
+        return None
+    out: list[int] = []
+    for value in raw_shape:
+        if not isinstance(value, (int, float)):
+            return None
+        out.append(int(value))
+    return tuple(out)
+
+
+def _inspect_checkpoint(path: str) -> CheckpointInspection:
+    path_str = str(path)
+    suffix = Path(path_str).suffix.lower()
+    format_name = suffix.lstrip(".") or "unknown"
+    _trace.event("checkpoint_inspect_start", path=path_str, format=format_name)
+
+    if suffix in {".safetensor", ".safetensors"}:
+        header = read_safetensors_header(Path(path_str))
+        header_dict = {str(k): v for k, v in header.items()}
+        shapes: Dict[str, tuple[int, ...]] = {}
+        key_count = 0
+        for raw_key, meta in header_dict.items():
+            if raw_key == "__metadata__":
+                continue
+            key_count += 1
+            if not isinstance(meta, Mapping):
+                continue
+            shape = _coerce_safetensors_shape(meta.get("shape"))
+            if shape is not None:
+                shapes[raw_key] = shape
+        primary_dtype_hint = detect_safetensors_primary_dtype_from_header(header_dict)
+        inspection = CheckpointInspection(
+            path=path_str,
+            format="safetensors",
+            key_count=key_count,
+            shapes=shapes,
+            header=header_dict,
+            primary_dtype_hint=primary_dtype_hint,
+        )
+        _trace.event(
+            "checkpoint_inspect_done",
+            path=path_str,
+            format="safetensors",
+            keys=inspection.key_count,
+            shapes=len(inspection.shapes),
+            primary_dtype=str(inspection.primary_dtype_hint or "unknown"),
+        )
+        return inspection
+
+    inspection = CheckpointInspection(path=path_str, format=format_name, key_count=-1)
+    _trace.event(
+        "checkpoint_inspect_done",
+        path=path_str,
+        format=format_name,
+        keys=-1,
+        shapes=0,
+        primary_dtype="unknown",
+    )
+    return inspection
+
+
+def _attach_checkpoint_inspection(state_dict: Mapping[str, Any], inspection: CheckpointInspection) -> None:
+    if inspection.format != "safetensors":
+        return
+    if not hasattr(state_dict, "__dict__"):
+        return
+    try:
+        setattr(state_dict, "source_format", "safetensors")
+        setattr(state_dict, "source_path", inspection.path)
+        setattr(state_dict, "header_shapes", dict(inspection.shapes))
+        setattr(state_dict, "safetensors_header", dict(inspection.header or {}))
+        setattr(state_dict, "primary_dtype_hint", inspection.primary_dtype_hint)
+    except Exception:
+        # Best-effort metadata wiring; never weaken checkpoint load strictness.
+        pass
+
+
+def _load_state_dict(path: str, *, inspection: CheckpointInspection | None = None) -> Mapping[str, Any]:
+    inspection = inspection or _inspect_checkpoint(path)
     _trace.event("load_torch_file_start", path=str(path))
     # Resolve the initial load device explicitly (no 'auto' fallback)
     initial_device = memory_management.manager.get_offload_device(DeviceRole.CORE)
+    if inspection.format != "safetensors":
+        _trace.event("checkpoint_materialize_start", path=str(path), format=inspection.format)
     sd = load_torch_file(path, device=initial_device)
+    if inspection.format == "safetensors":
+        _attach_checkpoint_inspection(sd, inspection)
     try:
         tensor_count = len(sd.keys())  # type: ignore[attr-defined]
     except Exception:
         tensor_count = -1
+    if inspection.format != "safetensors":
+        _trace.event(
+            "checkpoint_materialize_done",
+            path=str(path),
+            format=inspection.format,
+            tensors=tensor_count,
+        )
     _trace.event("load_torch_file_done", path=str(path), type=type(sd).__name__, tensors=tensor_count)
     return sd
 
@@ -354,6 +500,10 @@ def _read_json(path: Path) -> Dict[str, Any]:
     if not isinstance(data, dict):
         raise TypeError(f"Expected JSON object at {path}, got {type(data).__name__}")
     return data
+
+
+def _load_diffusers_model_index(repo_dir: str) -> Dict[str, Any]:
+    return _read_json(Path(repo_dir) / "model_index.json")
 
 
 def _zimage_signature_from_vendored_hf(*, model_path: str) -> ModelSignature:
@@ -541,6 +691,276 @@ def _flux_signature_from_vendored_hf(
     )
 
 
+def _resolve_flux2_repo_id_from_path(model_path: str) -> str:
+    lower = str(model_path or "").strip().lower().replace("\\", "/")
+    if any(
+        marker in lower
+        for marker in (
+            "flux.2-klein-base-9b",
+            "flux2-klein-base-9b",
+            "flux.2-klein-9b",
+            "flux2-klein-9b",
+            "base-9b",
+            "/9b/",
+            "-9b",
+        )
+    ):
+        raise RuntimeError(
+            "Unsupported FLUX.2 checkpoint variant in %r. Only Klein 4B/base-4B is supported."
+            % (model_path,)
+        )
+    if any(
+        marker in lower
+        for marker in (
+            "flux.2-klein-base-4b",
+            "flux2-klein-base-4b",
+            "base-4b",
+            "base_4b",
+            "/base/",
+        )
+    ):
+        return _SUPPORTED_FLUX2_REPO_IDS[1]
+    return _SUPPORTED_FLUX2_REPO_IDS[0]
+
+
+def _validate_supported_flux2_transformer_config(
+    transformer_cfg: Mapping[str, Any],
+    *,
+    context: str,
+) -> None:
+    for field, expected in _SUPPORTED_FLUX2_TRANSFORMER_CONFIG.items():
+        actual = transformer_cfg.get(field)
+        if actual != expected:
+            raise RuntimeError(
+                "Unsupported FLUX.2 transformer config for %s. Only Klein 4B/base-4B is supported. "
+                "Field %r expected %r, got %r."
+                % (context, field, expected, actual)
+            )
+
+
+def _flux2_signature_from_vendored_hf(*, model_path: str) -> ModelSignature:
+    suffix = Path(model_path).suffix.lower()
+    if suffix not in {".safetensors", ".safetensor", ".gguf"}:
+        raise RuntimeError(
+            "Unsupported FLUX.2 checkpoint format %r for %s. Only core-only SafeTensors or GGUF checkpoints are supported."
+            % (suffix or "<none>", model_path)
+        )
+
+    repo_hint = _resolve_flux2_repo_id_from_path(model_path)
+    variant = "base" if repo_hint.endswith("base-4B") else "klein"
+    is_distilled = variant != "base"
+    vendor_root = _BACKEND_ROOT / "huggingface" / "black-forest-labs"
+    repo_name = repo_hint.split("/", 1)[1]
+    transformer_cfg = _read_json(vendor_root / repo_name / "transformer" / "config.json")
+    text_encoder_cfg = _read_json(vendor_root / repo_name / "text_encoder" / "config.json")
+
+    _validate_supported_flux2_transformer_config(transformer_cfg, context=repo_hint)
+
+    text_hidden = int(text_encoder_cfg.get("hidden_size", 0))
+    if text_hidden != 2560:
+        raise RuntimeError(
+            "Unsupported FLUX.2 text encoder config for %s. Expected Qwen3-4B hidden_size=2560, got %r."
+            % (repo_hint, text_encoder_cfg.get("hidden_size"))
+        )
+
+    latent_channels = int(transformer_cfg["in_channels"])
+    context_dim = int(transformer_cfg["joint_attention_dim"])
+    double_layers = int(transformer_cfg["num_layers"])
+    single_layers = int(transformer_cfg["num_single_layers"])
+
+    quantization = QuantizationHint()
+    if suffix == ".gguf":
+        quantization = QuantizationHint(kind=QuantizationKind.GGUF, detail="file_extension")
+
+    return ModelSignature(
+        family=ModelFamily.FLUX2,
+        repo_hint=repo_hint,
+        prediction=PredictionKind.FLOW,
+        latent_format=LatentFormat.FLUX2,
+        quantization=quantization,
+        core=CodexCoreSignature(
+            architecture=CodexCoreArchitecture.FLOW_TRANSFORMER,
+            channels_in=latent_channels,
+            channels_out=latent_channels,
+            context_dim=context_dim,
+            temporal=False,
+            depth=double_layers + single_layers,
+            key_prefixes=["double_blocks.", "single_blocks."],
+        ),
+        text_encoders=[
+            TextEncoderSignature(
+                name="qwen3_4b",
+                key_prefix="text_encoder.",
+                expected_dim=text_hidden,
+                tokenizer_hint=f"{repo_hint}/tokenizer",
+            )
+        ],
+        vae=None,
+        extras={
+            "core_only": True,
+            "flux2_variant": variant,
+            "flow_double_layers": double_layers,
+            "flow_single_layers": single_layers,
+            "guidance_embed": bool(transformer_cfg.get("guidance_embeds", False)),
+            "is_distilled": is_distilled,
+            "signature_source": "vendored_hf",
+            "supported_repo_variants": list(_SUPPORTED_FLUX2_REPO_IDS),
+        },
+    )
+
+
+def _ltx2_signature_from_vendored_hf(*, model_path: str) -> ModelSignature:
+    suffix = Path(model_path).suffix.lower()
+    if suffix not in {".safetensors", ".safetensor", ".gguf"}:
+        raise RuntimeError(
+            "Unsupported LTX2 checkpoint format %r for %s. Only monolithic SafeTensors or core-only GGUF checkpoints are supported."
+            % (suffix or "<none>", model_path)
+        )
+
+    vendor_root = _BACKEND_ROOT / "huggingface" / "Lightricks" / "LTX-2"
+    transformer_cfg = _read_json(vendor_root / "transformer" / "config.json")
+
+    latent_channels = int(transformer_cfg.get("in_channels", 128))
+    context_dim = int(transformer_cfg.get("cross_attention_dim", 4096))
+    num_layers = int(transformer_cfg.get("num_layers", 48))
+
+    quantization = QuantizationHint()
+    core_only = False
+    if suffix == ".gguf":
+        quantization = QuantizationHint(kind=QuantizationKind.GGUF, detail="file_extension")
+        core_only = True
+
+    return ModelSignature(
+        family=ModelFamily.LTX2,
+        repo_hint="Lightricks/LTX-2",
+        prediction=PredictionKind.FLOW,
+        latent_format=LatentFormat.LTX2,
+        quantization=quantization,
+        core=CodexCoreSignature(
+            architecture=CodexCoreArchitecture.DIT,
+            channels_in=latent_channels,
+            channels_out=latent_channels,
+            context_dim=context_dim,
+            temporal=True,
+            depth=num_layers,
+            key_prefixes=["transformer_blocks."],
+        ),
+        text_encoders=[
+            TextEncoderSignature(
+                name="gemma3_12b",
+                key_prefix="text_encoder.",
+                expected_dim=context_dim,
+                tokenizer_hint="Lightricks/LTX-2/tokenizer",
+            )
+        ],
+        vae=None if core_only else VAESignature(key_prefix="vae.", latent_channels=latent_channels),
+        extras={
+            "core_only": core_only,
+            "signature_source": "vendored_hf",
+        },
+    )
+
+
+def _shape_from_bundle(
+    bundle,
+    key: str,
+    dim: int,
+    *,
+    default: int | None = None,
+) -> int | None:
+    shape = bundle.shape(key)
+    if not shape:
+        return default
+    try:
+        return int(shape[dim])
+    except Exception:
+        return default
+
+
+def _sdxl_expected_signature_from_state_dict(
+    *,
+    state_dict: Mapping[str, Any],
+    expected_family: ModelFamily,
+) -> ModelSignature:
+    bundle = build_bundle(state_dict)
+    channels_in = _shape_from_bundle(bundle, "model.diffusion_model.input_blocks.0.0.weight", 1, default=4) or 4
+    channels_out = _shape_from_bundle(bundle, "model.diffusion_model.out.2.weight", 0, default=4) or 4
+    depth = count_blocks(bundle.keys, "model.diffusion_model.output_blocks.{}.")
+    has_vae = bundle.has_prefix("first_stage_model.") or bundle.has_prefix("vae.")
+
+    if expected_family is ModelFamily.SDXL_REFINER:
+        has_text_encoder = bundle.has_prefix("conditioner.embedders.0.")
+        core_only = (not has_vae) and (not has_text_encoder)
+        extras: Dict[str, object] = {"sdxl_variant": "refiner"}
+        if core_only:
+            extras["core_only"] = True
+        return ModelSignature(
+            family=ModelFamily.SDXL_REFINER,
+            repo_hint="stabilityai/stable-diffusion-xl-refiner-1.0",
+            prediction=PredictionKind.EPSILON,
+            latent_format=LatentFormat.SD_XL,
+            quantization=QuantizationHint(),
+            core=CodexCoreSignature(
+                architecture=CodexCoreArchitecture.UNET,
+                channels_in=channels_in,
+                channels_out=channels_out,
+                context_dim=1280,
+                temporal=False,
+                depth=depth,
+                key_prefixes=["model.diffusion_model."],
+            ),
+            text_encoders=[
+                TextEncoderSignature(
+                    name="clip_g",
+                    key_prefix="conditioner.embedders.0.model.",
+                    expected_dim=1280,
+                    tokenizer_hint="openclip/ViT-bigG-14",
+                ),
+            ],
+            vae=None if core_only else VAESignature(key_prefix="first_stage_model.", latent_channels=channels_out),
+            extras=extras,
+        )
+
+    has_clip_l = bundle.has_prefix("conditioner.embedders.0.")
+    has_clip_g = bundle.has_prefix("conditioner.embedders.1.")
+    core_only = (not has_vae) and (not has_clip_l) and (not has_clip_g)
+    extras = {"sdxl_variant": "base"}
+    if core_only:
+        extras["core_only"] = True
+    return ModelSignature(
+        family=ModelFamily.SDXL,
+        repo_hint="stabilityai/stable-diffusion-xl-base-1.0",
+        prediction=PredictionKind.EPSILON,
+        latent_format=LatentFormat.SD_XL,
+        quantization=QuantizationHint(),
+        core=CodexCoreSignature(
+            architecture=CodexCoreArchitecture.UNET,
+            channels_in=channels_in,
+            channels_out=channels_out,
+            context_dim=2048,
+            temporal=False,
+            depth=depth,
+            key_prefixes=["model.diffusion_model."],
+        ),
+        text_encoders=[
+            TextEncoderSignature(
+                name="clip_l",
+                key_prefix="conditioner.embedders.0.transformer.",
+                expected_dim=768,
+                tokenizer_hint="openai/clip-vit-large-patch14",
+            ),
+            TextEncoderSignature(
+                name="clip_g",
+                key_prefix="conditioner.embedders.1.model.",
+                expected_dim=1280,
+                tokenizer_hint="openclip/ViT-bigG-14",
+            ),
+        ],
+        vae=None if core_only else VAESignature(key_prefix="first_stage_model.", latent_channels=channels_out),
+        extras=extras,
+    )
+
+
 def _requires_sdxl_checkpoint_keymap(
     state_dict: Mapping[str, Any],
     *,
@@ -552,17 +972,58 @@ def _requires_sdxl_checkpoint_keymap(
         return False
     for raw_key in state_dict.keys():
         key = str(raw_key)
-        while key.startswith("module."):
-            key = key[len("module.") :]
+        if key.startswith("module."):
+            module_inner_key = key[len("module.") :]
+            if not module_inner_key.startswith("module."):
+                key = module_inner_key
         if key.startswith(
             (
+                "model.diffusion_model.",
                 "model.diffusion_model.label_emb.0.",
                 "model.model.diffusion_model.label_emb.0.",
                 "diffusion_model.label_emb.0.",
+                "diffusion_model.",
+                "model.model.diffusion_model.",
+                "conditioner.",
+                "model.conditioner.",
+                "model.model.conditioner.",
+                "first_stage_model.",
+                "model.first_stage_model.",
+                "model.model.first_stage_model.",
+                "model.vae.",
+                "model.model.vae.",
+                "vae.",
             )
         ):
             return True
     return False
+
+
+def _maybe_resolve_expected_family_keyspace(
+    state_dict: Mapping[str, Any],
+    *,
+    inspection: CheckpointInspection,
+    expected_family: ModelFamily | None,
+) -> Mapping[str, Any]:
+    if expected_family is None:
+        return state_dict
+
+    if inspection.format == "gguf" and expected_family in {ModelFamily.FLUX, ModelFamily.FLUX_KONTEXT}:
+        from apps.backend.runtime.state_dict.keymap_flux_transformer import resolve_flux_transformer_keyspace
+
+        return resolve_flux_transformer_keyspace(state_dict).view
+
+    if expected_family is ModelFamily.FLUX2:
+        from apps.backend.runtime.state_dict.keymap_flux2_transformer import resolve_flux2_transformer_keyspace
+
+        return resolve_flux2_transformer_keyspace(state_dict).view
+
+    if inspection.format == "gguf" and expected_family is ModelFamily.ZIMAGE:
+        from apps.backend.runtime.state_dict.keymap_zimage_transformer import resolve_zimage_transformer_keyspace
+
+        return resolve_zimage_transformer_keyspace(state_dict).view
+
+    return state_dict
 
 
 def _parse_checkpoint(
@@ -571,13 +1032,28 @@ def _parse_checkpoint(
     *,
     expected_family: ModelFamily | None = None,
 ) -> ParsedCheckpoint:
-    base_state = _load_state_dict(primary_path)
+    primary_inspection = _inspect_checkpoint(primary_path)
+    base_state = _load_state_dict(primary_path, inspection=primary_inspection)
+    base_state = _maybe_resolve_expected_family_keyspace(
+        base_state,
+        inspection=primary_inspection,
+        expected_family=expected_family,
+    )
     if _requires_sdxl_checkpoint_keymap(base_state, expected_family=expected_family):
-        from apps.backend.runtime.state_dict.keymap_sdxl_checkpoint import remap_sdxl_checkpoint_state_dict
+        from apps.backend.runtime.state_dict.keymap_sdxl_checkpoint import resolve_sdxl_checkpoint_keyspace
 
-        _, base_state = remap_sdxl_checkpoint_state_dict(base_state)
+        base_state = resolve_sdxl_checkpoint_keyspace(base_state).view
     if expected_family is ModelFamily.ZIMAGE:
         signature = _zimage_signature_from_vendored_hf(model_path=primary_path)
+    elif expected_family is ModelFamily.FLUX2:
+        signature = _flux2_signature_from_vendored_hf(model_path=primary_path)
+    elif expected_family is ModelFamily.LTX2:
+        signature = _ltx2_signature_from_vendored_hf(model_path=primary_path)
+    elif expected_family in {ModelFamily.SDXL, ModelFamily.SDXL_REFINER}:
+        signature = _sdxl_expected_signature_from_state_dict(
+            state_dict=base_state,
+            expected_family=expected_family,
+        )
     elif expected_family in {ModelFamily.FLUX, ModelFamily.FLUX_KONTEXT}:
         guidance_key = "guidance_in.in_layer.weight"
         has_guidance = any(
@@ -595,13 +1071,28 @@ def _parse_checkpoint(
     if additional_paths:
         replacements: Dict[str, Mapping[str, Any]] = {}
         for extra in additional_paths:
-            extra_state = _load_state_dict(extra)
+            extra_inspection = _inspect_checkpoint(extra)
+            extra_state = _load_state_dict(extra, inspection=extra_inspection)
+            extra_state = _maybe_resolve_expected_family_keyspace(
+                extra_state,
+                inspection=extra_inspection,
+                expected_family=expected_family,
+            )
             if _requires_sdxl_checkpoint_keymap(extra_state, expected_family=expected_family):
-                from apps.backend.runtime.state_dict.keymap_sdxl_checkpoint import remap_sdxl_checkpoint_state_dict
+                from apps.backend.runtime.state_dict.keymap_sdxl_checkpoint import resolve_sdxl_checkpoint_keyspace
 
-                _, extra_state = remap_sdxl_checkpoint_state_dict(extra_state)
+                extra_state = resolve_sdxl_checkpoint_keyspace(extra_state).view
             if expected_family is ModelFamily.ZIMAGE:
                 extra_signature = _zimage_signature_from_vendored_hf(model_path=extra)
+            elif expected_family is ModelFamily.FLUX2:
+                extra_signature = _flux2_signature_from_vendored_hf(model_path=extra)
+            elif expected_family is ModelFamily.LTX2:
+                extra_signature = _ltx2_signature_from_vendored_hf(model_path=extra)
+            elif expected_family in {ModelFamily.SDXL, ModelFamily.SDXL_REFINER}:
+                extra_signature = _sdxl_expected_signature_from_state_dict(
+                    state_dict=extra_state,
+                    expected_family=expected_family,
+                )
             elif expected_family in {ModelFamily.FLUX, ModelFamily.FLUX_KONTEXT}:
                 guidance_key = "guidance_in.in_layer.weight"
                 has_guidance = any(
@@ -686,6 +1177,10 @@ def _resolve_vae_class(
                 f"detected layout={layout!r} for family={getattr(family, 'value', family)!r}."
             )
         return AutoencoderKL_LDM
+    if family is ModelFamily.FLUX2:
+        from diffusers import AutoencoderKLFlux2
+
+        return AutoencoderKLFlux2
     from diffusers import AutoencoderKL
 
     return AutoencoderKL
@@ -700,12 +1195,24 @@ def _detect_sdxl_vae_projection_lane(
         return "linear_2d"
 
     observed: set[str] = set()
+    shape_getter = getattr(state_dict, "shape_of", None)
     for key in _SDXL_VAE_CANONICAL_PROJECTION_KEYS:
         if key not in state_dict:
             continue
-        tensor = state_dict[key]
-        ndim = getattr(tensor, "ndim", None)
-        shape = getattr(tensor, "shape", None)
+        shape = None
+        ndim = None
+        if callable(shape_getter):
+            try:
+                raw_shape = shape_getter(key)
+            except Exception:
+                raw_shape = None
+            if raw_shape is not None:
+                shape = tuple(int(value) for value in raw_shape)
+                ndim = len(shape)
+        if shape is None:
+            tensor = state_dict[key]
+            ndim = getattr(tensor, "ndim", None)
+            shape = getattr(tensor, "shape", None)
         if ndim == 2 and shape and len(shape) == 2:
             observed.add("linear_2d")
             continue
@@ -713,7 +1220,7 @@ def _detect_sdxl_vae_projection_lane(
             observed.add("conv1x1_4d")
             continue
         raise KeyMappingError(
-            "SDXL VAE projection lane mismatch after keymap remap. "
+            "SDXL VAE projection lane mismatch after keyspace resolution. "
             f"key={key!r} ndim={ndim} shape={tuple(shape) if shape is not None else None}"
         )
 
@@ -772,9 +1279,9 @@ def _maybe_convert_sdxl_vae_state_dict(
 
     This is a thin wrapper around the strict, string-only keymap in
     `apps/backend/runtime/state_dict/keymap_sdxl_vae.py`. It:
-    - Strips wrapper prefixes (`first_stage_model.`, `vae.`, `model.`, `module.`).
-    - Detects diffusers vs. LDM-style SDXL layouts and remaps LDM → diffusers keys.
-    - Validates canonical mid-attention projection lanes (`linear_2d` or `conv1x1_4d`).
+    - Rejects wrapper-prefix rewrite attempts (`first_stage_model.`, `vae.`, `model.`, `module.`) instead of normalizing them away.
+    - Detects diffusers vs. LDM-style SDXL layouts and resolves LDM keys into diffusers lookup space.
+    - Validates canonical mid-attention projection lanes (`linear_2d` or `conv1x1_4d`) using lazy shape metadata first.
     - Drops known non-weight training metadata (`model_ema.decay`, `model_ema.num_updates`).
 
     Unknown/ambiguous layouts raise (fail loud). Families outside the Flow/SDXL lane are returned
@@ -786,22 +1293,23 @@ def _maybe_convert_sdxl_vae_state_dict(
         ModelFamily.SDXL_REFINER,
         ModelFamily.FLUX,
         ModelFamily.FLUX_KONTEXT,
+        ModelFamily.FLUX2,
         ModelFamily.ZIMAGE,
     ):
         return state_dict
 
-    from apps.backend.runtime.state_dict.keymap_sdxl_vae import remap_sdxl_vae_state_dict
+    from apps.backend.runtime.state_dict.keymap_sdxl_vae import resolve_sdxl_vae_keyspace
 
-    _, remapped = remap_sdxl_vae_state_dict(state_dict)  # fail loud on unknown/ambiguous layouts
+    resolved_state_dict = resolve_sdxl_vae_keyspace(state_dict).view  # fail loud on unknown/ambiguous layouts
 
     # Preflight the canonical mid-attention projections so lane/shape contract errors
     # surface explicitly before safe-load accounting can collapse them into generic
     # missing-key noise.
     for key in _SDXL_VAE_CANONICAL_PROJECTION_KEYS:
-        if key not in remapped:
+        if key not in resolved_state_dict:
             continue
-        _ = remapped[key]
-    return remapped
+        _ = resolved_state_dict[key]
+    return resolved_state_dict
 
 
 def _detect_vae_layout(sd: Mapping[str, Any]) -> str:
@@ -809,8 +1317,13 @@ def _detect_vae_layout(sd: Mapping[str, Any]) -> str:
     return detect_vae_layout(sd)
 
 
-def _assert_flux_vae_state_dict_keyspace(state_dict: Mapping[str, Any], *, weights_path: str | None) -> None:
-    """Fail loud when Flux VAE loading receives a non-VAE state_dict."""
+def _assert_vae_state_dict_keyspace_for_family(
+    state_dict: Mapping[str, Any],
+    *,
+    weights_path: str | None,
+    family: ModelFamily | None,
+) -> None:
+    """Fail loud when a Flow-family VAE load receives a non-VAE state_dict."""
     key_prefixes = ("encoder.", "decoder.", "module.encoder.", "module.decoder.")
     sample_keys: list[str] = []
     for raw_key in state_dict.keys():
@@ -822,21 +1335,22 @@ def _assert_flux_vae_state_dict_keyspace(state_dict: Mapping[str, Any], *, weigh
             return
 
     origin = str(weights_path).strip() if isinstance(weights_path, str) and weights_path.strip() else "<unknown>"
+    family_label = getattr(family, "value", None) or "flow-family"
     raise RuntimeError(
-        "Flux VAE rejected non-VAE asset keyspace at "
+        f"{family_label} VAE rejected non-VAE asset keyspace at "
         f"{origin}. Expected AutoencoderKL keys under 'encoder.'/'decoder.'; "
-        "this usually means extras.vae_sha resolved to a non-VAE asset (for example the core GGUF checkpoint). "
+        "this usually means extras.vae_sha resolved to a non-VAE asset (for example the core checkpoint). "
         f"Sample keys: {sample_keys}"
     )
 
 
-def _assert_flux_core_gguf_vae_path_not_checkpoint(*, model_ref: str, vae_path: str) -> None:
-    """Reject configurations where Flux core checkpoint and VAE path are the same file."""
+def _assert_core_only_vae_path_not_checkpoint(*, model_ref: str, vae_path: str, family_label: str) -> None:
+    """Reject configurations where a core-only checkpoint and VAE path are the same file."""
     model_realpath = os.path.realpath(os.path.expanduser(model_ref.strip()))
     vae_realpath = os.path.realpath(os.path.expanduser(vae_path.strip()))
     if model_realpath == vae_realpath:
         raise RuntimeError(
-            "Flux GGUF core-only VAE path resolves to the same file as the core checkpoint. "
+            f"{family_label} core-only VAE path resolves to the same file as the core checkpoint. "
             "Select a SHA from inventory.vaes (do not reuse the model checkpoint SHA in extras.vae_sha). "
             f"path={vae_realpath}"
         )
@@ -957,7 +1471,7 @@ def _load_huggingface_component(
             tokenizer._eventual_warn_about_too_long_sequence = lambda *_, **__: None
         return tokenizer
 
-    if cls_name == "AutoencoderKL":
+    if cls_name in {"AutoencoderKL", "AutoencoderKLFlux2"}:
         if state_dict is None:
             # For SDXL (and refiner) a VAE is mandatory; fail fast instead of
             # attempting to proceed without it.
@@ -977,9 +1491,20 @@ def _load_huggingface_component(
                 and getattr(quant, "kind", None) is QuantizationKind.GGUF
                 and bool(extras.get("gguf_core_only"))
             )
+            is_flux2_core_only = (
+                isinstance(signature, ModelSignature)
+                and signature.family is ModelFamily.FLUX2
+                and bool(extras.get("core_only"))
+                and signature.vae is None
+            )
             if is_flux_core_gguf:
                 raise RuntimeError(
                     "Flux GGUF core-only checkpoint is missing a VAE. "
+                    "Provide one explicitly (request extras.vae_sha), so the API passes a valid vae_path to the loader."
+                )
+            if is_flux2_core_only:
+                raise RuntimeError(
+                    "FLUX.2 core-only checkpoint is missing a VAE. "
                     "Provide one explicitly (request extras.vae_sha), so the API passes a valid vae_path to the loader."
                 )
             return None
@@ -1001,7 +1526,7 @@ def _load_huggingface_component(
             list(state_dict.keys())[:5] if hasattr(state_dict, "keys") else None,
         )
 
-        state_dict = strip_known_vae_prefixes(state_dict)
+        state_dict = validate_vae_key_names(state_dict)
         vae_layout = _detect_vae_layout(state_dict)
         signature = getattr(parsed, "signature", None)
         vae_lane = resolve_vae_layout_lane(family=getattr(signature, "family", None), layout=vae_layout)
@@ -1011,8 +1536,8 @@ def _load_huggingface_component(
         if not using_ldm_native:
             state_dict = _maybe_convert_sdxl_vae_state_dict(state_dict, signature)
 
-        if family in (ModelFamily.FLUX, ModelFamily.FLUX_KONTEXT):
-            _assert_flux_vae_state_dict_keyspace(state_dict, weights_path=weights_path)
+        if family in (ModelFamily.FLUX, ModelFamily.FLUX_KONTEXT, ModelFamily.FLUX2):
+            _assert_vae_state_dict_keyspace_for_family(state_dict, weights_path=weights_path, family=family)
 
         if using_ldm_native:
             vae_projection_lane = "linear_2d"
@@ -1075,6 +1600,11 @@ def _load_huggingface_component(
                     "Provided VAE weights are incompatible with Flux AutoencoderKL. "
                     "Verify extras.vae_sha resolves to inventory.vaes and does not point to the core GGUF checkpoint."
                 )
+            elif family is ModelFamily.FLUX2:
+                guidance = (
+                    "Provided VAE weights are incompatible with FLUX.2 AutoencoderKLFlux2. "
+                    "Verify extras.vae_sha resolves to inventory.vaes and points to a FLUX.2 VAE weights file."
+                )
             else:
                 guidance = (
                     "Provided VAE weights are incompatible with the expected keyspace for this model family. "
@@ -1098,6 +1628,67 @@ def _load_huggingface_component(
             LOGGER.warning("VAE load: unexpected %d keys (sample=%s)", len(unexpected), sample)
         return model
 
+    if cls_name == "Qwen3ForCausalLM":
+        te_dtype = memory_management.manager.dtype_for_role(
+            DeviceRole.TEXT_ENCODER,
+            native_dtype=_native_weights_storage_dtype(weights_path, state_dict),
+        )
+        _log_weights_dtype_hint(
+            role=DeviceRole.TEXT_ENCODER,
+            selected=te_dtype,
+            hint=_safetensors_primary_dtype_hint(weights_path),
+        )
+
+        tokenizer_path = os.path.join(repo_path, "tokenizer")
+        tokenizer_hint = tokenizer_path if os.path.isdir(tokenizer_path) else None
+
+        if family is ModelFamily.FLUX2:
+            from apps.backend.runtime.families.flux2 import Flux2TextEncoder
+            from transformers import Qwen3ForCausalLM as HfQwen3ForCausalLM
+
+            if state_dict is None:
+                _trace.event("component_from_pretrained", name=component_name, lib=lib_name, cls=cls_name)
+                model = HfQwen3ForCausalLM.from_pretrained(
+                    component_path,
+                    torch_dtype=te_dtype,
+                    local_files_only=True,
+                )
+                wrapped = Flux2TextEncoder.from_pretrained_model(model)
+                if tokenizer_hint is not None:
+                    wrapped.set_tokenizer_path_hint(tokenizer_hint)
+                return wrapped
+
+            resolved_weights_path = str(weights_path).strip() if isinstance(weights_path, str) and weights_path.strip() else None
+            if resolved_weights_path and resolved_weights_path.lower().endswith(".gguf"):
+                wrapped = Flux2TextEncoder.from_gguf(resolved_weights_path, torch_dtype=te_dtype)
+            else:
+                if not isinstance(state_dict, Mapping):
+                    raise RuntimeError(
+                        f"Qwen3 text encoder state_dict must be a mapping; got {type(state_dict).__name__}."
+                    )
+                wrapped = Flux2TextEncoder.from_state_dict(state_dict, torch_dtype=te_dtype)
+            if tokenizer_hint is not None:
+                wrapped.set_tokenizer_path_hint(tokenizer_hint)
+            return wrapped
+
+        if state_dict is None:
+            return None
+        from apps.backend.runtime.families.zimage.text_encoder import ZImageTextEncoder
+
+        resolved_weights_path = str(weights_path).strip() if isinstance(weights_path, str) and weights_path.strip() else None
+        if resolved_weights_path and resolved_weights_path.lower().endswith(".gguf"):
+            model = ZImageTextEncoder.from_gguf(resolved_weights_path, torch_dtype=te_dtype)
+        else:
+            if not isinstance(state_dict, Mapping):
+                raise RuntimeError(
+                    f"Qwen3 text encoder state_dict must be a mapping; got {type(state_dict).__name__}."
+                )
+            model = ZImageTextEncoder.from_state_dict(state_dict, torch_dtype=te_dtype)
+
+        if tokenizer_hint is not None:
+            model.set_tokenizer_path_hint(tokenizer_hint)
+        return model
+
     if cls_name in {"CLIPTextModel", "CLIPTextModelWithProjection"}:
         if state_dict is None:
             return None
@@ -1110,6 +1701,10 @@ def _load_huggingface_component(
             for k in list(state_dict.keys())[:100]
         )
         if _is_actually_t5:
+            if family in {ModelFamily.SDXL, ModelFamily.SDXL_REFINER}:
+                raise ValueError(
+                    f"SDXL slot '{component_name}' requires CLIP weights; received T5-style state dict instead."
+                )
             # Load as T5 using T5 handler but keep in same slot
             # The spec.py will detect the correct type later
             _LOG.info(
@@ -1255,8 +1850,9 @@ def _load_huggingface_component(
         persist_layout_metadata = True
         if family in (ModelFamily.SDXL, ModelFamily.SDXL_REFINER) and component_name in {"text_encoder", "text_encoder_2"}:
             from apps.backend.runtime.state_dict.keymap_sdxl_clip import (
-                remap_sdxl_clip_g_state_dict_with_layout,
-                remap_sdxl_clip_l_state_dict_with_layout,
+                clip_layout_metadata_from_resolved,
+                resolve_sdxl_clip_g_keyspace_with_layout,
+                resolve_sdxl_clip_l_keyspace_with_layout,
             )
 
             requested_qkv = read_sdxl_te_qkv_impl()
@@ -1267,18 +1863,20 @@ def _load_huggingface_component(
                 allow_cache=persist_layout_metadata,
             )
             if family is ModelFamily.SDXL and component_name == "text_encoder":
-                _style, clip_layout, state_dict = remap_sdxl_clip_l_state_dict_with_layout(
+                resolved_clip = resolve_sdxl_clip_l_keyspace_with_layout(
                     state_dict,
                     qkv_impl=requested_impl,
                     layout_metadata=layout_hint,
                 )
             else:
-                _style, clip_layout, state_dict = remap_sdxl_clip_g_state_dict_with_layout(
+                resolved_clip = resolve_sdxl_clip_g_keyspace_with_layout(
                     state_dict,
                     qkv_impl=requested_impl,
                     projection_orientation="auto",
                     layout_metadata=layout_hint,
                 )
+            clip_layout = clip_layout_metadata_from_resolved(resolved_clip)
+            state_dict = resolved_clip.view
         else:
             state_dict, clip_layout = normalize_codex_clip_state_dict_with_layout(
                 state_dict,
@@ -1340,6 +1938,10 @@ def _load_huggingface_component(
             for k in list(state_dict.keys())[:100]
         )
         if _is_actually_clip:
+            if family in {ModelFamily.SDXL, ModelFamily.SDXL_REFINER}:
+                raise ValueError(
+                    f"SDXL slot '{component_name}' must stay CLIP-only; received CLIP weights in a non-CLIP slot."
+                )
             # Load as CLIP using CLIP handler but keep in same slot
             # The spec.py will detect the correct type later
             _LOG.info(
@@ -1435,10 +2037,9 @@ def _load_huggingface_component(
         )
 
         if hasattr(state_dict, "keys"):
-            from apps.backend.runtime.state_dict.keymap_t5_text_encoder import remap_t5_text_encoder_state_dict
+            from apps.backend.runtime.state_dict.keymap_t5_text_encoder import resolve_t5_text_encoder_keyspace
 
-            _, remapped_state_dict = remap_t5_text_encoder_state_dict(state_dict)
-            state_dict = remapped_state_dict
+            state_dict = resolve_t5_text_encoder_keyspace(state_dict).view
 
         load_state_dict(
             model,
@@ -1448,7 +2049,14 @@ def _load_huggingface_component(
         )
         return model
 
-    if cls_name in {"UNet2DConditionModel", "FluxTransformer2DModel", "SD3Transformer2DModel", "ChromaTransformer2DModel", "ZImageTransformer2DModel"}:
+    if cls_name in {
+        "UNet2DConditionModel",
+        "FluxTransformer2DModel",
+        "Flux2Transformer2DModel",
+        "SD3Transformer2DModel",
+        "ChromaTransformer2DModel",
+        "ZImageTransformer2DModel",
+    }:
         if state_dict is None:
             return None
         # Choose configuration source per family/model class
@@ -1501,6 +2109,13 @@ def _load_huggingface_component(
 
             def model_ctor(cfg: Mapping[str, Any]) -> Any:
                 return FluxTransformer2DModel(**dict(cfg))
+
+        elif cls_name == "Flux2Transformer2DModel":
+            from diffusers import Flux2Transformer2DModel
+
+            def model_ctor(cfg: Mapping[str, Any]) -> Any:
+                filtered = {k: v for k, v in cfg.items() if not str(k).startswith("_")}
+                return Flux2Transformer2DModel(**filtered)
 
         elif cls_name == "ChromaTransformer2DModel":
             from apps.backend.runtime.families.chroma.chroma import ChromaTransformer2DModel
@@ -1558,6 +2173,7 @@ def _load_huggingface_component(
             # The engine will move it to GPU on demand via streaming or memory management
             _SMART_OFFLOAD_TRANSFORMERS = {
                 "FluxTransformer2DModel",
+                "Flux2Transformer2DModel",
                 "ZImageTransformer2DModel",
                 "ChromaTransformer2DModel",
                 "SD3Transformer2DModel",
@@ -1644,9 +2260,16 @@ def _load_huggingface_component(
                     prefer=str(bool(getattr(mem_config, "gpu_prefer_construct", False))),
                 )) from exc
 
-        if cls_name in {"UNet2DConditionModel", "FluxTransformer2DModel", "ChromaTransformer2DModel", "SD3Transformer2DModel", "ZImageTransformer2DModel"}:
+        if cls_name in {
+            "UNet2DConditionModel",
+            "FluxTransformer2DModel",
+            "Flux2Transformer2DModel",
+            "ChromaTransformer2DModel",
+            "SD3Transformer2DModel",
+            "ZImageTransformer2DModel",
+        }:
             LOGGER.debug(
-                "Core load: using parser/keymap output directly for %s (no legacy remap normalization).",
+                "Core load: using parser/keymap output directly for %s (no legacy key-rename normalization).",
                 cls_name,
             )
 
@@ -1656,7 +2279,7 @@ def _load_huggingface_component(
         if storage_dtype == "gguf":
             LOGGER.debug("Using strict PyTorch load_state_dict for GGUF model")
             try:
-                model.load_state_dict(dict(state_dict), strict=True)
+                model.load_state_dict(state_dict, strict=True)
             except Exception as exc:
                 raise RuntimeError(
                     f"GGUF core load failed (strict): {core_label}. "
@@ -1735,16 +2358,28 @@ def codex_loader(
         and getattr(quant, "kind", None) is QuantizationKind.GGUF
         and bool(extras.get("gguf_core_only"))
     )
-    if is_flux_core_gguf:
+    is_flux2_core_only = (
+        isinstance(signature, ModelSignature)
+        and signature.family is ModelFamily.FLUX2
+        and signature.vae is None
+        and bool(extras.get("core_only"))
+    )
+    needs_external_vae = is_flux_core_gguf or is_flux2_core_only
+    if needs_external_vae:
         if not isinstance(vae_path, str) or not vae_path.strip():
+            family_label = "FLUX.2" if is_flux2_core_only else "Flux GGUF"
             raise RuntimeError(
-                "Flux GGUF core-only checkpoint requires an external VAE (sha-selected). "
+                f"{family_label} core-only checkpoint requires an external VAE (sha-selected). "
                 "Provide a VAE via request extras.vae_sha so the API can pass a valid vae_path."
             )
         vae_path = os.path.expanduser(vae_path.strip())
         if not os.path.isfile(vae_path):
-            raise RuntimeError(f"Flux GGUF core-only VAE path not found: {vae_path}")
-        _assert_flux_core_gguf_vae_path_not_checkpoint(model_ref=sd_path, vae_path=vae_path)
+            raise RuntimeError(f"Core-only VAE path not found: {vae_path}")
+        _assert_core_only_vae_path_not_checkpoint(
+            model_ref=sd_path,
+            vae_path=vae_path,
+            family_label="FLUX.2" if is_flux2_core_only else "Flux GGUF",
+        )
 
     te_override_cfg = text_encoder_override
     if te_override_cfg is None and tenc_path is not None and parsed.signature.family is not ModelFamily.ZIMAGE:
@@ -1791,6 +2426,25 @@ def codex_loader(
     except TextEncoderOverrideError as exc:
         # Keep the surface error explicit and actionable; do not fall back silently.
         raise RuntimeError(str(exc)) from exc
+
+    resolved_flux2_tenc_path: str | None = None
+    if is_flux2_core_only:
+        if te_override_cfg is None:
+            raise RuntimeError(
+                "FLUX.2 core-only checkpoint requires an external text encoder (Qwen3-4B; sha-selected). "
+                "Provide one via request extras.tenc_sha so the API can pass a valid tenc_path."
+            )
+        resolved_tenc_candidates = [
+            value.strip() for value in te_override_paths.values() if isinstance(value, str) and value.strip()
+        ]
+        if len(resolved_tenc_candidates) != 1:
+            raise RuntimeError(
+                "FLUX.2 text encoder override resolution failed: expected exactly one non-empty external path, "
+                f"got {len(resolved_tenc_candidates)}."
+            )
+        resolved_flux2_tenc_path = os.path.expanduser(resolved_tenc_candidates[0])
+        if not os.path.isfile(resolved_flux2_tenc_path):
+            raise RuntimeError(f"FLUX.2 text encoder path not found: {resolved_flux2_tenc_path}")
 
     component_states = {name: comp.state_dict for name, comp in config.components.items()}
 
@@ -1839,6 +2493,64 @@ def codex_loader(
             },
         )
 
+    if parsed.signature.family is ModelFamily.LTX2:
+        if te_override_cfg is None:
+            raise RuntimeError(
+                "LTX2 checkpoint requires an external text encoder (Gemma3-12B; sha-selected). "
+                "Provide one via request extras.tenc_sha so the API can pass a valid tenc_path."
+            )
+        resolved_ltx2_tenc_candidates = [
+            value.strip() for value in te_override_paths.values() if isinstance(value, str) and value.strip()
+        ]
+        if len(resolved_ltx2_tenc_candidates) != 1:
+            raise RuntimeError(
+                "LTX2 text encoder override resolution failed: expected exactly one non-empty external path, "
+                f"got {len(resolved_ltx2_tenc_candidates)}."
+            )
+        ltx2_text_encoder_override_paths = {
+            LTX2_REQUIRED_TEXT_ENCODER_SLOT: os.path.expanduser(resolved_ltx2_tenc_candidates[0])
+        }
+        ltx2_inputs = prepare_ltx2_bundle_inputs(
+            model_ref=sd_path,
+            estimated_config=config,
+            signature=parsed.signature,
+            text_encoder_override_paths=ltx2_text_encoder_override_paths,
+            vae_path=vae_path,
+            backend_root=_BACKEND_ROOT,
+        )
+        ltx2_component_states = {
+            "transformer": ltx2_inputs.components.transformer,
+            "connectors": ltx2_inputs.components.connectors,
+            "vae": ltx2_inputs.components.vae,
+            "audio_vae": ltx2_inputs.components.audio_vae,
+            "vocoder": ltx2_inputs.components.vocoder,
+        }
+        estimated_component_names = tuple(ltx2_inputs.estimated_config.components.keys())
+        if estimated_component_names != tuple(ltx2_component_states.keys()):
+            raise RuntimeError(
+                "LTX2 loader bundle assembly drifted from the rewritten component contract. "
+                f"estimated_config.components={estimated_component_names!r} "
+                f"bundle_components={tuple(ltx2_component_states.keys())!r}."
+            )
+        for component_name, component_state in ltx2_component_states.items():
+            estimated_component_state = ltx2_inputs.estimated_config.components[component_name].state_dict
+            if estimated_component_state is not component_state:
+                raise RuntimeError(
+                    "LTX2 loader bundle assembly detected stale component state after bundle planning rewrite. "
+                    f"component={component_name!r}."
+                )
+        metadata = build_ltx2_bundle_metadata(ltx2_inputs)
+        metadata["tenc_override_paths"] = dict(te_override_paths)
+        return _build_diffusion_bundle(
+            model_ref=sd_path,
+            family=parsed.signature.family,
+            estimated_config=ltx2_inputs.estimated_config,
+            components=ltx2_component_states,
+            signature=parsed.signature,
+            source="state_dict",
+            metadata=metadata,
+        )
+
     repo_name = config.repo_id
     if not isinstance(repo_name, str) or not repo_name:
         raise ValueError("Codex model parser did not resolve a repository id")
@@ -1859,7 +2571,7 @@ def codex_loader(
         lib_name, cls_name = component_info
         component_sd = component_states.get(component_name)
 
-        if component_sd is None and is_flux_core_gguf and cls_name == "AutoencoderKL":
+        if component_sd is None and needs_external_vae and cls_name in {"AutoencoderKL", "AutoencoderKLFlux2"}:
             component_sd = _load_state_dict(vae_path)
 
         override_path = te_override_paths.get(component_name)
@@ -1878,7 +2590,10 @@ def codex_loader(
             cls_name,
             local_repo_path,
             component_sd,
-            weights_path=sd_path if override_path is None and not (is_flux_core_gguf and cls_name == "AutoencoderKL") else (override_path or vae_path),
+            weights_path=(
+                override_path
+                or (vae_path if needs_external_vae and cls_name in {"AutoencoderKL", "AutoencoderKLFlux2"} else sd_path)
+            ),
         )
         if component_sd is not None:
             component_states.pop(component_name, None)
@@ -1942,6 +2657,12 @@ def codex_loader(
     if prediction_type_override:
         metadata["prediction_type"] = prediction_type_override
     # Note: VAE selection is expressed via engine options (`vae_path` + `vae_source`).
+    if te_override_paths:
+        metadata["tenc_override_paths"] = dict(te_override_paths)
+    if resolved_flux2_tenc_path is not None:
+        metadata["tenc_path"] = resolved_flux2_tenc_path
+    if is_flux2_core_only and isinstance(vae_path, str) and vae_path.strip():
+        metadata["vae_path"] = os.path.expanduser(vae_path.strip())
 
     return _build_diffusion_bundle(
         model_ref=sd_path,
@@ -1961,28 +2682,100 @@ class _SimpleEstimated:
         self.core_config = core_config
         self.pipeline_class = pipeline_class
 
-    def inpaint_model(self) -> bool:  # API parity with CodexEstimatedConfig
-        channels_in = None
-        try:
-            channels_in = int(self.core_config.get("in_channels"))
-        except Exception:
-            channels_in = None
-        if channels_in is not None and channels_in > 4:
-            return True
-        inpaint_hint = f"{self.pipeline_class} {self.huggingface_repo}".strip().lower()
-        return "inpaint" in inpaint_hint
+
+def resolve_sdxl_diffusers_surface(
+    *,
+    config: Mapping[str, Any],
+    repo_dir: str,
+    expected_family: ModelFamily | None = None,
+) -> str | None:
+    def _has_present_component(name: str) -> bool:
+        value = config.get(name)
+        return (
+            isinstance(value, list)
+            and len(value) == 2
+            and isinstance(value[0], str)
+            and bool(value[0].strip())
+            and isinstance(value[1], str)
+            and bool(value[1].strip())
+        )
+
+    has_unet = _has_present_component("unet")
+    has_text_encoder = _has_present_component("text_encoder")
+    has_text_encoder_2 = _has_present_component("text_encoder_2")
+    if not has_unet or (not has_text_encoder and not has_text_encoder_2):
+        return None
+
+    unet_config_path = Path(repo_dir) / "unet" / "config.json"
+    unet_config = _read_json(unet_config_path) if unet_config_path.is_file() else {}
+    pipeline_cls = str(config.get("_class_name") or "").strip().lower()
+    text_encoder_spec = config.get("text_encoder")
+    text_encoder_cls = (
+        text_encoder_spec[1].strip()
+        if isinstance(text_encoder_spec, list)
+        and len(text_encoder_spec) == 2
+        and isinstance(text_encoder_spec[1], str)
+        else ""
+    )
+    cross_attention_dim_raw = unet_config.get("cross_attention_dim")
+    cross_attention_dim = None
+    if isinstance(cross_attention_dim_raw, (int, float, str)) and str(cross_attention_dim_raw).strip():
+        cross_attention_dim = int(cross_attention_dim_raw)
+
+    if has_text_encoder_2:
+        detected_engine = "sdxl"
+    elif (
+        has_text_encoder
+        and text_encoder_cls == "CLIPTextModelWithProjection"
+        and (cross_attention_dim == 1280 or pipeline_cls == "stablediffusionxlimg2imgpipeline")
+    ):
+        detected_engine = "sdxl_refiner"
+    elif cross_attention_dim == 1280:
+        detected_engine = "sdxl_refiner"
+    elif cross_attention_dim == 2048:
+        detected_engine = "sdxl"
+    elif expected_family is ModelFamily.SDXL_REFINER:
+        detected_engine = "sdxl_refiner"
+    elif expected_family is ModelFamily.SDXL:
+        detected_engine = "sdxl"
+    else:
+        raise ValueError(
+            f"Unable to determine SDXL diffusers surface from native metadata: repo={repo_dir} cross_attention_dim={cross_attention_dim!r}"
+        )
+
+    if expected_family is ModelFamily.SDXL and detected_engine != "sdxl":
+        raise ValueError(f"Expected SDXL base diffusers repo, but '{repo_dir}' matches the SDXL refiner surface.")
+    if expected_family is ModelFamily.SDXL_REFINER and detected_engine != "sdxl_refiner":
+        raise ValueError(f"Expected SDXL refiner diffusers repo, but '{repo_dir}' matches the SDXL base surface.")
+    return detected_engine
 
 
-def _detect_engine_from_config(config: dict) -> str:
+def _detect_engine_from_config(
+    config: dict,
+    *,
+    repo_dir: str,
+    expected_family: ModelFamily | None = None,
+) -> str:
     pipeline_cls = str(config.get("_class_name") or "").strip().lower()
     if pipeline_cls == "fluxkontextpipeline":
         return "flux1_kontext"
+    if pipeline_cls == "flux2kleinpipeline":
+        return "flux2"
+    if pipeline_cls == "flux2pipeline":
+        raise ValueError("Unsupported FLUX.2 pipeline config: only Flux2KleinPipeline (4B/base-4B) is supported.")
     comps = {k: v for k, v in config.items() if isinstance(v, list) and len(v) == 2}
     cls_by_name = {k: v[1] for k, v in comps.items()}
-    if "text_encoder_2" in comps and "unet" in comps:
-        return "sdxl"
+    sdxl_surface = resolve_sdxl_diffusers_surface(
+        config=config,
+        repo_dir=repo_dir,
+        expected_family=expected_family,
+    )
+    if sdxl_surface is not None:
+        return sdxl_surface
     if cls_by_name.get("transformer") in ("FluxTransformer2DModel",):
         return "flux1"
+    if cls_by_name.get("transformer") in ("Flux2Transformer2DModel",):
+        return "flux2"
     if cls_by_name.get("transformer") in ("SD3Transformer2DModel",):
         return "sd35"
     if cls_by_name.get("transformer") in ("ChromaTransformer2DModel",):
@@ -1995,10 +2788,12 @@ def _detect_engine_from_config(config: dict) -> str:
     raise ValueError("Unable to determine engine from diffusers config")
 
 
-def load_engine_from_diffusers(repo_dir: str) -> DiffusionModelBundle:
-    from diffusers import DiffusionPipeline
-
-    config: dict = DiffusionPipeline.load_config(repo_dir)
+def load_engine_from_diffusers(
+    repo_dir: str,
+    *,
+    expected_family: ModelFamily | None = None,
+) -> DiffusionModelBundle:
+    config = _load_diffusers_model_index(repo_dir)
     comps = {}
     for name, (lib_name, cls_name) in (
         (k, v) for k, v in config.items() if isinstance(v, list) and len(v) == 2
@@ -2014,7 +2809,11 @@ def load_engine_from_diffusers(repo_dir: str) -> DiffusionModelBundle:
         cls = getattr(importlib.import_module(lib_name), cls_name)
         comps[name] = cls.from_pretrained(os.path.join(repo_dir, name), local_files_only=True)
 
-    engine_key = _detect_engine_from_config(config)
+    engine_key = _detect_engine_from_config(
+        config,
+        repo_dir=repo_dir,
+        expected_family=expected_family,
+    )
     family = ENGINE_KEY_TO_FAMILY.get(engine_key)
     if family is None:
         raise ValueError(f"Unsupported engine key from diffusers config: {engine_key}")
@@ -2030,6 +2829,9 @@ def load_engine_from_diffusers(repo_dir: str) -> DiffusionModelBundle:
                     break
     except Exception:
         core_config = {}
+
+    if family is ModelFamily.FLUX2:
+        _validate_supported_flux2_transformer_config(core_config, context=repo_dir)
 
     est = _SimpleEstimated(
         huggingface_repo=os.path.basename(repo_dir),
@@ -2060,7 +2862,7 @@ def resolve_diffusion_bundle(
     if os.path.isdir(model_ref):
         index = os.path.join(model_ref, "model_index.json")
         if os.path.isfile(index):
-            return load_engine_from_diffusers(model_ref)
+            return load_engine_from_diffusers(model_ref, expected_family=expected_family)
         raise ValueError(f"Not a diffusers repository (missing model_index.json): {model_ref}")
 
     if os.path.isfile(model_ref):
@@ -2080,11 +2882,11 @@ def resolve_diffusion_bundle(
     # Determine format via metadata or filesystem inspection
     metadata = getattr(record, "metadata", {}) or {}
     if isinstance(metadata, dict) and metadata.get("format") == "diffusers":
-        return load_engine_from_diffusers(record.path)
+        return load_engine_from_diffusers(record.path, expected_family=expected_family)
 
     repo_index = os.path.join(record.path, "model_index.json")
     if os.path.isfile(repo_index):
-        return load_engine_from_diffusers(record.path)
+        return load_engine_from_diffusers(record.path, expected_family=expected_family)
     return codex_loader(
         record.filename,
         additional_state_dicts=additional_state_dicts,

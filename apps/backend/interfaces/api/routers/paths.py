@@ -21,6 +21,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, Body, HTTPException
 
 from apps.backend.interfaces.api.json_store import _load_json, _save_json
+from apps.backend.services.model_catalog import current_models_revision, invalidate_model_catalog
 
 
 def build_router(*, codex_root: Path) -> APIRouter:
@@ -84,10 +85,21 @@ def build_router(*, codex_root: Path) -> APIRouter:
             else:
                 raise HTTPException(status_code=400, detail=f"paths[{key!r}] must be a list or null")
 
-        try:
-            _save_json(cfg_path, new_paths)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"failed to write paths config: {exc}") from exc
-        return {"ok": True}
+        changed = new_paths != current
+        if changed:
+            try:
+                _save_json(cfg_path, new_paths)
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"failed to write paths config: {exc}") from exc
+            try:
+                models_revision = int(invalidate_model_catalog(reason="api.paths.set"))
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"paths updated but model catalog invalidation failed: {exc}",
+                ) from exc
+        else:
+            models_revision = int(current_models_revision())
+        return {"ok": True, "changed": changed, "models_revision": models_revision}
 
     return router

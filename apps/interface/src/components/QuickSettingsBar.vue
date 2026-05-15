@@ -6,18 +6,29 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Shared QuickSettings top bar for Model Tabs (SD/Flux/Chroma/ZImage/WAN).
+Purpose: Shared QuickSettings top bar for Model Tabs (SD/Flux/Chroma/ZImage/LTX/WAN).
 Loads `/api/options`, `/api/models`, `/api/models/inventory`, and `/api/paths`, then filters/presents per-family selectors (models/TE/VAE)
-and commits overrides (device + runtime flags + tab-scoped Z-Image variant) used by generation payload builders.
+through the shared non-WAN `QuickSettingsAssetBlock.vue` owner plus the specialized exact WAN branches, and commits overrides (device + runtime flags + tab-scoped Z-Image variant) used by generation payload builders. Asset-contract-derived selector
+hints now disappear when checkpoint inventory metadata lacks a valid `core_only` flag, preventing stale UI contract display. FLUX.2 stays
+first-class as the current Klein 4B / base-4B slice (single Qwen3-4B selector, backend-capability-driven img2img/inpaint gating, no FLUX.1 aliasing).
+For LTX, QuickSettings remains the owner of mode + checkpoint/VAE/text-encoder selection only; execution-profile defaults are checkpoint-aware
+workspace state, not a second raw sampler/scheduler control surface in the shared header. Native SDXL SUPIR mode now also exposes a shared-header toggle here,
+with readiness/blocking resolved from the same diagnostics owner used by the body surface. Outside `/models/:tabId`, model-asset selectors stay summary-only/read-only
+and redirect the user back to a real model-tab owner instead of mutating misleading global checkpoint/VAE/text-encoder state. The non-WAN VAE selector
+also keeps Anima choices scoped to the truthful WanVAE-compatible root instead of laundering unrelated family VAEs into the Anima lane.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `QuickSettingsBar` (component): Main QuickSettings SFC; includes “advanced” UI, per-family subcomponents, and selector filtering logic.
-- `cancelAdvancedAnimation` (function): Cancels in-flight advanced-row animations (used by toggling/resize logic).
-- `easeOutCubic` (function): Easing helper used for advanced-row animations.
-- `syncAdvancedHeight` (function): Measures/synchronizes advanced-row height for smooth expand/collapse transitions.
-- `toggleAdvancedRow` (function): Toggles the advanced row (uses animation helpers and persisted UI state).
+- `syncAdvancedTargetHeight` (function): Measures/synchronizes the advanced-row `--qs-advanced-target-height` CSS variable for class-driven collapse transitions.
+- `toggleAdvancedRow` (function): Toggles the advanced row persisted UI state.
 - `currentTab` (function): Determines the current tab kind (`txt2img`/`img2img`/`txt2vid`/`img2vid`) from routing/state.
 - `tabFamilyFromStorage` (function): Loads persisted per-tab family from local storage (used to keep UI consistent on reload).
+- `resolvedRouteTabFamily` (computed): Resolves the route-tab family from hydrated tab state or persisted tab refs.
+- `modelAssetSelectorsReadOnly` (computed): Marks checkpoint/VAE/text-encoder selectors as summary-only outside `/models/:tabId`.
+- `modelAssetOwnerRoute` (computed): Resolves the navigation target for reopening the real model-tab owner from read-only routes.
+- `routeTabHydrating` (computed): Tracks whether `/models/:tabId` is still waiting on the hydrated tab object and must not render any family branch yet.
+- `routeTabLoadFailed` (computed): Tracks whether `/models/:tabId` failed to load tab state and must show an explicit load-failure placeholder.
+- `routeTabMissing` (computed): Tracks whether `/models/:tabId` finished syncing without a matching tab and must show an explicit not-found placeholder.
 - `normalizePath` (function): Normalizes paths for stable comparisons (slash/case handling).
 - `MetadataKind` (type): Discriminant for inline metadata popups (checkpoint/TE/VAE/WAN stage).
 - `isRecordObject` (function): Type guard for plain object payloads used by metadata parsers.
@@ -26,37 +37,45 @@ Symbols (top-level; keep in sync; no ghosts):
 - `extractSizeBytes` (function): Reads validated file size bytes from `/models/file-metadata` summary payload.
 - `onShowMetadata` (function): Resolves selection metadata and opens a modal.
 - `fileInPaths` (function): Checks whether a file path belongs to the configured roots for a key from `/api/paths` (drives selector filtering).
-- `isVaeForFamily` (function): Filters VAE entries to those relevant for the current family.
-- `withBuiltInVaeChoice` (function): Prepends canonical `built-in` to filtered VAE choices and removes legacy aliases/duplicates.
-- `canonicalizeVaeChoiceForActiveFamily` (function): Normalizes `currentVae` to an active-family option (direct match, sentinel alias, or SHA-equivalent fallback).
 - `isQuicksettingsReady` (ref): Becomes true only after component-local inventory/paths initialization completes; gates mount-time VAE canonicalization.
 - `normalizeTextEncoderLabels` (function): Normalizes raw TE values into a stable label list (used for Flux/WAN multi-TE cases).
 - `WanAssetsParams` (type): Minimal WAN assets triple used for payload building (metadata dir + TE + VAE).
-- `currentWanAssets` (function): Builds `WanAssetsParams` from current UI selections (used by WAN payload generation).
-- `textEncoderLabel` (function): Converts raw TE selector values into a canonical label (handles WAN-style prefixes).
+- `currentWanAssetsFor` (function): Builds `WanAssetsParams` from the active exact WAN tab selections (used by WAN payload generation).
+- `flux2TextEncoderFieldLabel` (computed): Resolves the truthful FLUX.2 Klein Qwen3-4B selector label from backend asset contracts.
+- `toastModelAssetOwnerRequired` (function): Explains that model-asset selectors are read-only outside `/models/:tabId`.
 - `onPrimaryTextEncoderChange` (function): Applies primary text-encoder selection changes (and triggers dependent updates).
-- `onSecondaryTextEncoderChange` (function): Applies secondary text-encoder selection changes (Flux/Kontext dual-encoder workflows).
+- `onSecondaryTextEncoderChange` (function): Applies secondary text-encoder selection changes (FLUX.1 dual-encoder workflow only).
 - `onSmartOffloadChange` (function): Updates Smart Offload toggle (impacts per-request memory behavior).
 - `onSmartFallbackChange` (function): Updates Smart Fallback toggle (best-effort OOM fallback behavior).
 - `onSmartCacheChange` (function): Updates Smart Cache toggle (conditioning caching behavior).
 - `onCoreStreamingChange` (function): Updates core streaming toggle (runtime streaming behavior).
 - `isObliteratingVram` (ref): Tracks in-flight `/api/obliterate-vram` requests to prevent repeated fire.
 - `onObliterateVram` (function): Triggers safe VRAM cleanup and surfaces fail-loud status in quicksettings toasts/logs.
-- `resolveWanFlowShiftForMode` (function): Resolves automatic WAN stage `flowShift` policy for the selected WAN mode + LightX2V toggle.
+- `resolveWan14bFlowShift` (function): Resolves automatic WAN 14B stage `flowShift` policy for the selected input mode + LightX2V toggle.
 - `patchWanStageFlowShift` (function): Applies/removes managed WAN stage `flowShift` values without clobbering unrelated manual overrides.
 - `finiteStageFlowShift` (function): Normalizes a stage `flowShift` into a finite number or `undefined` for stable policy comparisons.
-- `ensureWanFlowShiftPolicy` (function): Enforces managed WAN `flowShift` policy on the active tab (including initial load) without update loops.
-- `onWanModeChange` (function): Updates WAN mode selection and derived controls.
+- `ensureWan14bFlowShiftPolicy` (function): Enforces managed WAN 14B `flowShift` policy on the active tab (including initial load) without update loops.
+- `onWanInputModeChange` (function): Updates the exact WAN input mode selection (`TXT2VID|IMG2VID`) and derived controls.
 - `onWanBrowseModels` (function): Opens the shared add-path modal for WAN model roots (`wan22_ckpt`) from the WAN quicksettings `+` action.
-- `onWanGuidedGen` (function): Opens WAN guided generation flow (UI navigation/CTA).
+- `activeLtxMode` (computed): Resolves the authoritative LTX `txt2vid|img2vid` mode from the active tab params.
+- `activeLtxRouteTabId` (computed): Resolves the route-scoped LTX tab id even before full tab hydration completes.
+- `isActiveLtxTabRunning` (computed): Tracks whether the route-scoped LTX tab currently has an in-flight generation task.
+- `ltxRouteHydrating` (computed): Tracks whether the LTX quicksettings row is waiting for route-tab hydration.
+- `ltxQuicksettingsDisabled` (computed): Freezes the LTX quicksettings row during active runs and hydration gaps.
+- `ltxModeToggleTitle` (computed): Tooltip reason for the LTX mode toggle enabled/disabled state.
+- `ltxRefreshTitle` (computed): Tooltip reason for the LTX Refresh button enabled/disabled state.
+- `onLtxModeChange` (function): Toggles the active LTX tab between `txt2vid` and `img2vid` from quick settings.
 - `onUseInitImageChange` (function): Toggles active image-tab mode between txt2img and img2img from quick settings.
 - `canShowModeToggles` (computed): Enables IMG2IMG/INPAINT quicksettings controls when the active image tab supports img2img.
-- `useMask` (computed): Reflects active image-tab inpaint toggle state (`tab.params.useMask`).
-- `supportsInpaint` (computed): Flags whether inpaint toggle is supported for the active image family.
+- `useInitImage` / `useMask` / `hasInitImage` / `initSourceIsImg` (computed): Shared-header mode/source/materialized-image state for the active image tab.
+- `activeImageRequestEngineId` (computed): Resolves the active image tab to the exact backend request id used for capability and asset-contract lookups.
+- `supirEnabled` / `canShowSupirToggle` / `supirSelectionState` (computed): Shared-header SUPIR toggle state, discoverability, and blocking contract for SDXL img2img/inpaint.
+- `supportsInpaint` (computed): Flags whether the active image-tab semantic capability truthfully supports mask/inpaint semantics.
 - `isActiveImageTabRunning` (computed): Tracks whether the active image tab currently has an in-flight generation task.
-- `inpaintToggleDisabled` (computed): Disables INPAINT when unsupported, when IMG2IMG is off, or when no init image is loaded.
+- `inpaintToggleDisabled` (computed): Disables INPAINT when the current state cannot be changed safely from quick settings.
 - `inpaintToggleTitle` (computed): Tooltip reason for INPAINT enabled/disabled state.
-- `onUseMaskChange` (function): Toggles inpaint mode (`useMask`) from quick settings with explicit IMG2IMG/Flux guards.
+- `onUseMaskChange` (function): Toggles inpaint mode (`useMask`) from quick settings with shared-engine support guards.
+- `onSupirModeChange` (function): Toggles native SDXL SUPIR mode from quick settings and forces img2img entry when enabling.
 - `zimageTurbo` (computed): Returns the current Z-Image Turbo toggle state for the active tab.
 - `zimageTurboLocked` (ref): When true, the Z-Image Turbo toggle is fixed by trusted checkpoint metadata.
 - `_trustedZImageVariantFromCheckpointMeta` (function): Extracts `codex.zimage.variant` when metadata is trusted (Codex provenance).
@@ -66,8 +85,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `onAddPathModalAdded` (function): Refreshes quicksettings lists after add-path operations mutate library paths.
 - `onAddPathModalError` (function): Surfaces add-path scan/add failures through quicksettings toasts.
 - `applyInventorySnapshot` (function): Applies one inventory payload to local quicksettings selector sources.
-- `parseInventoryTaskResult` (function): Parses inventory payloads from task `result` SSE events.
-- `runAsyncInventoryRefreshTask` (function): Starts `/api/models/inventory/refresh/async` and resolves when SSE emits terminal inventory data.
+- `refreshAll` (function): Refreshes models/paths/inventory and reloads shared SUPIR diagnostics when that surface is available.
 - `openPathInputModal` (function): Opens the in-app path input modal and registers async apply behavior.
 - `confirmPathInputModal` (function): Validates/applies modal-entered path values.
 - `closePathInputModal` (function): Closes and clears the in-app path input modal state.
@@ -76,7 +94,7 @@ Symbols (top-level; keep in sync; no ghosts):
 
 <template>
   <section :class="['quicksettings', { 'quicksettings-loading': isLoadingQuicksettings }]">
-    <div class="quicksettings-row quicksettings-row--main">
+    <div class="quicksettings-row">
       <div class="quicksettings-group qs-group-advanced-toggle">
         <div class="qs-row">
           <button
@@ -104,236 +122,495 @@ Symbols (top-level; keep in sync; no ghosts):
           </button>
         </div>
       </div>
+      <template v-if="routeTabHydrating">
+        <div class="quicksettings-group">
+          <label class="label-muted">Model Tab</label>
+          <div class="qs-row">
+            <span class="caption">Loading tab settings...</span>
+          </div>
+        </div>
+      </template>
+      <template v-else-if="routeTabLoadFailed">
+        <div class="quicksettings-group">
+          <label class="label-muted">Model Tab</label>
+          <div class="qs-row">
+            <span class="caption" :title="routeTabSyncError">Failed to load tab settings.</span>
+          </div>
+        </div>
+      </template>
+      <template v-else-if="routeTabMissing">
+        <div class="quicksettings-group">
+          <label class="label-muted">Model Tab</label>
+          <div class="qs-row">
+            <span class="caption">Tab não encontrada.</span>
+          </div>
+        </div>
+      </template>
       <!-- WAN-specific quicksettings -->
-      <template v-if="activeFamily === 'wan'">
-        <QuickSettingsWan
-          :mode="wanModelMode"
-          :lightx2v="wanLightx2v"
-          :high-model="wanHighModel"
-          :high-choices="wanHighDirChoices"
-          :low-model="wanLowModel"
-          :low-choices="wanLowDirChoices"
-          :text-encoder="wanTextEncoder"
-          :text-encoder-choices="wanTextEncoderChoices"
-          :vae="wanVae"
-          :vae-choices="wanVaeChoices"
-          @update:mode="onWanModeChange"
-          @update:lightx2v="onWanLightx2vChange"
-          @update:highModel="onWanHighModelChange"
-          @update:lowModel="onWanLowModelChange"
-          @update:textEncoder="onWanTextEncoderChange"
-          @update:vae="onWanVaeChange"
-          @browseModels="onWanBrowseModels"
-          @browseTe="onWanBrowseTe"
-          @browseVae="onWanBrowseVae"
-          @refresh="refreshAll"
-          @showMetadata="onShowMetadata"
-        />
+      <template v-else-if="activeFamily === 'wan22_14b'">
+        <div v-if="modelAssetSelectorsReadOnly" class="quicksettings-group qs-group-owner-note">
+          <label class="label-muted">Model Tab Owner</label>
+          <div class="qs-row qs-row-wrap">
+            <span class="caption">Checkpoint, VAE, and Text Encoder are read-only here.</span>
+            <RouterLink class="btn qs-btn-outline qs-inline-btn" :to="modelAssetOwnerRoute">Open model tab</RouterLink>
+          </div>
+        </div>
+        <fieldset class="qs-readonly-fieldset" :disabled="modelAssetSelectorsReadOnly">
+          <QuickSettingsWan
+            :mode="wanInputMode"
+            :lightx2v="wanLightx2v"
+            :high-model="wanHighModel"
+            :high-choices="wanHighDirChoices"
+            :low-model="wanLowModel"
+            :low-choices="wanLowDirChoices"
+            :text-encoder="wanTextEncoder"
+            :text-encoder-choices="wanTextEncoderChoices"
+            :vae="wanVae"
+            :vae-choices="wanVaeChoices"
+            @update:mode="onWanInputModeChange"
+            @update:lightx2v="onWanLightx2vChange"
+            @update:highModel="onWanHighModelChange"
+            @update:lowModel="onWanLowModelChange"
+            @update:textEncoder="onWanTextEncoderChange"
+            @update:vae="onWanVaeChange"
+            @browseModels="onWanBrowseModels"
+            @browseTe="onWanBrowseTe"
+            @browseVae="onWanBrowseVae"
+            @refresh="refreshAll"
+            @showMetadata="onShowMetadata"
+          />
+        </fieldset>
+      </template>
+      <template v-else-if="activeFamily === 'wan22_5b'">
+        <div v-if="modelAssetSelectorsReadOnly" class="quicksettings-group qs-group-owner-note">
+          <label class="label-muted">Model Tab Owner</label>
+          <div class="qs-row qs-row-wrap">
+            <span class="caption">Checkpoint, VAE, and Text Encoder are read-only here.</span>
+            <RouterLink class="btn qs-btn-outline qs-inline-btn" :to="modelAssetOwnerRoute">Open model tab</RouterLink>
+          </div>
+        </div>
+        <fieldset class="qs-readonly-fieldset" :disabled="modelAssetSelectorsReadOnly">
+          <QuickSettingsWan22_5b
+            :mode="wanInputMode"
+            :model="wan5bModel"
+            :model-choices="wan5bModelChoices"
+            :text-encoder="wanTextEncoder"
+            :text-encoder-choices="wanTextEncoderChoices"
+            :vae="wanVae"
+            :vae-choices="wanVaeChoices"
+            @update:mode="onWanInputModeChange"
+            @update:model="onWan5bModelChange"
+            @update:textEncoder="onWanTextEncoderChange"
+            @update:vae="onWanVaeChange"
+            @browseModels="onWanBrowseModels"
+            @browseTe="onWanBrowseTe"
+            @browseVae="onWanBrowseVae"
+            @refresh="refreshAll"
+            @showMetadata="onShowMetadata"
+          />
+        </fieldset>
       </template>
 
-      <!-- FLUX.1-specific quicksettings -->
-      <template v-else-if="activeFamily === 'flux1'">
-        <QuickSettingsFlux
-          :checkpoint="effectiveCheckpoint"
-          :checkpoints="filteredModelTitles"
-          :vae="store.currentVae"
-          :vae-choices="filteredVaeChoices"
-          :text-encoder-primary="flux1TextEncoderPrimary"
-          :text-encoder-secondary="flux1TextEncoderSecondary"
-          :text-encoder-choices="filteredTextEncoderChoices"
-          @update:checkpoint="onModelChange"
-          @update:vae="onVaeChange"
-          @update:textEncoderPrimary="onPrimaryTextEncoderChange"
-          @update:textEncoderSecondary="onSecondaryTextEncoderChange"
-          @addCheckpointPath="onAddCheckpointPath"
-          @addVaePath="onAddVaePath"
-          @addTencPath="onAddTencPath"
-          @showMetadata="onShowMetadata"
-        />
-        <div v-if="canShowModeToggles" class="quicksettings-group qs-group-mode-toggle">
-          <label class="label-muted">Mode</label>
-          <div class="qs-row">
-            <button
-              :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', useInitImage ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
-              type="button"
-              :aria-pressed="useInitImage"
-              @click="onUseInitImageChange(!useInitImage)"
-            >
-              IMG2IMG
-            </button>
-            <button
-              :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', useMask ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
-              type="button"
-              :aria-pressed="useMask"
-              :disabled="inpaintToggleDisabled"
-              :title="inpaintToggleTitle"
-              @click="onUseMaskChange(!useMask)"
-            >
-              INPAINT
-            </button>
+      <!-- FLUX-family-specific quicksettings -->
+      <template v-else-if="activeFamily === 'flux1' || activeFamily === 'flux2'">
+        <div v-if="modelAssetSelectorsReadOnly" class="quicksettings-group qs-group-owner-note">
+          <label class="label-muted">Model Tab Owner</label>
+          <div class="qs-row qs-row-wrap">
+            <span class="caption">Checkpoint, VAE, and Text Encoder are read-only here.</span>
+            <RouterLink class="btn qs-btn-outline qs-inline-btn" :to="modelAssetOwnerRoute">Open model tab</RouterLink>
           </div>
         </div>
-        <div class="quicksettings-group qs-group-models">
-          <label class="label-muted">Models</label>
-          <div class="qs-row">
-            <button class="btn qs-btn-secondary qs-refresh-btn" type="button" @click="refreshAll" title="Refresh lists">Refresh</button>
+        <fieldset class="qs-readonly-fieldset" :disabled="modelAssetSelectorsReadOnly">
+          <QuickSettingsAssetBlock
+            v-if="activeFamily === 'flux1'"
+            :checkpoint="effectiveCheckpoint"
+            :checkpoints="filteredModelTitles"
+            checkpoint-choice-mode="truncate"
+            :vae="store.currentVae"
+            :vae-choices="filteredVaeChoices"
+            vae-choice-mode="truncate"
+            vae-placeholder-label="Select VAE"
+            :text-encoder="flux1TextEncoderPrimary"
+            :text-encoder-choices="filteredTextEncoderChoices"
+            text-encoder-group-label="Text Encoders"
+            text-encoder-group-class="qs-group-flux-tenc"
+            text-encoder-automatic-label="Select CLIP"
+            text-encoder-metadata-kind="text_encoder_primary"
+            show-text-encoder-actions
+            :secondary-text-encoder="flux1TextEncoderSecondary"
+            :secondary-text-encoder-choices="filteredTextEncoderChoices"
+            secondary-text-encoder-automatic-label="Select T5"
+            secondary-text-encoder-metadata-kind="text_encoder_secondary"
+            show-secondary-text-encoder
+            show-secondary-text-encoder-actions
+            @update:checkpoint="onModelChange"
+            @update:vae="onVaeChange"
+            @update:textEncoder="onPrimaryTextEncoderChange"
+            @update:secondaryTextEncoder="onSecondaryTextEncoderChange"
+            @addCheckpointPath="onAddCheckpointPath"
+            @addVaePath="onAddVaePath"
+            @addTencPath="onAddTencPath"
+            @showMetadata="onShowMetadata"
+          />
+          <QuickSettingsAssetBlock
+            v-else
+            :checkpoint="effectiveCheckpoint"
+            :checkpoints="filteredModelTitles"
+            checkpoint-choice-mode="truncate"
+            :vae="store.currentVae"
+            :vae-choices="filteredVaeChoices"
+            vae-choice-mode="truncate"
+            vae-placeholder-label="Select VAE"
+            :text-encoder="flux2TextEncoder"
+            :text-encoder-choices="filteredTextEncoderChoices"
+            :text-encoder-group-label="flux2TextEncoderFieldLabel"
+            text-encoder-group-class="qs-group-flux-tenc"
+            text-encoder-automatic-label="Select Qwen3-4B"
+            show-text-encoder-actions
+            @update:checkpoint="onModelChange"
+            @update:vae="onVaeChange"
+            @update:textEncoder="onPrimaryTextEncoderChange"
+            @addCheckpointPath="onAddCheckpointPath"
+            @addVaePath="onAddVaePath"
+            @addTencPath="onAddTencPath"
+            @showMetadata="onShowMetadata"
+          />
+          <div v-if="canShowModeToggles" class="quicksettings-group qs-group-mode-toggle">
+            <label class="label-muted">Mode</label>
+            <div class="qs-row">
+              <button
+                :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', useInitImage ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
+                type="button"
+                :aria-pressed="useInitImage"
+                @click="onUseInitImageChange(!useInitImage)"
+              >
+                IMG2IMG
+              </button>
+              <button
+                :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', useMask ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
+                type="button"
+                :aria-pressed="useMask"
+                :disabled="inpaintToggleDisabled"
+                :title="inpaintToggleTitle"
+                @click="onUseMaskChange(!useMask)"
+              >
+                INPAINT
+              </button>
+            </div>
           </div>
-        </div>
+          <div class="quicksettings-group qs-group-models">
+            <label class="label-muted">Models</label>
+            <div class="qs-row">
+              <button
+                class="btn qs-btn-secondary qs-refresh-btn"
+                type="button"
+                :disabled="isLoadingQuicksettings"
+                title="Refresh lists"
+                @click="refreshAll"
+              >
+                Refresh
+              </button>
+            </div>
+          </div>
+        </fieldset>
       </template>
 
       <!-- Z Image-specific quicksettings -->
       <template v-else-if="activeFamily === 'zimage'">
-        <QuickSettingsZImage
-          :checkpoint="effectiveCheckpoint"
-          :checkpoints="filteredModelTitles"
-          :turbo="zimageTurbo"
-          :turbo-locked="zimageTurboLocked"
-          :vae="store.currentVae"
-          :vae-choices="filteredVaeChoices"
-          :text-encoder="primaryTextEncoder"
-          :text-encoder-choices="filteredTextEncoderChoices"
-          @update:checkpoint="onModelChange"
-          @update:turbo="onZImageTurboChange"
-          @update:vae="onVaeChange"
-          @update:textEncoder="onPrimaryTextEncoderChange"
-          @addCheckpointPath="onAddCheckpointPath"
-          @addVaePath="onAddVaePath"
-          @addTencPath="onAddTencPath"
-          @showMetadata="onShowMetadata"
-        />
-        <div v-if="canShowModeToggles" class="quicksettings-group qs-group-mode-toggle qs-group-mode-toggle--end">
-          <label class="label-muted">Mode</label>
-          <div class="qs-row">
-            <button
-              :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', useInitImage ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
-              type="button"
-              :aria-pressed="useInitImage"
-              @click="onUseInitImageChange(!useInitImage)"
-            >
-              IMG2IMG
-            </button>
-            <button
-              :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', useMask ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
-              type="button"
-              :aria-pressed="useMask"
-              :disabled="inpaintToggleDisabled"
-              :title="inpaintToggleTitle"
-              @click="onUseMaskChange(!useMask)"
-            >
-              INPAINT
-            </button>
+        <div v-if="modelAssetSelectorsReadOnly" class="quicksettings-group qs-group-owner-note">
+          <label class="label-muted">Model Tab Owner</label>
+          <div class="qs-row qs-row-wrap">
+            <span class="caption">Checkpoint, VAE, and Text Encoder are read-only here.</span>
+            <RouterLink class="btn qs-btn-outline qs-inline-btn" :to="modelAssetOwnerRoute">Open model tab</RouterLink>
           </div>
         </div>
-        <div class="quicksettings-group qs-group-models">
-          <label class="label-muted">Models</label>
-          <div class="qs-row">
-            <button class="btn qs-btn-secondary qs-refresh-btn" type="button" @click="refreshAll" title="Refresh lists">Refresh</button>
+        <fieldset class="qs-readonly-fieldset" :disabled="modelAssetSelectorsReadOnly">
+          <QuickSettingsAssetBlock
+            :checkpoint="effectiveCheckpoint"
+            :checkpoints="filteredModelTitles"
+            checkpoint-label="Model"
+            checkpoint-choice-mode="truncate"
+            :vae="store.currentVae"
+            :vae-choices="filteredVaeChoices"
+            vae-choice-mode="truncate"
+            vae-placeholder-label="Select VAE"
+            :text-encoder="primaryTextEncoder"
+            :text-encoder-choices="filteredTextEncoderChoices"
+            text-encoder-group-label="Text Encoder (Qwen3)"
+            text-encoder-automatic-label="Select Text Encoder"
+            show-text-encoder-actions
+            @update:checkpoint="onModelChange"
+            @update:vae="onVaeChange"
+            @update:textEncoder="onPrimaryTextEncoderChange"
+            @addCheckpointPath="onAddCheckpointPath"
+            @addVaePath="onAddVaePath"
+            @addTencPath="onAddTencPath"
+            @showMetadata="onShowMetadata"
+          >
+            <template #after-checkpoint>
+              <div class="quicksettings-group qs-group-zimage-turbo">
+                <div class="qs-row">
+                  <button
+                    :class="['btn', 'qs-toggle-btn', zimageTurbo ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
+                    type="button"
+                    :aria-pressed="zimageTurbo"
+                    :disabled="zimageTurboLocked"
+                    :title="zimageTurboLocked ? 'Turbo variant is fixed by model metadata' : 'Toggle Turbo variant'"
+                    @click="onZImageTurboChange(!zimageTurbo)"
+                  >
+                    Turbo
+                  </button>
+                </div>
+              </div>
+            </template>
+          </QuickSettingsAssetBlock>
+          <div v-if="canShowModeToggles" class="quicksettings-group qs-group-mode-toggle qs-group-mode-toggle--end">
+            <label class="label-muted">Mode</label>
+            <div class="qs-row">
+              <button
+                :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', useInitImage ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
+                type="button"
+                :aria-pressed="useInitImage"
+                @click="onUseInitImageChange(!useInitImage)"
+              >
+                IMG2IMG
+              </button>
+              <button
+                :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', useMask ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
+                type="button"
+                :aria-pressed="useMask"
+                :disabled="inpaintToggleDisabled"
+                :title="inpaintToggleTitle"
+                @click="onUseMaskChange(!useMask)"
+              >
+                INPAINT
+              </button>
+            </div>
           </div>
-        </div>
+          <div class="quicksettings-group qs-group-models">
+            <label class="label-muted">Models</label>
+            <div class="qs-row">
+              <button class="btn qs-btn-secondary qs-refresh-btn" type="button" @click="refreshAll" title="Refresh lists">Refresh</button>
+            </div>
+          </div>
+        </fieldset>
       </template>
 
       <!-- Chroma-specific quicksettings -->
       <template v-else-if="activeFamily === 'chroma'">
-        <QuickSettingsChroma
-          :checkpoint="effectiveCheckpoint"
-          :checkpoints="filteredModelTitles"
-          :vae="store.currentVae"
-          :vae-choices="filteredVaeChoices"
-          :text-encoder="primaryTextEncoder"
-          :text-encoder-choices="filteredTextEncoderChoices"
-          :show-text-encoder="store.isModelCoreOnly(effectiveCheckpoint)"
-          @update:checkpoint="onModelChange"
-          @update:vae="onVaeChange"
-          @update:textEncoder="onPrimaryTextEncoderChange"
-          @addCheckpointPath="onAddCheckpointPath"
-          @addVaePath="onAddVaePath"
-          @addTencPath="onAddTencPath"
-          @showMetadata="onShowMetadata"
-        />
-        <div v-if="canShowModeToggles" class="quicksettings-group qs-group-mode-toggle">
-          <label class="label-muted">Mode</label>
-          <div class="qs-row">
-            <button
-              :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', useInitImage ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
-              type="button"
-              :aria-pressed="useInitImage"
-              @click="onUseInitImageChange(!useInitImage)"
-            >
-              IMG2IMG
-            </button>
-            <button
-              :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', useMask ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
-              type="button"
-              :aria-pressed="useMask"
-              :disabled="inpaintToggleDisabled"
-              :title="inpaintToggleTitle"
-              @click="onUseMaskChange(!useMask)"
-            >
-              INPAINT
-            </button>
+        <div v-if="modelAssetSelectorsReadOnly" class="quicksettings-group qs-group-owner-note">
+          <label class="label-muted">Model Tab Owner</label>
+          <div class="qs-row qs-row-wrap">
+            <span class="caption">Checkpoint, VAE, and Text Encoder are read-only here.</span>
+            <RouterLink class="btn qs-btn-outline qs-inline-btn" :to="modelAssetOwnerRoute">Open model tab</RouterLink>
           </div>
         </div>
-        <div class="quicksettings-group qs-group-models">
-          <label class="label-muted">Models</label>
-          <div class="qs-row">
-            <button class="btn qs-btn-secondary qs-refresh-btn" type="button" @click="refreshAll" title="Refresh lists">Refresh</button>
+        <fieldset class="qs-readonly-fieldset" :disabled="modelAssetSelectorsReadOnly">
+          <QuickSettingsAssetBlock
+            :checkpoint="effectiveCheckpoint"
+            :checkpoints="filteredModelTitles"
+            checkpoint-label="Model"
+            checkpoint-choice-mode="truncate"
+            :vae="store.currentVae"
+            :vae-choices="filteredVaeChoices"
+            vae-choice-mode="truncate"
+            vae-placeholder-label="Select VAE"
+            :text-encoder="primaryTextEncoder"
+            :text-encoder-choices="filteredTextEncoderChoices"
+            text-encoder-group-label="Text Encoder (T5)"
+            text-encoder-automatic-label="Select Text Encoder"
+            :show-text-encoder="store.isModelCoreOnly(effectiveCheckpoint)"
+            show-text-encoder-actions
+            @update:checkpoint="onModelChange"
+            @update:vae="onVaeChange"
+            @update:textEncoder="onPrimaryTextEncoderChange"
+            @addCheckpointPath="onAddCheckpointPath"
+            @addVaePath="onAddVaePath"
+            @addTencPath="onAddTencPath"
+            @showMetadata="onShowMetadata"
+          />
+          <div v-if="canShowModeToggles" class="quicksettings-group qs-group-mode-toggle">
+            <label class="label-muted">Mode</label>
+            <div class="qs-row">
+              <button
+                :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', useInitImage ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
+                type="button"
+                :aria-pressed="useInitImage"
+                @click="onUseInitImageChange(!useInitImage)"
+              >
+                IMG2IMG
+              </button>
+              <button
+                :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', useMask ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
+                type="button"
+                :aria-pressed="useMask"
+                :disabled="inpaintToggleDisabled"
+                :title="inpaintToggleTitle"
+                @click="onUseMaskChange(!useMask)"
+              >
+                INPAINT
+              </button>
+            </div>
+          </div>
+          <div class="quicksettings-group qs-group-models">
+            <label class="label-muted">Models</label>
+            <div class="qs-row">
+              <button class="btn qs-btn-secondary qs-refresh-btn" type="button" @click="refreshAll" title="Refresh lists">Refresh</button>
+            </div>
+          </div>
+        </fieldset>
+      </template>
+
+      <!-- LTX quicksettings -->
+      <template v-else-if="activeFamily === 'ltx2'">
+        <div v-if="modelAssetSelectorsReadOnly" class="quicksettings-group qs-group-owner-note">
+          <label class="label-muted">Model Tab Owner</label>
+          <div class="qs-row qs-row-wrap">
+            <span class="caption">Checkpoint, VAE, and Text Encoder are read-only here.</span>
+            <RouterLink class="btn qs-btn-outline qs-inline-btn" :to="modelAssetOwnerRoute">Open model tab</RouterLink>
           </div>
         </div>
+        <fieldset class="qs-readonly-fieldset" :disabled="modelAssetSelectorsReadOnly">
+          <div class="quicksettings-group qs-group-mode-toggle">
+            <label class="label-muted">Mode</label>
+            <div class="qs-row">
+              <button
+                :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', activeLtxMode === 'txt2vid' ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
+                type="button"
+                :disabled="ltxQuicksettingsDisabled"
+                :title="ltxModeToggleTitle"
+                :aria-pressed="activeLtxMode === 'txt2vid'"
+                @click="onLtxModeChange('txt2vid')"
+              >
+                TXT2VID
+              </button>
+              <button
+                :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', activeLtxMode === 'img2vid' ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
+                type="button"
+                :disabled="ltxQuicksettingsDisabled"
+                :title="ltxModeToggleTitle"
+                :aria-pressed="activeLtxMode === 'img2vid'"
+                @click="onLtxModeChange('img2vid')"
+              >
+                IMG2VID
+              </button>
+            </div>
+          </div>
+          <QuickSettingsAssetBlock
+            :checkpoint="effectiveCheckpoint"
+            :checkpoints="filteredModelTitles"
+            :vae="effectiveVae"
+            :vae-choices="filteredVaeChoices"
+            :text-encoder="primaryTextEncoder"
+            :text-encoder-choices="filteredTextEncoderChoices"
+            text-encoder-automatic-label="Select text encoder"
+            :show-text-encoder="true"
+            :show-text-encoder-actions="true"
+            :disabled="ltxQuicksettingsDisabled"
+            @update:checkpoint="onModelChange"
+            @update:vae="onVaeChange"
+            @update:textEncoder="onPrimaryTextEncoderChange"
+            @addCheckpointPath="onAddCheckpointPath"
+            @addVaePath="onAddVaePath"
+            @addTencPath="onAddTencPath"
+            @showMetadata="onShowMetadata"
+          />
+          <div v-if="ltxRouteHydrating" class="caption">Loading LTX tab settings...</div>
+          <div class="quicksettings-group qs-group-models">
+            <label class="label-muted">Models</label>
+            <div class="qs-row">
+              <button
+                class="btn qs-btn-secondary qs-refresh-btn"
+                type="button"
+                :disabled="isLoadingQuicksettings || ltxQuicksettingsDisabled"
+                :title="ltxRefreshTitle"
+                @click="refreshAll"
+              >
+                Refresh
+              </button>
+            </div>
+          </div>
+        </fieldset>
       </template>
 
       <!-- Default (SD15/SDXL) quicksettings -->
       <template v-else>
-        <QuickSettingsBase
-          :checkpoint="effectiveCheckpoint"
-          :checkpoints="filteredModelTitles"
-          :vae="store.currentVae"
-          :vae-choices="filteredVaeChoices"
-          :text-encoder="primaryTextEncoder"
-          :text-encoder-choices="filteredTextEncoderChoices"
-          text-encoder-automatic-label="Built-in"
-          :show-text-encoder="activeFamily !== 'sd15' && activeFamily !== 'sdxl'"
-          @update:checkpoint="onModelChange"
-          @update:vae="onVaeChange"
-          @update:textEncoder="onPrimaryTextEncoderChange"
-          @addCheckpointPath="onAddCheckpointPath"
-          @addVaePath="onAddVaePath"
-          @showMetadata="onShowMetadata"
-        />
-        <div v-if="canShowModeToggles" class="quicksettings-group qs-group-mode-toggle">
-          <label class="label-muted">Mode</label>
-          <div class="qs-row">
-            <button
-              :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', useInitImage ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
-              type="button"
-              :aria-pressed="useInitImage"
-              @click="onUseInitImageChange(!useInitImage)"
-            >
-              IMG2IMG
-            </button>
-            <button
-              :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', useMask ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
-              type="button"
-              :aria-pressed="useMask"
-              :disabled="inpaintToggleDisabled"
-              :title="inpaintToggleTitle"
-              @click="onUseMaskChange(!useMask)"
-            >
-              INPAINT
-            </button>
+        <div v-if="modelAssetSelectorsReadOnly" class="quicksettings-group qs-group-owner-note">
+          <label class="label-muted">Model Tab Owner</label>
+          <div class="qs-row qs-row-wrap">
+            <span class="caption">Checkpoint, VAE, and Text Encoder are read-only here.</span>
+            <RouterLink class="btn qs-btn-outline qs-inline-btn" :to="modelAssetOwnerRoute">Open model tab</RouterLink>
           </div>
         </div>
-        <div class="quicksettings-group qs-group-models">
-          <label class="label-muted">Models</label>
-          <div class="qs-row">
-            <button class="btn qs-btn-secondary qs-refresh-btn" type="button" @click="refreshAll" title="Refresh lists">Refresh</button>
+        <fieldset class="qs-readonly-fieldset" :disabled="modelAssetSelectorsReadOnly">
+          <QuickSettingsAssetBlock
+            :checkpoint="effectiveCheckpoint"
+            :checkpoints="filteredModelTitles"
+            :vae="store.currentVae"
+            :vae-choices="filteredVaeChoices"
+            :text-encoder="primaryTextEncoder"
+            :text-encoder-choices="filteredTextEncoderChoices"
+            text-encoder-automatic-label="Built-in"
+            :show-text-encoder="activeFamily !== 'sd15' && activeFamily !== 'sdxl'"
+            @update:checkpoint="onModelChange"
+            @update:vae="onVaeChange"
+            @update:textEncoder="onPrimaryTextEncoderChange"
+            @addCheckpointPath="onAddCheckpointPath"
+            @addVaePath="onAddVaePath"
+            @showMetadata="onShowMetadata"
+          />
+          <div v-if="canShowModeToggles" class="quicksettings-group qs-group-mode-toggle">
+            <label class="label-muted">Mode</label>
+            <div class="qs-row">
+              <button
+                :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', useInitImage ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
+                type="button"
+                :aria-pressed="useInitImage"
+                @click="onUseInitImageChange(!useInitImage)"
+              >
+                IMG2IMG
+              </button>
+              <button
+                :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', useMask ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
+                type="button"
+                :aria-pressed="useMask"
+                :disabled="inpaintToggleDisabled"
+                :title="inpaintToggleTitle"
+                @click="onUseMaskChange(!useMask)"
+              >
+                INPAINT
+              </button>
+              <button
+                v-if="canShowSupirToggle"
+                :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', supirEnabled ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
+                type="button"
+                :aria-pressed="supirEnabled"
+                :disabled="supirToggleDisabled"
+                :title="supirToggleTitle"
+                @click="onSupirModeChange(!supirEnabled)"
+              >
+                SUPIR
+              </button>
+            </div>
           </div>
-        </div>
+          <div class="quicksettings-group qs-group-models">
+            <label class="label-muted">Models</label>
+            <div class="qs-row">
+              <button class="btn qs-btn-secondary qs-refresh-btn" type="button" @click="refreshAll" title="Refresh lists">Refresh</button>
+            </div>
+          </div>
+        </fieldset>
       </template>
     </div>
 
     <div v-if="qsNotice" class="caption">{{ qsNotice }}</div>
 
-    <div ref="advancedRowEl" class="quicksettings-advanced-collapse" :data-state="advancedOpen ? 'open' : 'closed'">
+    <div
+      ref="advancedRowEl"
+      class="quicksettings-advanced-collapse"
+      :data-ready="advancedRowReady ? 'true' : 'false'"
+      :data-state="advancedOpen ? 'open' : 'closed'"
+    >
       <div ref="advancedRowInnerEl" class="quicksettings-row quicksettings-row--advanced-inner">
         <QuickSettingsPerf
           :smart-offload="store.smartOffload"
@@ -399,31 +676,34 @@ import { useRoute } from 'vue-router'
 import { useQuicksettingsStore } from '../stores/quicksettings'
 import { useUiPresetsStore } from '../stores/ui_presets'
 import { useUiBlocksStore } from '../stores/ui_blocks'
-import { MODEL_TABS_STORAGE_KEY, useModelTabsStore, type ImageBaseParams, type TabByType, type WanAssetsParams, type WanStageParams } from '../stores/model_tabs'
+import { MODEL_TABS_STORAGE_KEY, useModelTabsStore, type ImageBaseParams, type LtxGenerationMode, type TabByType, type Wan5bStageParams, type WanAssetsParams, type WanStageParams, type WanTabType } from '../stores/model_tabs'
 import { useEngineCapabilitiesStore } from '../stores/engine_capabilities'
-import { useBootstrapStore } from '../stores/bootstrap'
 import {
-  cacheModelInventorySnapshot,
   fetchCheckpointMetadata,
   fetchFileMetadata,
-  fetchModelInventory,
-  fetchPaths,
+  fetchFreshPaths,
   fetchObliterateVram,
-  refreshModelInventory,
-  startModelInventoryRefreshTask,
-  subscribeTask,
 } from '../api/client'
-import type { InventoryResponse, ModelInfo, TaskEvent } from '../api/types'
+import type { InventoryResponse, ModelInfo } from '../api/types'
 import { isGenerationRunningForTab } from '../composables/useGeneration'
+import { isLtxGenerationRunningForTab } from '../composables/useLtxVideoGeneration'
 import { useResultsCard } from '../composables/useResultsCard'
-import { normalizeTabFamily, tabFamilyFromSemanticEngine, type TabFamily } from '../utils/engine_taxonomy'
+import { useSupirDiagnostics, resolveSupirSelectionState } from '../composables/useSupirDiagnostics'
+import {
+  isWanTabFamily,
+  normalizeTabFamily,
+  normalizeSemanticEngine,
+  resolveImageRequestEngineId,
+  tabFamilyFromSemanticEngine,
+  type TabFamily,
+} from '../utils/engine_taxonomy'
+import { buildUseInitImagePatch } from '../utils/image_params'
 import { filterModelTitlesForFamily, enginePrefixForFamily } from '../utils/model_family_filters'
-import QuickSettingsBase from './quicksettings/QuickSettingsBase.vue'
+import { buildFamilyVaeChoices, canonicalizeVaeChoice, type InventoryVaeChoice } from '../utils/vae_choices'
+import QuickSettingsAssetBlock from './quicksettings/QuickSettingsAssetBlock.vue'
 import QuickSettingsPerf from './quicksettings/QuickSettingsPerf.vue'
 import QuickSettingsWan from './quicksettings/QuickSettingsWan.vue'
-import QuickSettingsFlux from './quicksettings/QuickSettingsFlux.vue'
-import QuickSettingsChroma from './quicksettings/QuickSettingsChroma.vue'
-import QuickSettingsZImage from './quicksettings/QuickSettingsZImage.vue'
+import QuickSettingsWan22_5b from './quicksettings/QuickSettingsWan22_5b.vue'
 import QuickSettingsOverridesModal from './modals/QuickSettingsOverridesModal.vue'
 import QuickSettingsAddPathModal from './modals/QuickSettingsAddPathModal.vue'
 import AssetMetadataModal from './modals/AssetMetadataModal.vue'
@@ -435,15 +715,14 @@ const route = useRoute()
 const uiBlocks = useUiBlocksStore()
 const tabsStore = useModelTabsStore()
 const engineCaps = useEngineCapabilitiesStore()
-const bootstrap = useBootstrapStore()
-const pathsConfig = ref<Record<string, string[]>>({})
-type InventoryVae = { name: string; path: string; sha256?: string; format: string; latent_channels?: number | null; scaling_factor?: number | null }
-type InventoryWanGguf = { name: string; path: string; sha256?: string; stage: string }
+type WanInventoryVariant = 'wan22_5b' | 'wan22_14b' | 'wan22_14b_animate'
+type InventoryWanGguf = { name: string; path: string; sha256?: string; stage: string; variant?: WanInventoryVariant; repoHint?: string }
 type InventoryTextEncoder = { name: string; path: string; sha256?: string }
-type ImageTab = TabByType<'sd15' | 'sdxl' | 'flux1' | 'zimage' | 'chroma' | 'anima'>
-type WanTab = TabByType<'wan'>
+type ImageTab = TabByType<'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'zimage' | 'chroma' | 'anima'>
+type LtxTab = TabByType<'ltx2'>
+type Wan14bTab = TabByType<'wan22_14b'>
+type Wan5bTab = TabByType<'wan22_5b'>
 type AddPathTargetKind = 'checkpoint' | 'vae' | 'text_encoder'
-const inventoryVaes = ref<InventoryVae[]>([])
 const inventoryWan = ref<InventoryWanGguf[]>([])
 const inventoryTextEncoders = ref<InventoryTextEncoder[]>([])
 const showOverridesModal = ref(false)
@@ -465,6 +744,10 @@ const pathInputModalValue = ref('')
 const pathInputEl = ref<HTMLInputElement | null>(null)
 let pathInputApply: ((value: string) => Promise<void>) | null = null
 const { notice: qsNotice, toast: qsToast } = useResultsCard({ noticeDurationMs: 4000 })
+const {
+  ensureSupirDiagnosticsLoaded: ensureSharedSupirDiagnosticsLoaded,
+  reloadSupirDiagnostics: reloadSharedSupirDiagnostics,
+} = useSupirDiagnostics()
 const isLoadingQuicksettings = ref(false)
 const isQuicksettingsReady = ref(false)
 const isObliteratingVram = ref(false)
@@ -472,8 +755,8 @@ const QUICKSETTINGS_ADVANCED_OPEN_STORAGE_KEY = 'codex.quicksettings.advanced_op
 const advancedOpen = ref(true)
 const advancedRowEl = ref<HTMLElement | null>(null)
 const advancedRowInnerEl = ref<HTMLElement | null>(null)
-const advancedAnimating = ref(false)
-let advancedRafId: number | null = null
+const advancedRowReady = ref(false)
+let advancedRowResizeObserver: ResizeObserver | null = null
 
 try {
   const stored = localStorage.getItem(QUICKSETTINGS_ADVANCED_OPEN_STORAGE_KEY)
@@ -491,85 +774,47 @@ watch(advancedOpen, (isOpen) => {
   }
 })
 
-function cancelAdvancedAnimation(): void {
-  if (advancedRafId !== null) cancelAnimationFrame(advancedRafId)
-  advancedRafId = null
-}
-
-function easeOutCubic(t: number): number {
-  const clamped = Math.min(1, Math.max(0, t))
-  return 1 - Math.pow(1 - clamped, 3)
-}
-
-function syncAdvancedHeight(): void {
+function syncAdvancedTargetHeight(): void {
   const el = advancedRowEl.value
   const inner = advancedRowInnerEl.value
   if (!el || !inner) return
-  if (advancedAnimating.value) return
-  if (!advancedOpen.value) {
-    el.style.height = '0px'
-    el.style.opacity = '0'
-    return
-  }
-  const nextHeight = inner.getBoundingClientRect().height
-  if (nextHeight > 0) {
-    el.style.height = `${nextHeight}px`
-    el.style.opacity = ''
-  }
+
+  const nextHeight = Math.ceil(inner.getBoundingClientRect().height)
+  el.style.setProperty('--qs-advanced-target-height', `${nextHeight}px`)
+  if (!advancedRowReady.value) advancedRowReady.value = true
 }
 
 function toggleAdvancedRow(): void {
-  const el = advancedRowEl.value
-  if (!el) {
-    advancedOpen.value = !advancedOpen.value
-    return
-  }
-  if (advancedAnimating.value) return
-
-  cancelAdvancedAnimation()
-
-  const startHeight = el.getBoundingClientRect().height
-
-  const next = !advancedOpen.value
-  advancedOpen.value = next
-  advancedAnimating.value = true
-
-  el.style.pointerEvents = 'none'
-
-  const inner = advancedRowInnerEl.value
-  const targetHeight = next ? (inner?.getBoundingClientRect().height ?? el.scrollHeight) : 0
-  const durationMs = next ? 280 : 260
-  const fromOpacity = next ? 0 : 1
-  const toOpacity = next ? 1 : 0
-
-  el.style.height = `${startHeight}px`
-  el.style.opacity = `${fromOpacity}`
-
-  const startMs = performance.now()
-  const tick = (nowMs: number) => {
-    const t = (nowMs - startMs) / durationMs
-    const eased = easeOutCubic(t)
-    const currentHeight = startHeight + (targetHeight - startHeight) * eased
-    const currentOpacity = fromOpacity + (toOpacity - fromOpacity) * eased
-    el.style.height = `${currentHeight}px`
-    el.style.opacity = `${currentOpacity}`
-
-    if (t < 1) {
-      advancedRafId = requestAnimationFrame(tick)
-      return
-    }
-
-    advancedRafId = null
-    el.style.height = `${targetHeight}px`
-    el.style.opacity = next ? '' : '0'
-    el.style.pointerEvents = ''
-    advancedAnimating.value = false
-  }
-
-  advancedRafId = requestAnimationFrame(tick)
+  advancedOpen.value = !advancedOpen.value
 }
 
-function currentTab(): 'txt2img' | 'img2img' | 'txt2vid' | 'img2vid' {
+type UiPresetTab = 'txt2img' | 'img2img' | 'txt2vid' | 'img2vid'
+
+function currentTab(): UiPresetTab | null {
+  const modelTab = activeModelTab.value
+  if (route.path.startsWith('/models/')) {
+    if (!modelTab) return null
+    if (modelTab.type === 'wan22_14b') {
+      const wanTab = asWan14bTab(modelTab)
+      if (!wanTab) return null
+      return wanTab.params.video.useInitImage ? 'img2vid' : 'txt2vid'
+    }
+    if (modelTab.type === 'wan22_5b') {
+      const params = modelTab.params as { video?: { useInitImage?: unknown } }
+      return params.video?.useInitImage === true ? 'img2vid' : 'txt2vid'
+    }
+    if (modelTab.type === 'ltx2') {
+      const ltxTab = asLtxTab(modelTab)
+      if (!ltxTab) return null
+      return ltxTab.params.mode
+    }
+    const imageTab = asImageTab(modelTab)
+    if (imageTab) {
+      return imageTab.params.useInitImage ? 'img2img' : 'txt2img'
+    }
+    return null
+  }
+
   const p = route.path
   if (p.startsWith('/img2img')) return 'img2img'
   if (p.startsWith('/txt2vid')) return 'txt2vid'
@@ -577,9 +822,42 @@ function currentTab(): 'txt2img' | 'img2img' | 'txt2vid' | 'img2vid' {
   return 'txt2img'
 }
 
+const resolvedPresetTab = computed<UiPresetTab | null>(() => currentTab())
+
 const routeTabId = computed(() => String(route.params.tabId || ''))
+const isModelTabRoute = computed(() => route.path.startsWith('/models/') && Boolean(routeTabId.value))
+const modelAssetSelectorsReadOnly = computed(() => !isModelTabRoute.value)
+function tabUpdatedAtMs(tab: { meta?: { updatedAt?: string } }): number {
+  const parsed = Date.parse(String(tab.meta?.updatedAt || ''))
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+const modelAssetOwnerTab = computed(() => {
+  const current = activeModelTab.value
+  if (current?.id && normalizeTabFamily(current.type) === activeFamily.value) {
+    return current
+  }
+  const active = tabsStore.activeTab
+  if (active?.id && normalizeTabFamily(active.type) === activeFamily.value) {
+    return active
+  }
+  let latestCompatible: (typeof tabsStore.tabs)[number] | null = null
+  for (const tab of tabsStore.tabs) {
+    if (normalizeTabFamily(tab.type) !== activeFamily.value) continue
+    if (!latestCompatible || tabUpdatedAtMs(tab) > tabUpdatedAtMs(latestCompatible)) {
+      latestCompatible = tab
+    }
+  }
+  return latestCompatible
+})
+
+const modelAssetOwnerRoute = computed(() => {
+  const owner = modelAssetOwnerTab.value
+  if (owner?.id) return `/models/${owner.id}`
+  return '/models'
+})
 const activeModelTab = computed(() => {
-  if (!route.path.startsWith('/models/')) return null
+  if (!isModelTabRoute.value) return null
   const id = routeTabId.value
   if (!id) return null
   const fromList = tabsStore.tabs.find(t => t.id === id) || null
@@ -593,14 +871,26 @@ function asImageTab(value: unknown): ImageTab | null {
   if (!value || typeof value !== 'object') return null
   const candidate = value as { type?: unknown }
   const type = normalizeTabFamily(candidate.type)
-  if (!type || type === 'wan') return null
+  if (!type || isWanTabFamily(type) || type === 'ltx2') return null
   return value as ImageTab
 }
 
-function asWanTab(value: unknown): WanTab | null {
+function asWan14bTab(value: unknown): Wan14bTab | null {
   if (!value || typeof value !== 'object') return null
   const candidate = value as { type?: unknown }
-  return normalizeTabFamily(candidate.type) === 'wan' ? (value as WanTab) : null
+  return normalizeTabFamily(candidate.type) === 'wan22_14b' ? (value as Wan14bTab) : null
+}
+
+function asWan5bTab(value: unknown): Wan5bTab | null {
+  if (!value || typeof value !== 'object') return null
+  const candidate = value as { type?: unknown }
+  return normalizeTabFamily(candidate.type) === 'wan22_5b' ? (value as Wan5bTab) : null
+}
+
+function asLtxTab(value: unknown): LtxTab | null {
+  if (!value || typeof value !== 'object') return null
+  const candidate = value as { type?: unknown }
+  return normalizeTabFamily(candidate.type) === 'ltx2' ? (value as unknown as LtxTab) : null
 }
 
 function tabFamilyFromStorage(tabId: string): TabFamily | null {
@@ -621,10 +911,26 @@ function tabFamilyFromStorage(tabId: string): TabFamily | null {
   }
 }
 
+const resolvedRouteTabFamily = computed<TabFamily | null>(() => {
+  if (!isModelTabRoute.value) return null
+  return normalizeTabFamily(activeModelTab.value?.type) || tabFamilyFromStorage(routeTabId.value)
+})
+
+const routeTabSyncPending = ref(isModelTabRoute.value)
+const routeTabSyncError = ref('')
+const routeTabHydrating = computed(() => isModelTabRoute.value && !activeModelTab.value && routeTabSyncPending.value)
+const routeTabLoadFailed = computed(() => isModelTabRoute.value && !activeModelTab.value && !routeTabSyncPending.value && routeTabSyncError.value.length > 0)
+const routeTabMissing = computed(() => isModelTabRoute.value && !activeModelTab.value && !routeTabSyncPending.value && routeTabSyncError.value.length === 0)
+
 let routeActiveSyncToken = 0
 watch(routeTabId, async (tabId) => {
   const token = ++routeActiveSyncToken
-  if (!tabId) return
+  routeTabSyncPending.value = Boolean(tabId)
+  routeTabSyncError.value = ''
+  if (!tabId) {
+    routeTabSyncPending.value = false
+    return
+  }
   try {
     if (!tabsStore.tabs.length) {
       await tabsStore.load()
@@ -632,19 +938,24 @@ watch(routeTabId, async (tabId) => {
     if (token !== routeActiveSyncToken) return
     tabsStore.setActive(tabId)
   } catch (error) {
+    routeTabSyncError.value = error instanceof Error ? (error.message || error.name || 'Unknown error') : String(error)
     toastQuicksettingsError(error)
+  } finally {
+    if (token === routeActiveSyncToken) {
+      routeTabSyncPending.value = false
+    }
   }
 }, { immediate: true })
 
 const activeFamily = computed<TabFamily>(() => {
-  if (route.path.startsWith('/models/') && routeTabId.value) {
-    const type = normalizeTabFamily(activeModelTab.value?.type) || tabFamilyFromStorage(routeTabId.value)
+  if (isModelTabRoute.value) {
+    const type = resolvedRouteTabFamily.value
     if (type) return type
   }
 
   // Fallback when no model tab is active (settings/tools pages etc.).
   if (!engineCaps.loaded) return 'sd15'
-  const semantic = engineCaps.semanticEngineForId(uiBlocks.semanticEngine || 'sd15')
+  const semantic = normalizeSemanticEngine(uiBlocks.semanticEngine || 'sd15')
   const family = tabFamilyFromSemanticEngine(semantic)
   if (family) return family
 
@@ -657,25 +968,31 @@ const semanticEngine = computed<string>(() => {
 })
 
 async function loadInventory(options?: { forceRefresh?: boolean }): Promise<void> {
-  const inv = options?.forceRefresh ? await refreshModelInventory() : await fetchModelInventory()
+  const inv = await store.fetchInventoryWithLoraHydration({
+    refresh: options?.forceRefresh === true,
+  })
   applyInventorySnapshot(inv)
 }
 
 function applyInventorySnapshot(inv: InventoryResponse): void {
-  inventoryVaes.value = inv.vaes
+  store.hydrateVaeInventorySnapshot(inv)
   inventoryWan.value = (inv.wan22?.gguf ?? []).map((g) => ({
     name: String(g.name),
     path: String(g.path),
     sha256: typeof g?.sha256 === 'string' ? String(g.sha256) : undefined,
     stage: String(g.stage || 'unknown'),
+    variant: g?.variant,
+    repoHint: typeof g?.repo_hint === 'string' ? String(g.repo_hint) : undefined,
   }))
   // Text encoder files are available via inventory for future use (e.g., Flux overrides).
   inventoryTextEncoders.value = inv.text_encoders ?? []
 }
 
 async function loadPaths(): Promise<void> {
-  const res = await fetchPaths()
-  pathsConfig.value = (res.paths || {}) as Record<string, string[]>
+  const requestEpoch = store.getAssetSnapshotEpoch()
+  const res = await fetchFreshPaths()
+  if (requestEpoch !== store.getAssetSnapshotEpoch()) return
+  store.hydratePathsSnapshot((res.paths || {}) as Record<string, string[]>)
 }
 
 function normalizePath(path: string): string {
@@ -688,6 +1005,7 @@ type MetadataKind =
   | 'text_encoder'
   | 'text_encoder_primary'
   | 'text_encoder_secondary'
+  | 'wan_model'
   | 'wan_high_model'
   | 'wan_low_model'
   | 'wan_text_encoder'
@@ -705,6 +1023,7 @@ function parseMetadataKind(value: unknown): MetadataKind | null {
     || kind === 'text_encoder'
     || kind === 'text_encoder_primary'
     || kind === 'text_encoder_secondary'
+    || kind === 'wan_model'
     || kind === 'wan_high_model'
     || kind === 'wan_low_model'
     || kind === 'wan_text_encoder'
@@ -744,7 +1063,7 @@ function stripFamilyPrefix(label: string): string {
   const prefix = norm.slice(0, idx)
   const rest = norm.slice(idx + 1)
   if (!rest) return norm
-  if (['sd15', 'sdxl', 'flux1', 'chroma', 'wan22', 'zimage'].includes(prefix)) return rest
+  if (['sd15', 'sdxl', 'flux1', 'flux2', 'chroma', 'wan22', 'zimage'].includes(prefix)) return rest
   return norm
 }
 
@@ -758,12 +1077,12 @@ function findModelByTitle(title: string): ModelInfo | undefined {
   return undefined
 }
 
-function findVaeRecord(label: string): InventoryVae | undefined {
+function findVaeRecord(label: string): InventoryVaeChoice | undefined {
   const raw = String(label || '').trim()
   if (!raw) return undefined
   const norm = normalizePath(raw)
   const tail = norm.split('/').pop() || raw
-  return inventoryVaes.value.find((v) => {
+  return store.inventoryVaesSnapshot.find((v) => {
     if (!v) return false
     if (v.name === raw) return true
     const vPath = normalizePath(String(v.path || ''))
@@ -790,14 +1109,18 @@ function findTextEncoderRecord(label: string): InventoryTextEncoder | undefined 
   return undefined
 }
 
-function findWanGgufRecord(label: string, stage: 'high' | 'low'): InventoryWanGguf | undefined {
+function findWanGgufRecord(
+  label: string,
+  options: { stage?: 'high' | 'low'; variant?: WanInventoryVariant } = {},
+): InventoryWanGguf | undefined {
   const raw = String(label || '').trim()
   if (!raw) return undefined
   const norm = normalizePath(raw)
   const tail = norm.split('/').pop() || raw
   return inventoryWan.value.find((w) => {
     if (!w) return false
-    if (String(w.stage || '') !== stage) return false
+    if (options.stage && String(w.stage || '') !== options.stage) return false
+    if (options.variant && w.variant !== options.variant) return false
     if (w.name === raw) return true
     const wPath = normalizePath(String(w.path || ''))
     return wPath === norm || (tail ? wPath.endsWith('/' + tail) : false)
@@ -853,18 +1176,24 @@ function onShowMetadata(payload: unknown): void {
       sha256: sha || (isSha256(value) ? value.toLowerCase() : undefined),
       inventory: rec ? { name: rec.name, path: rec.path, sha256: rec.sha256 } : null,
     }
-  } else if (kind === 'wan_high_model' || kind === 'wan_low_model') {
-    const stage = kind === 'wan_high_model' ? 'high' : 'low'
-    const rec = findWanGgufRecord(value, stage)
+  } else if (kind === 'wan_model' || kind === 'wan_high_model' || kind === 'wan_low_model') {
+    const stage = kind === 'wan_high_model' ? 'high' : kind === 'wan_low_model' ? 'low' : null
+    const rec = findWanGgufRecord(value, stage ? { stage } : { variant: 'wan22_5b' })
     const sha = store.resolveWanGgufSha(value) || (rec?.sha256 ? String(rec.sha256) : undefined)
-    title = stage === 'high' ? 'WAN high model metadata' : 'WAN low model metadata'
+    title = stage === 'high'
+      ? 'WAN high model metadata'
+      : stage === 'low'
+        ? 'WAN low model metadata'
+        : 'WAN model metadata'
     subtitle = rec?.name ? String(rec.name) : value
     filePathForMetadata = rec?.path ? String(rec.path) : null
     out = {
       selection: value,
       stage,
+      variant: rec?.variant,
+      repo_hint: rec?.repoHint,
       sha256: sha || (isSha256(value) ? value.toLowerCase() : undefined),
-      inventory: rec ? { name: rec.name, path: rec.path, sha256: rec.sha256, stage: rec.stage } : null,
+      inventory: rec ? { name: rec.name, path: rec.path, sha256: rec.sha256, stage: rec.stage, variant: rec.variant, repoHint: rec.repoHint } : null,
     }
   } else {
     title = 'Metadata'
@@ -940,7 +1269,7 @@ function onShowMetadata(payload: unknown): void {
 
 function fileInPaths(file: string, key: string): boolean {
   if (!file) return false
-  const roots = pathsConfig.value[key] || []
+  const roots = store.pathsConfigSnapshot[key] || []
   if (!roots.length) return false
   const fNorm = normalizePath(file)
   for (const root of roots) {
@@ -955,88 +1284,15 @@ function fileInPaths(file: string, key: string): boolean {
   return false
 }
 
-const filteredModelTitles = computed(() => filterModelTitlesForFamily(store.models, activeFamily.value, pathsConfig.value))
-
-function isVaeForFamily(name: string, fam: string): boolean {
-  const rec = inventoryVaes.value.find(v => v.name === name || v.path.endsWith('/' + name))
-  const scale = rec?.scaling_factor ?? null
-  const path = rec?.path ?? ''
-  if (fam === 'sdxl') return (scale !== null) ? Math.abs(Number(scale) - 0.13025) < 1e-3 : /sdxl|xl/i.test(name)
-  if (fam === 'sd15') return (scale !== null) ? Math.abs(Number(scale) - 0.18215) < 5e-3 : /sd1|1\.5|sd15|v1-5/i.test(name)
-  if (fam === 'flux1') return fileInPaths(path, 'flux1_vae')
-  if (fam === 'chroma') return fileInPaths(path, 'flux1_vae')
-  if (fam === 'zimage') return fileInPaths(path, 'zimage_vae') || fileInPaths(path, 'flux1_vae')  // Z Image uses same VAE as Flux.1
-  return true
-}
-
-function withBuiltInVaeChoice(values: string[]): string[] {
-  const out: string[] = ['built-in']
-  const seen = new Set<string>(['built-in'])
-  for (const raw of values) {
-    const value = String(raw || '').trim()
-    if (!value) continue
-    const lower = value.toLowerCase()
-    if (lower === 'automatic' || lower === 'built in' || lower === 'built-in') continue
-    if (seen.has(value)) continue
-    seen.add(value)
-    out.push(value)
-  }
-  return out
-}
-
-function canonicalizeVaeChoiceForActiveFamily(current: string, choices: readonly string[]): string | null {
-  if (!Array.isArray(choices) || choices.length === 0) return null
-
-  const rawCurrent = String(current || '').trim()
-  if (!rawCurrent) {
-    return choices.includes('built-in') ? 'built-in' : String(choices[0] || '')
-  }
-  if (choices.includes(rawCurrent)) return rawCurrent
-
-  const currentLower = rawCurrent.toLowerCase()
-  if (currentLower === 'automatic' || currentLower === 'built in' || currentLower === 'built-in') {
-    return choices.includes('built-in') ? 'built-in' : String(choices[0] || '')
-  }
-  if (currentLower === 'none' && choices.includes('none')) {
-    return 'none'
-  }
-
-  const currentSha = store.resolveVaeSha(rawCurrent)
-  if (currentSha) {
-    const normalizedCurrentSha = String(currentSha).trim().toLowerCase()
-    for (const choice of choices) {
-      const candidateSha = store.resolveVaeSha(choice)
-      if (!candidateSha) continue
-      if (String(candidateSha).trim().toLowerCase() === normalizedCurrentSha) {
-        return choice
-      }
-    }
-  }
-
-  return choices.includes('built-in') ? 'built-in' : String(choices[0] || '')
-}
+const filteredModelTitles = computed(() => filterModelTitlesForFamily(store.models, activeFamily.value, store.pathsConfigSnapshot))
 
 const filteredVaeChoices = computed(() => {
-  const fam = activeFamily.value
-  if (fam === 'flux1' || fam === 'chroma') {
-    return withBuiltInVaeChoice(inventoryVaes.value
-      .filter((v) => typeof v.path === 'string' && fileInPaths(v.path, 'flux1_vae'))
-      .map((v) => String(v.path || ''))
-    )
-  }
-  if (fam === 'zimage') {
-    return withBuiltInVaeChoice(inventoryVaes.value
-      .filter((v) => typeof v.path === 'string' && (fileInPaths(v.path, 'zimage_vae') || fileInPaths(v.path, 'flux1_vae')))
-      .map((v) => String(v.path || ''))
-    )
-  }
-  const familyChoices = (store.vaeChoices.length ? store.vaeChoices : ['built-in']).filter((value) => {
-    const normalized = String(value || '').trim().toLowerCase()
-    if (normalized === 'automatic' || normalized === 'built in' || normalized === 'built-in') return true
-    if (normalized === 'none') return true
-    return isVaeForFamily(value, fam)
-  })
-  return withBuiltInVaeChoice(familyChoices)
+  return buildFamilyVaeChoices(
+    activeFamily.value,
+    store.inventoryVaesSnapshot,
+    store.vaeChoices.length ? store.vaeChoices : ['built-in'],
+    store.pathsConfigSnapshot,
+  )
 })
 
 watch(
@@ -1044,13 +1300,34 @@ watch(
   ([family, currentVae, choices, quicksettingsReady]) => {
     if (!route.path.startsWith('/models/')) return
     if (!activeModelTab.value) return
-    if (family === 'wan') return
+    if (isWanTabFamily(family) || family === 'ltx2') return
     if (!quicksettingsReady) return
-    const familyVae = store.getVaeForFamily(family)
-    const nextVae = canonicalizeVaeChoiceForActiveFamily(String(familyVae || currentVae || ''), choices)
-    if (!nextVae) return
-    if (String(currentVae || '') === nextVae && String(familyVae || '') === nextVae) return
-    store.setVaeForFamily(family, nextVae).catch((error) => {
+    const persistedFamilyVae = store.getPersistedVaeForFamily(family)
+    const sourceVae = String(persistedFamilyVae || '')
+    const canonical = canonicalizeVaeChoice(sourceVae, choices, store.resolveVaeSha)
+    if (!canonical) return
+    const nextVae = canonical.value
+    if (canonical.reason === 'fallback') {
+      if (sourceVae) {
+        store.setVaeForFamily(family, nextVae, { persist: false }).catch((error: unknown) => {
+          toastQuicksettingsError(error)
+        })
+        return
+      }
+      if (String(currentVae || '') === nextVae) return
+      store.setVae(nextVae).catch((error: unknown) => {
+        toastQuicksettingsError(error)
+      })
+      return
+    }
+    if (String(persistedFamilyVae || '') === nextVae) {
+      if (String(currentVae || '') === nextVae) return
+      store.setVae(nextVae).catch((error: unknown) => {
+        toastQuicksettingsError(error)
+      })
+      return
+    }
+    store.setVaeForFamily(family, nextVae).catch((error: unknown) => {
       toastQuicksettingsError(error)
     })
   },
@@ -1059,11 +1336,12 @@ watch(
 
 const filteredTextEncoderChoices = computed(() => {
   const fam = activeFamily.value
-  if (fam === 'flux1') {
-    // For FLUX.1, derive choices from inventory.text_encoders constrained by flux1_tenc paths.
+  if (fam === 'flux1' || fam === 'flux2') {
+    const tencKey = fam === 'flux2' ? 'flux2_tenc' : 'flux1_tenc'
+    // For Flux-family tabs, derive choices from inventory.text_encoders constrained by family tenc roots.
     return inventoryTextEncoders.value
-      .filter((item) => typeof item.path === 'string' && fileInPaths(item.path, 'flux1_tenc'))
-      .map((item) => `flux1/${item.path}`)
+      .filter((item) => typeof item.path === 'string' && fileInPaths(item.path, tencKey))
+      .map((item) => `${fam}/${item.path}`)
   }
   if (fam === 'chroma') {
     // Chroma uses a single T5 text encoder; roots are shared with Flux.1 (`flux1_tenc`).
@@ -1071,25 +1349,54 @@ const filteredTextEncoderChoices = computed(() => {
       .filter((item) => typeof item.path === 'string' && fileInPaths(item.path, 'flux1_tenc'))
       .map((item) => `chroma/${item.path}`)
   }
+  if (fam === 'ltx2') {
+    return inventoryTextEncoders.value
+      .filter((item) => typeof item.path === 'string' && fileInPaths(item.path, 'ltx2_tenc'))
+      .map((item) => `ltx2/${item.path}`)
+  }
   if (fam === 'zimage') {
     // For Z Image, derive choices from inventory.text_encoders constrained by zimage_tenc paths.
     return inventoryTextEncoders.value
       .filter((item) => typeof item.path === 'string' && fileInPaths(item.path, 'zimage_tenc'))
       .map((item) => `zimage/${item.path}`)
   }
-  const prefix = fam === 'wan' ? 'wan22/' : `${fam}/`
-  return store.textEncoderChoices.filter((name) => typeof name === 'string' && typeof prefix === 'string' && name.startsWith(prefix))
+  const prefix = isWanTabFamily(fam) ? 'wan22/' : `${fam}/`
+  return store.textEncoderChoices.filter((name: string) => typeof name === 'string' && typeof prefix === 'string' && name.startsWith(prefix))
 })
 
-const isModelTabRoute = computed(() => route.path.startsWith('/models/') && Boolean(routeTabId.value))
 const activeImageTab = computed(() => {
   if (!isModelTabRoute.value) return null
   return asImageTab(activeModelTab.value)
 })
-const activeImageSurface = computed(() => {
+const activeImageRequestEngineId = computed(() => {
   const tab = activeImageTab.value
   if (!tab) return null
-  return engineCaps.get(tab.type)
+  return resolveImageRequestEngineId(tab.type, Boolean(tab.params.useInitImage))
+})
+const activeLtxTab = computed(() => {
+  if (!isModelTabRoute.value) return null
+  return asLtxTab(activeModelTab.value)
+})
+const activeLtxRouteTabId = computed(() => {
+  if (!isModelTabRoute.value) return ''
+  if (activeLtxTab.value) return activeLtxTab.value.id
+  return activeFamily.value === 'ltx2' ? routeTabId.value : ''
+})
+const ltxRouteHydrating = computed(() => (
+  isModelTabRoute.value
+  && activeFamily.value === 'ltx2'
+  && Boolean(routeTabId.value)
+  && !activeLtxTab.value
+))
+const activeLtxMode = computed<LtxGenerationMode>(() => {
+  const tab = activeLtxTab.value
+  if (!tab) return 'txt2vid'
+  return tab.params.mode
+})
+const activeImageSurface = computed(() => {
+  const engineId = activeImageRequestEngineId.value
+  if (!engineId) return null
+  return engineCaps.get(engineId)
 })
 const canToggleInitImage = computed(() => {
   const tab = activeImageTab.value
@@ -1109,36 +1416,105 @@ const useMask = computed(() => {
   if (!tab) return false
   return Boolean(tab.params.useMask)
 })
+const supirEnabled = computed(() => {
+  const tab = activeImageTab.value
+  if (!tab) return false
+  return Boolean(tab.params.supir.enabled)
+})
 const hasInitImage = computed(() => {
   const tab = activeImageTab.value
   if (!tab) return false
   return String(tab.params.initImageData || '').trim().length > 0
 })
-const supportsInpaint = computed(() => {
+const initSourceIsImg = computed(() => {
   const tab = activeImageTab.value
   if (!tab) return false
-  return tab.type !== 'flux1'
+  return String(tab.params.initSource.mode || '').trim().toLowerCase() === 'img'
 })
+const supportsInpaint = computed(() => Boolean(activeImageSurface.value?.supports_img2img_masking))
+const canShowSupirToggle = computed(() => (
+  canToggleInitImage.value
+  && activeFamily.value === 'sdxl'
+  && Boolean(activeImageSurface.value?.supports_supir_mode)
+))
+const guidanceAdvancedEnabled = computed(() => {
+  const tab = activeImageTab.value
+  if (!tab) return false
+  return Boolean(tab.params.guidanceAdvanced.enabled)
+})
+const supirSelectionState = computed(() => resolveSupirSelectionState({
+  supported: canShowSupirToggle.value,
+  selectedVariant: activeImageTab.value?.params.supir.variant ?? '',
+  selectedSampler: activeImageTab.value?.params.supir.sampler ?? '',
+  guidanceAdvancedEnabled: guidanceAdvancedEnabled.value,
+}))
 const isActiveImageTabRunning = computed(() => {
   const tab = activeImageTab.value
   if (!tab) return false
   return isGenerationRunningForTab(tab.id)
 })
+const isActiveLtxTabRunning = computed(() => {
+  const tabId = activeLtxRouteTabId.value
+  if (!tabId) return false
+  return isLtxGenerationRunningForTab(tabId)
+})
+const ltxQuicksettingsDisabled = computed(() => isActiveLtxTabRunning.value || ltxRouteHydrating.value)
+const ltxModeToggleTitle = computed(() => {
+  if (ltxRouteHydrating.value) return 'Loading LTX tab settings...'
+  if (isActiveLtxTabRunning.value) return 'Cannot change LTX mode while generation is running.'
+  return 'Toggle LTX video mode'
+})
+const ltxRefreshTitle = computed(() => {
+  if (isLoadingQuicksettings.value) return 'Refresh already in progress.'
+  if (ltxRouteHydrating.value) return 'Loading LTX tab settings...'
+  if (isActiveLtxTabRunning.value) return 'Cannot refresh LTX lists while generation is running.'
+  return 'Refresh lists'
+})
 const inpaintToggleDisabled = computed(() => (
   isActiveImageTabRunning.value
   || !useInitImage.value
+  || !initSourceIsImg.value
   || !hasInitImage.value
-  || !supportsInpaint.value
+  || (!supportsInpaint.value && !useMask.value)
 ))
 const inpaintToggleTitle = computed(() => {
   if (isActiveImageTabRunning.value) return 'Cannot change INPAINT while generation is running.'
-  if (!supportsInpaint.value) return 'INPAINT is not supported for Flux.1 img2img (Kontext) yet.'
   if (!useInitImage.value) return 'Enable IMG2IMG first.'
+  if (!initSourceIsImg.value) return 'INPAINT requires the initial image source to be IMG.'
   if (!hasInitImage.value) return 'Select an init image first.'
+  if (!supportsInpaint.value) {
+    if (useMask.value) return 'INPAINT is not supported for the active img2img engine. Disable it to clear the stale mask state.'
+    return 'INPAINT is not supported for the active img2img engine.'
+  }
   return 'Toggle INPAINT'
 })
+const supirToggleDisabled = computed(() => (
+  isActiveImageTabRunning.value
+  || (!supirEnabled.value && guidanceAdvancedEnabled.value)
+))
+const supirToggleTitle = computed(() => {
+  if (isActiveImageTabRunning.value) return 'Cannot change SUPIR while generation is running.'
+  if (!canShowSupirToggle.value) return 'SUPIR is only available for native SDXL.'
+  if (!supirEnabled.value && guidanceAdvancedEnabled.value) {
+    return supirSelectionState.value.blockingReason || 'SUPIR mode cannot be enabled while Advanced Guidance/APG is active.'
+  }
+  if (!supirEnabled.value && supirSelectionState.value.blockingReason) {
+    return `Enable SUPIR mode to repair the current selection. ${supirSelectionState.value.blockingReason}`
+  }
+  return supirEnabled.value ? 'Disable SUPIR mode' : 'Enable SUPIR mode'
+})
 
-const activeWanTab = computed(() => asWanTab(activeModelTab.value))
+watch(
+  canShowSupirToggle,
+  (show) => {
+    if (!show) return
+    void ensureSharedSupirDiagnosticsLoaded()
+  },
+  { immediate: true },
+)
+
+const activeWan14bTab = computed(() => asWan14bTab(activeModelTab.value))
+const activeWan5bTab = computed(() => asWan5bTab(activeModelTab.value))
 
 function normalizeTextEncoderLabels(raw: unknown): string[] {
   if (!Array.isArray(raw)) return []
@@ -1146,26 +1522,94 @@ function normalizeTextEncoderLabels(raw: unknown): string[] {
 }
 
 const effectiveTextEncoders = computed(() => {
-  const tab = activeImageTab.value
-  if (!tab) return store.currentTextEncoders
-  return normalizeTextEncoderLabels(tab.params.textEncoders)
+  if (isModelTabRoute.value) {
+    if (activeFamily.value === 'ltx2') {
+      const tab = activeLtxTab.value
+      if (!tab) return []
+      const textEncoder = String(tab.params.textEncoder || '').trim()
+      return textEncoder ? [textEncoder] : []
+    }
+    const tab = activeImageTab.value
+    if (!tab) return []
+    return normalizeTextEncoderLabels(tab.params.textEncoders)
+  }
+  return store.currentTextEncoders
 })
 
 const primaryTextEncoder = computed(() => effectiveTextEncoders.value[0] ?? '')
-
-const flux1TextEncoders = computed(() => effectiveTextEncoders.value.filter((label) => typeof label === 'string' && label.startsWith('flux1/')))
+const flux1TextEncoders = computed(() => effectiveTextEncoders.value.filter((label: string) => label.startsWith('flux1/')))
 const flux1TextEncoderPrimary = computed(() => flux1TextEncoders.value[0] ?? '')
 const flux1TextEncoderSecondary = computed(() => flux1TextEncoders.value[1] ?? '')
-
-const primaryTeAutomaticLabel = 'Built-in'
-const secondaryTeAutomaticLabel = 'Secondary (optional)'
+const flux2TextEncoder = computed(() => effectiveTextEncoders.value.find((label: string) => label.startsWith('flux2/')) ?? '')
 
 const effectiveCheckpoint = computed(() => {
+  if (isModelTabRoute.value) {
+    if (activeFamily.value === 'ltx2') {
+      const ltxTab = activeLtxTab.value
+      if (!ltxTab) return ''
+      const checkpoint = String(ltxTab.params.checkpoint || '').trim()
+      if (checkpoint) return checkpoint
+      return filteredModelTitles.value[0] ?? ''
+    }
+    const tab = activeImageTab.value
+    if (!tab) return ''
+    const checkpoint = String(tab.params.checkpoint || '').trim()
+    if (checkpoint) return checkpoint
+    return filteredModelTitles.value[0] ?? ''
+  }
+  return store.currentModel
+})
+
+const effectiveVae = computed(() => {
+  if (isModelTabRoute.value) {
+    if (activeFamily.value === 'ltx2') {
+      const ltxTab = activeLtxTab.value
+      if (!ltxTab) return ''
+      const vae = String(ltxTab.params.vae || '').trim()
+      if (vae) return vae
+      return filteredVaeChoices.value[0] ?? 'built-in'
+    }
+    if (!activeModelTab.value) return ''
+    return store.currentVae
+  }
+  return store.currentVae
+})
+
+const activeImageAssetContract = computed(() => {
   const tab = activeImageTab.value
-  if (!tab) return store.currentModel
-  const ckpt = String(tab.params.checkpoint || '').trim()
-  if (ckpt) return ckpt
-  return filteredModelTitles.value[0] ?? ''
+  if (!tab) return null
+  const engineId = activeImageRequestEngineId.value
+  if (!engineId) return null
+  const checkpoint = String(tab.params.checkpoint || '').trim()
+  const modelInfo = checkpoint ? store.resolveModelInfo(checkpoint) : undefined
+  if (checkpoint && modelInfo && typeof modelInfo.core_only !== 'boolean') {
+    return null
+  }
+  return engineCaps.getAssetContract(engineId, {
+    checkpointCoreOnly: typeof modelInfo?.core_only === 'boolean' ? modelInfo.core_only : false,
+  })
+})
+
+const flux2TextEncoderFieldLabel = computed(() => {
+  const fallback = 'Text Encoder (Qwen3-4B)'
+  if (activeFamily.value !== 'flux2') return fallback
+
+  const contract = activeImageAssetContract.value
+  const slotLabel = Array.isArray(contract?.tenc_slot_labels)
+    ? contract.tenc_slot_labels
+        .map((value) => String(value || '').trim())
+        .find((value) => value.length > 0)
+    : ''
+  if (slotLabel) {
+    return /text encoder/i.test(slotLabel) ? slotLabel : `Text Encoder (${slotLabel})`
+  }
+
+  const kindLabel = String(contract?.tenc_kind_label || '').trim()
+  if (kindLabel) {
+    return /text encoder/i.test(kindLabel) ? kindLabel : `Text Encoder (${kindLabel})`
+  }
+
+  return fallback
 })
 
 const CODEX_REPO_URL = 'https://github.com/sangoi-exe/stable-diffusion-webui-codex'
@@ -1245,6 +1689,23 @@ watch(
   { immediate: true },
 )
 
+watch(
+  () => [activeLtxTab.value?.id ?? '', filteredModelTitles.value] as const,
+  ([tabId, models]) => {
+    if (!tabId) return
+    const tab = activeLtxTab.value
+    if (!tab) return
+    const checkpoint = String(tab.params.checkpoint || '').trim()
+    if (checkpoint) return
+    const first = models[0]
+    if (!first) return
+    updateLtxTabParams(tab.id, { checkpoint: first }).catch((error) => {
+      qsToast(error instanceof Error ? error.message : String(error))
+    })
+  },
+  { immediate: true },
+)
+
 async function initQuicksettings(
   options?: { forceInventoryRefresh?: boolean; forceModelsRefresh?: boolean },
   controls?: { includeStoreInit?: boolean },
@@ -1268,69 +1729,14 @@ async function initQuicksettings(
   }
 }
 
-function parseInventoryTaskResult(event: TaskEvent): InventoryResponse | null {
-  if (event.type !== 'result') return null
-  const payload = event as unknown as Record<string, unknown>
-  const direct = payload.inventory
-  if (isRecordObject(direct)) {
-    return direct as unknown as InventoryResponse
-  }
-  const info = payload.info
-  if (!isRecordObject(info)) return null
-  const nested = info.inventory
-  if (!isRecordObject(nested)) return null
-  return nested as unknown as InventoryResponse
-}
-
-async function runAsyncInventoryRefreshTask(): Promise<InventoryResponse> {
-  const { task_id } = await startModelInventoryRefreshTask()
-  return await new Promise<InventoryResponse>((resolve, reject) => {
-    let settled = false
-    let resolvedInventory: InventoryResponse | null = null
-    let unsubscribe: (() => void) | null = null
-    const settle = (fn: () => void): void => {
-      if (settled) return
-      settled = true
-      try { unsubscribe?.() } catch (_) { /* ignore */ }
-      unsubscribe = null
-      fn()
-    }
-
-    unsubscribe = subscribeTask(
-      task_id,
-      (event) => {
-        if (event.type === 'error') {
-          settle(() => reject(new Error(String(event.message || 'inventory refresh task failed'))))
-          return
-        }
-        if (event.type === 'result') {
-          const parsed = parseInventoryTaskResult(event)
-          if (parsed) resolvedInventory = parsed
-          return
-        }
-        if (event.type === 'end') {
-          if (resolvedInventory) {
-            settle(() => resolve(resolvedInventory as InventoryResponse))
-            return
-          }
-          settle(() => reject(new Error('inventory refresh task completed without inventory payload')))
-        }
-      },
-      (err) => {
-        settle(() => reject(err instanceof Error ? err : new Error(String(err))))
-      },
-    )
-  })
-}
-
 async function refreshAll(): Promise<void> {
   if (isLoadingQuicksettings.value) return
   isLoadingQuicksettings.value = true
   try {
     await Promise.all([store.refreshModelsList(), loadPaths()])
-    const refreshedInventory = await runAsyncInventoryRefreshTask()
-    cacheModelInventorySnapshot(refreshedInventory)
+    const refreshedInventory = await store.fetchInventoryWithLoraHydration({ refresh: true })
     applyInventorySnapshot(refreshedInventory)
+    await reloadSharedSupirDiagnostics()
   } catch (error) {
     toastQuicksettingsError(error)
   } finally {
@@ -1342,6 +1748,7 @@ const wanHighDirChoices = computed(() => {
   const seen = new Set<string>()
   const out: string[] = []
   for (const g of inventoryWan.value) {
+    if (g.variant && g.variant !== 'wan22_14b') continue
     const stage = String(g.stage || 'unknown').trim().toLowerCase()
     if (stage !== 'high' && stage !== 'unknown') continue
     const path = String(g.path || '').trim()
@@ -1355,6 +1762,7 @@ const wanLowDirChoices = computed(() => {
   const seen = new Set<string>()
   const out: string[] = []
   for (const g of inventoryWan.value) {
+    if (g.variant && g.variant !== 'wan22_14b') continue
     const stage = String(g.stage || 'unknown').trim().toLowerCase()
     if (stage !== 'low' && stage !== 'unknown') continue
     const path = String(g.path || '').trim()
@@ -1364,12 +1772,24 @@ const wanLowDirChoices = computed(() => {
   return out
 })
 
-type WanModelMode = 'i2v_14b' | 't2v_14b' | 'i2v_5b' | 't2v_5b'
+const wan5bModelChoices = computed(() => {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const g of inventoryWan.value) {
+    if (g.variant !== 'wan22_5b') continue
+    const path = String(g.path || '').trim()
+    if (!path || seen.has(path)) continue
+    seen.add(path)
+    out.push(path)
+  }
+  return out
+})
+
 const WAN_LIGHTX2V_I2V_14B_FLOW_SHIFT = 5.0
 
-function resolveWanFlowShiftForMode(mode: WanModelMode, lightx2v: boolean): number | null {
+function resolveWan14bFlowShift(useInitImage: boolean, lightx2v: boolean): number | null {
   if (!lightx2v) return null
-  if (mode === 'i2v_14b') return WAN_LIGHTX2V_I2V_14B_FLOW_SHIFT
+  if (useInitImage) return WAN_LIGHTX2V_I2V_14B_FLOW_SHIFT
   return null
 }
 
@@ -1397,11 +1817,11 @@ function finiteStageFlowShift(stage: WanStageParams): number | undefined {
 
 let syncingWanFlowShiftPolicy = false
 
-async function ensureWanFlowShiftPolicy(): Promise<void> {
+async function ensureWan14bFlowShiftPolicy(): Promise<void> {
   if (syncingWanFlowShiftPolicy) return
-  const tab = activeWanTab.value
+  const tab = activeWan14bTab.value
   if (!tab) return
-  const flowShift = resolveWanFlowShiftForMode(wanModelMode.value, Boolean(tab.params.lightx2v))
+  const flowShift = resolveWan14bFlowShift(Boolean(tab.params.video?.useInitImage), Boolean(tab.params.lightx2v))
   const nextHigh = patchWanStageFlowShift(tab.params.high, flowShift)
   const nextLow = patchWanStageFlowShift(tab.params.low, flowShift)
   if (
@@ -1418,54 +1838,53 @@ async function ensureWanFlowShiftPolicy(): Promise<void> {
   }
 }
 
-function _wanRepoForMode(mode: WanModelMode): string {
-  if (mode === 't2v_14b') return 'Wan-AI/Wan2.2-T2V-A14B-Diffusers'
-  if (mode === 'i2v_5b' || mode === 't2v_5b') return 'Wan-AI/Wan2.2-TI2V-5B-Diffusers'
-  return 'Wan-AI/Wan2.2-I2V-A14B-Diffusers'
-}
-
-const wanModelMode = computed<WanModelMode>(() => {
-  const tab = activeWanTab.value
-  if (!tab) return 't2v_14b'
-  const video = tab.params.video
-  const rawAssets = tab.params.assets || { metadata: '', textEncoder: '', vae: '' }
-  const meta = String(rawAssets.metadata || '').trim().toLowerCase()
-  const is5b = meta.includes('ti2v-5b') || meta.includes('5b')
-  const kind = video?.useInitImage ? 'i2v' : 't2v'
-
-  if (is5b) return kind === 'i2v' ? 'i2v_5b' : 't2v_5b'
-  if (kind === 'i2v') return 'i2v_14b'
-  return 't2v_14b'
-})
-
 const wanLightx2v = computed(() => {
-  const tab = activeWanTab.value
+  const tab = activeWan14bTab.value
   if (!tab) return false
   return Boolean(tab.params.lightx2v)
 })
 
 const wanHighModel = computed(() => {
-  const tab = activeWanTab.value
+  const tab = activeWan14bTab.value
   if (!tab) return ''
   return tab.params.high?.modelDir || ''
 })
 
 const wanLowModel = computed(() => {
-  const tab = activeWanTab.value
+  const tab = activeWan14bTab.value
   if (!tab) return ''
   return tab.params.low?.modelDir || ''
 })
 
-function currentWanAssets(): WanAssetsParams {
+const wan5bModel = computed(() => {
+  const tab = activeWan5bTab.value
+  if (!tab) return ''
+  return tab.params.stage?.modelDir || ''
+})
+
+const wanInputMode = computed<'txt2vid' | 'img2vid'>(() => {
+  const tab = activeWan14bTab.value ?? activeWan5bTab.value
+  if (!tab) return 'txt2vid'
+  return tab.params.video?.useInitImage ? 'img2vid' : 'txt2vid'
+})
+
+function currentWanAssetsFor(tab: { params?: { assets?: unknown } } | null): WanAssetsParams {
   const base: WanAssetsParams = { metadata: '', textEncoder: '', vae: '' }
-  const tab = activeWanTab.value
   if (!tab) return base
-  const raw = tab.params.assets
+  const raw = tab.params?.assets as Record<string, unknown> | undefined
   return raw ? { ...base, ...raw } : base
 }
 
-const wanTextEncoder = computed(() => currentWanAssets().textEncoder || '')
-const wanVae = computed(() => currentWanAssets().vae || '')
+function resolveWanInventoryRepoHint(
+  modelDir: string,
+  options: { stage?: 'high' | 'low'; variant?: WanInventoryVariant } = {},
+): string | null {
+  return findWanGgufRecord(modelDir, options)?.repoHint ?? null
+}
+
+const activeWanAssets = computed(() => currentWanAssetsFor(activeWan14bTab.value ?? activeWan5bTab.value))
+const wanTextEncoder = computed(() => activeWanAssets.value.textEncoder || '')
+const wanVae = computed(() => activeWanAssets.value.vae || '')
 
 const wanTextEncoderChoices = computed(() => {
   // WAN22 GGUF requires an explicit TE weights file (.safetensors or .gguf). Prefer concrete
@@ -1484,7 +1903,7 @@ const wanTextEncoderChoices = computed(() => {
 const wanVaeChoices = computed(() => {
   const seen = new Set<string>()
   const out: string[] = []
-  for (const item of inventoryVaes.value) {
+  for (const item of store.inventoryVaesSnapshot) {
     const path = String(item.path || '')
     if (!path) continue
     if (!fileInPaths(path, 'wan22_vae')) continue
@@ -1502,14 +1921,42 @@ function updateImageTabParams(tabId: string, patch: Partial<ImageBaseParams>): P
   return tabsStore.updateParams(tabId, patch as Partial<Record<string, unknown>>)
 }
 
+function updateLtxTabParams(tabId: string, patch: Partial<LtxTab['params']>): Promise<void> {
+  return tabsStore.updateParams<Record<string, unknown>>(tabId, patch as unknown as Record<string, unknown>)
+}
+
+function toastModelTabStillLoading(): void {
+  qsToast('Model tab settings are still loading.')
+}
+
+function toastModelAssetOwnerRequired(): void {
+  qsToast('Checkpoint, VAE, and Text Encoder are read-only here. Open a model tab to edit them.')
+}
+
 async function onModelChange(value: string): Promise<void> {
   try {
-    const tab = activeImageTab.value
-    if (tab) {
+    if (!isModelTabRoute.value) {
+      toastModelAssetOwnerRequired()
+      return
+    }
+    if (isModelTabRoute.value) {
+      if (activeFamily.value === 'ltx2') {
+        const ltxTab = activeLtxTab.value
+        if (!ltxTab) {
+          toastModelTabStillLoading()
+          return
+        }
+        await updateLtxTabParams(ltxTab.id, { checkpoint: String(value || '') })
+        return
+      }
+      const tab = activeImageTab.value
+      if (!tab) {
+        toastModelTabStillLoading()
+        return
+      }
       await updateImageTabParams(tab.id, { checkpoint: String(value || '') })
       return
     }
-    await store.setModel(value)
   } catch (error) {
     toastQuicksettingsError(error)
   }
@@ -1517,7 +1964,37 @@ async function onModelChange(value: string): Promise<void> {
 
 async function onVaeChange(value: string): Promise<void> {
   try {
+    if (!isModelTabRoute.value) {
+      toastModelAssetOwnerRequired()
+      return
+    }
+    if (!activeModelTab.value) {
+      toastModelTabStillLoading()
+      return
+    }
+    const ltxTab = activeLtxTab.value
+    if (activeFamily.value === 'ltx2' && isModelTabRoute.value) {
+      if (!ltxTab) {
+        toastModelTabStillLoading()
+        return
+      }
+      await updateLtxTabParams(ltxTab.id, { vae: String(value || '') })
+      return
+    }
     await store.setVaeForFamily(activeFamily.value, value)
+  } catch (error) {
+    toastQuicksettingsError(error)
+  }
+}
+
+async function onLtxModeChange(value: LtxGenerationMode): Promise<void> {
+  try {
+    if (ltxQuicksettingsDisabled.value) return
+    const tab = activeLtxTab.value
+    if (!tab) return
+    const nextMode: LtxGenerationMode = value === 'img2vid' ? 'img2vid' : 'txt2vid'
+    if (activeLtxMode.value === nextMode) return
+    await updateLtxTabParams(tab.id, { mode: nextMode })
   } catch (error) {
     toastQuicksettingsError(error)
   }
@@ -1527,14 +2004,7 @@ async function onUseInitImageChange(value: boolean): Promise<void> {
   try {
     const tab = activeImageTab.value
     if (!tab) return
-    const patch: Partial<ImageBaseParams> = { useInitImage: Boolean(value) }
-    if (!value) {
-      patch.initImageData = ''
-      patch.initImageName = ''
-      patch.useMask = false
-      patch.maskImageData = ''
-      patch.maskImageName = ''
-    }
+    const patch: Partial<ImageBaseParams> = { ...buildUseInitImagePatch(Boolean(value)) }
     await updateImageTabParams(tab.id, patch)
   } catch (error) {
     toastQuicksettingsError(error)
@@ -1546,9 +2016,10 @@ async function onUseMaskChange(value: boolean): Promise<void> {
     const tab = activeImageTab.value
     if (!tab) return
     if (isActiveImageTabRunning.value) return
-    if (tab.type === 'flux1') return
     if (!useInitImage.value) return
+    if (!initSourceIsImg.value) return
     if (!hasInitImage.value) return
+    if (value && !supportsInpaint.value) return
     const patch: Partial<ImageBaseParams> = { useMask: Boolean(value) }
     if (!value) {
       patch.maskImageData = ''
@@ -1560,85 +2031,136 @@ async function onUseMaskChange(value: boolean): Promise<void> {
   }
 }
 
-function textEncoderLabel(raw: unknown): string {
-  const value = String(raw ?? '')
-  if (!value.includes('/')) return value
-  const [family, ...rest] = value.replace(/\\/g, '/').split('/').filter(Boolean)
-  if (!family || rest.length === 0) return value
-  const basename = rest[rest.length - 1] || rest[0]
-  return `${family}/${basename}`
+async function onSupirModeChange(value: boolean): Promise<void> {
+  try {
+    const tab = activeImageTab.value
+    if (!tab) return
+    if (isActiveImageTabRunning.value) return
+    if (!value) {
+      await updateImageTabParams(tab.id, {
+        supir: {
+          ...tab.params.supir,
+          enabled: false,
+        },
+      })
+      return
+    }
+    if (!canShowSupirToggle.value) return
+    if (guidanceAdvancedEnabled.value) return
+    await updateImageTabParams(tab.id, {
+      useInitImage: true,
+      supir: {
+        ...tab.params.supir,
+        enabled: true,
+      },
+    })
+  } catch (error) {
+    toastQuicksettingsError(error)
+  }
+}
+
+async function updatePrefixedTextEncoders(familyPrefix: 'flux1' | 'flux2', labels: string[]): Promise<void> {
+  if (!isModelTabRoute.value) {
+    throw new Error('Checkpoint, VAE, and Text Encoder are read-only here. Open a model tab to edit them.')
+  }
+  const labelPrefix = `${familyPrefix}/`
+  const normalizedLabels = labels
+    .map((label) => String(label || '').trim())
+    .filter((label, index, array) => label.startsWith(labelPrefix) && label.length > 0 && array.indexOf(label) === index)
+  const tab = activeImageTab.value
+  if (!tab) {
+    throw new Error('Model tab settings are still loading.')
+  }
+  await updateImageTabParams(tab.id, { textEncoders: normalizedLabels })
 }
 
 async function updateFlux1TextEncoders(primary: string, secondary: string): Promise<void> {
-  const tab = activeImageTab.value
-  const fluxLabels: string[] = []
-  const p = primary.trim()
-  const s = secondary.trim()
-  if (p) fluxLabels.push(p)
-  if (s && s !== p) fluxLabels.push(s)
-  if (tab) {
-    await updateImageTabParams(tab.id, { textEncoders: fluxLabels })
-    return
-  }
-  const all = store.currentTextEncoders.slice()
-  const other = all.filter((label) => !String(label).startsWith('flux1/'))
-  const next = [...other, ...fluxLabels]
-  await store.setTextEncoders(next)
+  const flux1Labels: string[] = []
+  const normalizedPrimary = String(primary || '').trim()
+  const normalizedSecondary = String(secondary || '').trim()
+  if (normalizedPrimary) flux1Labels.push(normalizedPrimary)
+  if (normalizedSecondary && normalizedSecondary !== normalizedPrimary) flux1Labels.push(normalizedSecondary)
+  await updatePrefixedTextEncoders('flux1', flux1Labels)
+}
+
+async function updateFlux2TextEncoder(value: string): Promise<void> {
+  const selected = String(value || '').trim()
+  await updatePrefixedTextEncoders('flux2', selected ? [selected] : [])
 }
 
 function onPrimaryTextEncoderChange(value: string): void {
+  if (!isModelTabRoute.value) {
+    toastModelAssetOwnerRequired()
+    return
+  }
   const fam = activeFamily.value
   if (fam === 'flux1') {
     const primary = value || ''
     const secondary = flux1TextEncoderSecondary.value || ''
-    updateFlux1TextEncoders(primary, secondary).catch((error) => {
+    updateFlux1TextEncoders(primary, secondary).catch((error: unknown) => {
+      qsToast(error instanceof Error ? error.message : String(error))
+    })
+  } else if (fam === 'flux2') {
+    updateFlux2TextEncoder(value).catch((error: unknown) => {
+      qsToast(error instanceof Error ? error.message : String(error))
+    })
+  } else if (fam === 'ltx2') {
+    const tab = activeLtxTab.value
+    const payload = String(value || '').trim()
+    if (!tab) {
+      toastModelTabStillLoading()
+      return
+    }
+    updateLtxTabParams(tab.id, { textEncoder: payload }).catch((error: unknown) => {
       qsToast(error instanceof Error ? error.message : String(error))
     })
   } else {
     const tab = activeImageTab.value
     const payload = value ? [value] : []
-    if (tab) {
-      updateImageTabParams(tab.id, { textEncoders: payload }).catch((error) => {
-        qsToast(error instanceof Error ? error.message : String(error))
-      })
+    if (!tab) {
+      toastModelTabStillLoading()
       return
     }
-    store.setTextEncoders(payload).catch((error) => {
+    updateImageTabParams(tab.id, { textEncoders: payload }).catch((error: unknown) => {
       qsToast(error instanceof Error ? error.message : String(error))
     })
   }
 }
 
 function onSecondaryTextEncoderChange(value: string): void {
+  if (!isModelTabRoute.value) {
+    toastModelAssetOwnerRequired()
+    return
+  }
   const fam = activeFamily.value
   if (fam !== 'flux1') return
   const primary = flux1TextEncoderPrimary.value || ''
   const secondary = value || ''
-  updateFlux1TextEncoders(primary, secondary).catch((error) => {
+  updateFlux1TextEncoders(primary, secondary).catch((error: unknown) => {
     qsToast(error instanceof Error ? error.message : String(error))
   })
 }
 
 function onSmartOffloadChange(value: boolean): void {
-  store.setSmartOffload(value).catch((error) => {
+  store.setSmartOffload(value).catch((error: unknown) => {
     qsToast(error instanceof Error ? error.message : String(error))
   })
 }
 
 function onSmartFallbackChange(value: boolean): void {
-  store.setSmartFallback(value).catch((error) => {
+  store.setSmartFallback(value).catch((error: unknown) => {
     qsToast(error instanceof Error ? error.message : String(error))
   })
 }
 
 function onSmartCacheChange(value: boolean): void {
-  store.setSmartCache(value).catch((error) => {
+  store.setSmartCache(value).catch((error: unknown) => {
     qsToast(error instanceof Error ? error.message : String(error))
   })
 }
 
 function onCoreStreamingChange(value: boolean): void {
-  store.setCoreStreaming(value).catch((error) => {
+  store.setCoreStreaming(value).catch((error: unknown) => {
     qsToast(error instanceof Error ? error.message : String(error))
   })
 }
@@ -1683,56 +2205,12 @@ async function onObliterateVram(): Promise<void> {
   }
 }
 
-async function onWanModeChange(value: string): Promise<void> {
-  try {
-    const tab = activeWanTab.value
-    if (!tab) return
-
-    const raw = String(value || '').trim().toLowerCase()
-    const nextMode: WanModelMode =
-      raw === 'i2v_14b' ? 'i2v_14b'
-        : raw === 't2v_14b' ? 't2v_14b'
-          : raw === 'i2v_5b' ? 'i2v_5b'
-            : raw === 't2v_5b' ? 't2v_5b'
-                : 't2v_14b'
-
-    const currentVideo = tab.params.video
-    const videoPatch: Record<string, unknown> = {}
-    if (nextMode === 't2v_14b' || nextMode === 't2v_5b') {
-      videoPatch.useInitImage = false
-      videoPatch.initImageData = ''
-      videoPatch.initImageName = ''
-    } else {
-      // i2v
-      videoPatch.useInitImage = true
-    }
-
-    const currentAssets = currentWanAssets()
-    const nextAssets = { ...currentAssets, metadata: _wanRepoForMode(nextMode) }
-    const flowShift = resolveWanFlowShiftForMode(nextMode, Boolean(tab.params.lightx2v))
-    const nextHigh = patchWanStageFlowShift(tab.params.high, flowShift)
-    const nextLow = patchWanStageFlowShift(tab.params.low, flowShift)
-
-    await tabsStore.updateParams(
-      tab.id,
-      {
-        video: { ...currentVideo, ...videoPatch },
-        assets: nextAssets,
-        high: nextHigh,
-        low: nextLow,
-      },
-    )
-  } catch (error) {
-    toastQuicksettingsError(error)
-  }
-}
-
 async function onWanLightx2vChange(value: boolean): Promise<void> {
   try {
-    const tab = activeWanTab.value
+    const tab = activeWan14bTab.value
     if (!tab) return
     const nextLightx2v = Boolean(value)
-    const flowShift = resolveWanFlowShiftForMode(wanModelMode.value, nextLightx2v)
+    const flowShift = resolveWan14bFlowShift(Boolean(tab.params.video?.useInitImage), nextLightx2v)
     const nextHigh = patchWanStageFlowShift(tab.params.high, flowShift)
     const nextLow = patchWanStageFlowShift(tab.params.low, flowShift)
     await tabsStore.updateParams(tab.id, { lightx2v: nextLightx2v, high: nextHigh, low: nextLow })
@@ -1741,20 +2219,56 @@ async function onWanLightx2vChange(value: boolean): Promise<void> {
   }
 }
 
+async function onWanInputModeChange(value: 'txt2vid' | 'img2vid'): Promise<void> {
+  try {
+    const tab = activeWan14bTab.value ?? activeWan5bTab.value
+    if (!tab) return
+    const nextUseInitImage = value === 'img2vid'
+    const currentVideo = tab.params.video
+    const videoPatch: Record<string, unknown> = { useInitImage: nextUseInitImage }
+    if (!nextUseInitImage) {
+      videoPatch.initImageData = ''
+      videoPatch.initImageName = ''
+    }
+
+    if (tab.type === 'wan22_14b') {
+      const flowShift = resolveWan14bFlowShift(nextUseInitImage, Boolean(tab.params.lightx2v))
+      const nextHigh = patchWanStageFlowShift(tab.params.high, flowShift)
+      const nextLow = patchWanStageFlowShift(tab.params.low, flowShift)
+      await tabsStore.updateParams(tab.id, {
+        video: { ...currentVideo, ...videoPatch },
+        high: nextHigh,
+        low: nextLow,
+      })
+      return
+    }
+
+    await tabsStore.updateParams(tab.id, {
+      video: {
+        ...currentVideo,
+        ...videoPatch,
+        ...(nextUseInitImage ? { img2vidMode: 'solo' } : {}),
+      },
+    })
+  } catch (error) {
+    toastQuicksettingsError(error)
+  }
+}
+
 watch(
   () => {
-    const tab = activeWanTab.value
+    const tab = activeWan14bTab.value
     if (!tab) return null
     return {
       tabId: tab.id,
-      mode: wanModelMode.value,
+      useInitImage: Boolean(tab.params.video?.useInitImage),
       lightx2v: Boolean(tab.params.lightx2v),
       highFlowShift: finiteStageFlowShift(tab.params.high),
       lowFlowShift: finiteStageFlowShift(tab.params.low),
     }
   },
   () => {
-    void ensureWanFlowShiftPolicy()
+    void ensureWan14bFlowShiftPolicy()
   },
   { immediate: true },
 )
@@ -1792,10 +2306,15 @@ async function onZImageTurboChange(value: boolean): Promise<void> {
 
 async function onWanHighModelChange(value: string): Promise<void> {
   try {
-    const tab = activeWanTab.value
+    const tab = activeWan14bTab.value
     if (!tab) return
     const current = tab.params.high || {}
-    await tabsStore.updateParams(tab.id, { high: { ...current, modelDir: value } })
+    const repoHint = resolveWanInventoryRepoHint(value, { stage: 'high', variant: 'wan22_14b' })
+    const assets = currentWanAssetsFor(tab)
+    await tabsStore.updateParams(tab.id, {
+      high: { ...current, modelDir: value },
+      assets: repoHint ? { ...assets, metadata: repoHint } : assets,
+    })
   } catch (error) {
     toastQuicksettingsError(error)
   }
@@ -1803,10 +2322,31 @@ async function onWanHighModelChange(value: string): Promise<void> {
 
 async function onWanLowModelChange(value: string): Promise<void> {
   try {
-    const tab = activeWanTab.value
+    const tab = activeWan14bTab.value
     if (!tab) return
     const current = tab.params.low || {}
-    await tabsStore.updateParams(tab.id, { low: { ...current, modelDir: value } })
+    const repoHint = resolveWanInventoryRepoHint(value, { stage: 'low', variant: 'wan22_14b' })
+    const assets = currentWanAssetsFor(tab)
+    await tabsStore.updateParams(tab.id, {
+      low: { ...current, modelDir: value },
+      assets: repoHint ? { ...assets, metadata: repoHint } : assets,
+    })
+  } catch (error) {
+    toastQuicksettingsError(error)
+  }
+}
+
+async function onWan5bModelChange(value: string): Promise<void> {
+  try {
+    const tab = activeWan5bTab.value
+    if (!tab) return
+    const current = tab.params.stage || ({} as Wan5bStageParams)
+    const repoHint = resolveWanInventoryRepoHint(value, { variant: 'wan22_5b' })
+    const assets = currentWanAssetsFor(tab)
+    await tabsStore.updateParams(tab.id, {
+      stage: { ...current, modelDir: value },
+      assets: repoHint ? { ...assets, metadata: repoHint } : assets,
+    })
   } catch (error) {
     toastQuicksettingsError(error)
   }
@@ -1814,9 +2354,9 @@ async function onWanLowModelChange(value: string): Promise<void> {
 
 async function onWanTextEncoderChange(value: string): Promise<void> {
   try {
-    const tab = activeWanTab.value
+    const tab = activeWan14bTab.value ?? activeWan5bTab.value
     if (!tab) return
-    const current = currentWanAssets()
+    const current = currentWanAssetsFor(tab)
     await tabsStore.updateParams(tab.id, { assets: { ...current, textEncoder: value } })
   } catch (error) {
     toastQuicksettingsError(error)
@@ -1825,19 +2365,13 @@ async function onWanTextEncoderChange(value: string): Promise<void> {
 
 async function onWanVaeChange(value: string): Promise<void> {
   try {
-    const tab = activeWanTab.value
+    const tab = activeWan14bTab.value ?? activeWan5bTab.value
     if (!tab) return
-    const current = currentWanAssets()
+    const current = currentWanAssetsFor(tab)
     await tabsStore.updateParams(tab.id, { assets: { ...current, vae: value } })
   } catch (error) {
     toastQuicksettingsError(error)
   }
-}
-
-function onWanGuidedGen(): void {
-  const tab = activeWanTab.value
-  if (!tab) return
-  window.dispatchEvent(new CustomEvent('codex-wan-guided-gen', { detail: { tabId: tab.id } }))
 }
 
 function openAddPathModal(options: {
@@ -1983,35 +2517,49 @@ function openOverrides(): void {
 }
 
 onMounted(() => {
-  window.addEventListener('resize', syncAdvancedHeight)
-  requestAnimationFrame(syncAdvancedHeight)
-  bootstrap
-    .runRequired('Failed to initialize QuickSettings', async () => {
-      await Promise.all([
-        initQuicksettings(),
-        presets.init(currentTab()),
-      ])
+  const inner = advancedRowInnerEl.value
+  if (inner) {
+    advancedRowResizeObserver = new ResizeObserver(() => {
+      syncAdvancedTargetHeight()
     })
-    .catch(() => {
-      // Fatal state is already set by bootstrap store.
-    })
+    advancedRowResizeObserver.observe(inner)
+  }
+  requestAnimationFrame(syncAdvancedTargetHeight)
+  void Promise.allSettled([
+    initQuicksettings(),
+  ]).then((results) => {
+    const [quicksettingsResult] = results
+    if (quicksettingsResult.status === 'rejected') {
+      console.error('[quicksettings] failed to initialize quicksettings', quicksettingsResult.reason)
+      toastQuicksettingsError(quicksettingsResult.reason)
+    }
+  })
 })
 
 onBeforeUnmount(() => {
-  cancelAdvancedAnimation()
+  advancedRowResizeObserver?.disconnect()
+  advancedRowResizeObserver = null
   showAddPathModal.value = false
   closePathInputModal()
-  window.removeEventListener('resize', syncAdvancedHeight)
 })
 
 watch(() => route.path, async () => {
   try {
-    await presets.init(currentTab())
     await loadInventory()
   } catch (error) {
     toastQuicksettingsError(error)
   }
 })
+
+watch(resolvedPresetTab, async (tab, previousTab) => {
+  if (!tab || tab === previousTab) return
+  try {
+    await presets.init(tab)
+  } catch (error) {
+    console.error('[quicksettings] failed to initialize presets', error)
+    toastQuicksettingsError(error)
+  }
+}, { immediate: true })
 
 // random seed button removed from quicksettings; presets applied elsewhere
 </script>

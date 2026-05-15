@@ -1,7 +1,7 @@
 # apps.launcher
 Date: 2025-10-28
 Status: Active
-Last Review: 2026-02-25
+Last Review: 2026-04-02
 
 ## Purpose
 - Provide reusable launcher infrastructure (path resolution, environment checks, service supervision, segmented profile persistence) for Codex entrypoints.
@@ -28,6 +28,7 @@ Last Review: 2026-02-25
 - 2025-11-03: Launcher forwards conditioning diagnostics via `--debug-conditioning` when `CODEX_DEBUG_COND` is enabled in profiles/TUI.
 - 2025-12-29: Launcher now resolves the repo root via `CODEX_ROOT` (shared helper) instead of `Path(__file__).parents[...]`, so Windows/WSL launch methods stay consistent.
 - 2025-12-29: Launcher UI service now always receives `API_PORT` (prevents Vite proxy/API_PORT derivation from a fallback WEB_PORT), and the API service performs a strict preflight port check across IPv4/IPv6 localhost (helps diagnose WSL/Windows double-run and “localhost” split-brain).
+- 2026-03-28: `services.py` now owns launcher-started API fallback before spawn (`7850 -> 17850 -> 27850`, or the same arithmetic chain for explicit overrides), stores the chosen API port as runtime truth only while the API handle is active, and clears that truth on stop/kill/unexpected exit so later UI/docs resolution cannot reuse stale state.
 - 2026-03-01: Launcher no longer persists/forwards GGUF exec mode knobs (`CODEX_GGUF_EXEC`, `--gguf-exec`); GGUF runtime policy is fixed to forward dequantization and launcher only forwards LoRA runtime flags (`--lora-apply-mode`, `--lora-online-math`).
 - 2026-01-24: Launcher profiles include explicit device defaults (`CODEX_CORE_DEVICE`, `CODEX_TE_DEVICE`, `CODEX_VAE_DEVICE`) and `services.py` forwards them to the backend as CLI flags (`--core-device`, `--te-device`, `--vae-device`) to avoid bootstrap-time fallback/prompt failures in non-interactive spawns (and profile consistency keeps these keys, no accidental pruning).
 - 2026-01-02: Added standardized file header docstrings to launcher modules (doc-only change; part of rollout).
@@ -59,3 +60,7 @@ Last Review: 2026-02-25
 - 2026-02-25: Launcher profile meta now persists API-only manual env overlay settings (`manual_api_env_enabled`, `manual_api_env_text`), with strict `KEY=VALUE` parsing and fail-loud startup errors when invalid.
 - 2026-03-01: Launcher core defaults now include split trace env knobs (`CODEX_TRACE_INFERENCE_DEBUG`, `CODEX_TRACE_LOAD_PATCH_DEBUG`, `CODEX_TRACE_CALL_DEBUG`, `CODEX_TRACE_CALL_DEBUG_MAX_PER_FUNC`) and the Tk diagnostics tab maps directly to these explicit keys.
 - 2026-03-03: `profiles.py` now uses a single canonical default provider for `external_terminal` (enabled on Windows, disabled elsewhere) and applies it consistently for new profiles plus missing-key fallback paths (`LauncherMeta`, `_load_meta`, `_maybe_migrate_legacy`) while preserving explicit persisted values.
+- 2026-03-31: Launcher-owned envs are runtime-global/bootstrap selectors only. Do not introduce family-specific debug/feature env names into launcher core defaults unless the launcher truly owns that runtime concept.
+- 2026-04-01: Frontend dev typecheck boot policy is launcher-meta-owned (`frontend_dev_typecheck`), not a runtime env var. Launcher UI-service boot must choose between `apps/interface` scripts `dev:fast` and `dev:typecheck` from persisted meta, and manual terminal use stays script-driven.
+- 2026-04-01: Launcher service starts/restarts now consume the last saved profile snapshot from disk, not unsaved working edits. API-only manual env overlay text is validated at save time, and UI/API endpoint truth is controller-owned from committed-vs-live service state.
+- 2026-04-02: `controller.py` now caches the committed launcher profile between save/reload/start boundaries (no per-poll disk reload), running API URLs use service-handle live host/port truth instead of future saved overlay hosts, and running UI URLs resolve repo-root `.webui-ui-*.pid` files for port-guard fallback ports while matching the active launcher-owned UI instance token when multiple same-repo receipts exist. Invalid saved Manual Env Vars overlays are ignored only for URL preview/open while save/start/restart remain fail-loud.

@@ -6,23 +6,24 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Canonical CLIP key-style detection + remapping (generic + SDXL wrappers) into Codex IntegratedCLIP state_dict layout.
-Supports HF `text_model.*`, OpenCLIP legacy `transformer.resblocks.*`, and Codex-canonical `transformer.text_model.*` keys.
-Strips wrapper prefixes and normalizes known buffers/weights, failing loud on unknown non-weight keys. Exposes SDXL wrappers plus
-generic layout-detection/remap helpers used by loader/parser seams.
+Purpose: Canonical CLIP key-style detection + explicit source-style mapping (generic + SDXL wrappers) into Codex IntegratedCLIP state_dict layout.
+Supports HF `text_model.*`, OpenCLIP legacy `transformer.resblocks.*`, Codex-canonical `transformer.text_model.*`, and the known SDXL
+wrapper/container surfaces that expose those same CLIP layouts. Validates known buffers/weights, fails loud on unknown non-weight keys,
+and exposes generic layout-detection/keyspace helpers used by loader/parser seams.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `remap_sdxl_clip_l_state_dict` (function): Keymap for SDXL base CLIP-L (`text_encoder`) into Codex IntegratedCLIP keys.
-- `remap_sdxl_clip_g_state_dict` (function): Keymap for SDXL base CLIP-G (`text_encoder_2`) into Codex IntegratedCLIP keys.
+- `resolve_sdxl_clip_l_keyspace` (function): Keymap for SDXL base CLIP-L (`text_encoder`) into Codex IntegratedCLIP keys.
+- `resolve_sdxl_clip_g_keyspace` (function): Keymap for SDXL base CLIP-G (`text_encoder_2`) into Codex IntegratedCLIP keys.
 - `detect_clip_layout_metadata` (function): Detects CLIP key style + native layout metadata (QKV/projection orientation).
-- `remap_clip_state_dict_with_layout` (function): Generic CLIP keymap with explicit QKV/projection layout controls.
-- `remap_sdxl_clip_l_state_dict_with_layout` (function): SDXL CLIP-L keymap wrapper returning resolved layout metadata.
-- `remap_sdxl_clip_g_state_dict_with_layout` (function): SDXL CLIP-G keymap wrapper returning resolved layout metadata.
+- `resolve_clip_keyspace_with_layout` (function): Generic CLIP keymap with explicit QKV/projection layout controls.
+- `resolve_sdxl_clip_l_keyspace_with_layout` (function): SDXL CLIP-L keymap wrapper returning resolved layout metadata.
+- `resolve_sdxl_clip_g_keyspace_with_layout` (function): SDXL CLIP-G keymap wrapper returning resolved layout metadata.
 
 Notes: Target keyspace matches `apps/backend/runtime/common/nn/clip.py:IntegratedCLIP` (and related Codex CLIP wrappers).
-Key policies (non-exhaustive): strip known wrapper prefixes; drop HF-only buffers (`*.position_ids`) and refuse other unknown non-weight keys;
-canonicalize `logit_scale` (default `ln(100)`); canonicalize optional projection weights into `transformer.text_projection.weight` (CLIP-G; lazy transpose);
-for OpenCLIP-style fused attention weights (`attn.in_proj_{weight,bias}`), expose either split Q/K/V projections or fused `in_proj` keys.
+Key policies (non-exhaustive): interpret known wrapper/container surfaces explicitly per key; drop HF-only buffers (`*.position_ids`) and refuse other unknown non-weight keys;
+canonicalize native `logit_scale` when present, fail loud on duplicate sources, and synthesize the IntegratedCLIP default (`ln(100)`) when the source omits it;
+map optional projection weights into `transformer.text_projection.weight` (CLIP-G; lazy transpose); for OpenCLIP-style fused attention weights (`attn.in_proj_{weight,bias}`),
+expose either split Q/K/V projections or fused `in_proj` keys.
 The QKV layout can be selected via the `qkv_impl` argument (`"auto"`, `"split"` or `"fused"`).
 `"auto"` keeps the native layout: OpenCLIP-style weights stay fused, HF/Codex weights stay split.
 Structural conversion operations in this keymap (QKV split/fuse and projection transpose) are globally policy-gated by
@@ -45,9 +46,9 @@ from apps.backend.runtime.state_dict.key_mapping import (
     KeyStyle,
     KeyStyleDetector,
     KeyStyleSpec,
+    ResolvedKeyspace,
     KeySentinel,
     SentinelKind,
-    strip_repeated_prefixes,
 )
 
 _T = TypeVar("_T")
@@ -304,8 +305,26 @@ class _SDXLCLIPKeymapView(MutableMapping[str, _T]):
             yield k, self[k]
 
 
-def _normalize(key: str) -> str:
-    return strip_repeated_prefixes(str(key), _WRAPPER_PREFIXES)
+def _map_source_key_to_clip_lookup_key(key: str) -> str:
+    source_key = str(key)
+    if _is_supported_clip_root_key(source_key):
+        return source_key
+    for wrapper_prefix in _WRAPPER_PREFIXES:
+        if source_key.startswith(wrapper_prefix):
+            candidate_key = source_key[len(wrapper_prefix) :]
+            if _is_supported_clip_root_key(candidate_key):
+                return candidate_key
+            break
+    return source_key
+
+
+def _is_supported_clip_root_key(key: str) -> bool:
+    return (
+        key.startswith(("transformer.text_model.", "text_model.", "transformer.resblocks."))
+        or key in _LOGIT_KEYS
+        or key in _PROJ_KEYS
+        or key in {"token_embedding.weight", "positional_embedding", "ln_final.weight", "ln_final.bias"}
+    )
 
 
 def _has_native_fused_qkv_keys(keys: Sequence[str]) -> bool:
@@ -362,6 +381,39 @@ def _validate_layout_metadata(layout_metadata: ClipLayoutMetadata) -> None:
     _style_from_source(layout_metadata.source_style)
 
 
+def _spec_source(spec: _Spec) -> str:
+    if isinstance(spec, _Direct):
+        return str(spec.key)
+    if isinstance(spec, _SliceQKV):
+        return str(spec.key)
+    if isinstance(spec, _ConcatQKV):
+        return f"{spec.q_key}|{spec.k_key}|{spec.v_key}"
+    if isinstance(spec, _Transpose):
+        return str(spec.key)
+    if isinstance(spec, _DefaultLogitScale):
+        return f"<default:{spec.value}>"
+    raise KeyMappingError(f"sdxl_clip: unsupported mapping spec type={type(spec).__name__}")
+
+
+def clip_layout_metadata_from_resolved(resolved: ResolvedKeyspace[object]) -> ClipLayoutMetadata:
+    metadata = dict(getattr(resolved, "metadata", {}) or {})
+    qkv_layout = str(metadata.get("qkv_layout", "")).strip().lower()
+    projection_orientation = str(metadata.get("projection_orientation", "")).strip().lower()
+    source_style_value = metadata.get("source_style")
+    source_style = str(source_style_value).strip().lower() if source_style_value is not None else None
+    if not qkv_layout:
+        raise KeyMappingError("sdxl_clip: resolved keyspace metadata is missing qkv_layout")
+    if not projection_orientation:
+        raise KeyMappingError("sdxl_clip: resolved keyspace metadata is missing projection_orientation")
+    layout = ClipLayoutMetadata(
+        qkv_layout=qkv_layout,  # type: ignore[arg-type]
+        projection_orientation=projection_orientation,  # type: ignore[arg-type]
+        source_style=source_style or None,
+    )
+    _validate_layout_metadata(layout)
+    return layout
+
+
 def detect_clip_layout_metadata(
     state_dict: MutableMapping[str, _T],
     *,
@@ -373,12 +425,12 @@ def detect_clip_layout_metadata(
             state_dict = inner
 
     raw_keys = list(state_dict.keys())
-    normalized_keys = [_normalize(raw_key) for raw_key in raw_keys]
-    keys_for_style = [key for key in normalized_keys if not key.endswith(".position_ids")]
+    lookup_keys = [_map_source_key_to_clip_lookup_key(raw_key) for raw_key in raw_keys]
+    keys_for_style = [key for key in lookup_keys if not key.endswith(".position_ids")]
     style = _DETECTOR.detect(keys_for_style)
 
-    has_fused = _has_native_fused_qkv_keys(normalized_keys)
-    has_split = _has_native_split_qkv_keys(normalized_keys)
+    has_fused = _has_native_fused_qkv_keys(lookup_keys)
+    has_split = _has_native_split_qkv_keys(lookup_keys)
     if has_fused and has_split:
         raise KeyMappingError("sdxl_clip: ambiguous native qkv layout detection (both fused and split keys found)")
     if has_fused:
@@ -388,7 +440,7 @@ def detect_clip_layout_metadata(
     else:
         native_qkv_layout = "fused" if style is KeyStyle.OPENCLIP else "split"
 
-    has_projection = keep_projection and any(key in _PROJ_KEYS for key in normalized_keys)
+    has_projection = keep_projection and any(key in _PROJ_KEYS for key in lookup_keys)
     native_projection_orientation = _projection_orientation_for_style(style=style, has_projection=has_projection)
     return ClipLayoutMetadata(
         qkv_layout=native_qkv_layout,
@@ -397,7 +449,7 @@ def detect_clip_layout_metadata(
     )
 
 
-def _remap_clip_state_dict(
+def _resolve_clip_keyspace(
     state_dict: MutableMapping[str, _T],
     *,
     num_layers: int,
@@ -406,7 +458,7 @@ def _remap_clip_state_dict(
     projection_orientation: _ProjectionOrientationTarget,
     layout_metadata: ClipLayoutMetadata | None,
     require_projection: bool,
-) -> tuple[KeyStyle, ClipLayoutMetadata, MutableMapping[str, _T]]:
+) -> ResolvedKeyspace[_T]:
     if qkv_impl not in ("auto", "split", "fused"):
         raise KeyMappingError(
             f"sdxl_clip: invalid qkv_impl={qkv_impl!r} (expected one of: auto, split, fused)"
@@ -425,7 +477,7 @@ def _remap_clip_state_dict(
     allow_structural_conversion = is_structural_weight_conversion_enabled()
 
     raw_keys = list(state_dict.keys())
-    normalized = [(raw, _normalize(raw)) for raw in raw_keys]
+    lookup_key_pairs = [(raw, _map_source_key_to_clip_lookup_key(raw)) for raw in raw_keys]
     if layout_metadata is not None:
         _validate_layout_metadata(layout_metadata)
         detected_layout = layout_metadata
@@ -434,7 +486,7 @@ def _remap_clip_state_dict(
 
     cached_style = _style_from_source(detected_layout.source_style)
     if cached_style is None:
-        keys_for_style = [k for _, k in normalized if not k.endswith(".position_ids")]
+        keys_for_style = [key for _, key in lookup_key_pairs if not key.endswith(".position_ids")]
         style = _DETECTOR.detect(keys_for_style)
     else:
         style = cached_style
@@ -516,15 +568,15 @@ def _remap_clip_state_dict(
             qkv_biases_by_layer.setdefault(layer, {})[proj_letter] = raw_key
         return True
 
-    for raw_key, key in normalized:
+    for raw_key, key in lookup_key_pairs:
         if key.endswith(".position_ids"):
             continue
 
         if key in _LOGIT_KEYS:
             if seen_logit is not None:
-                # Keep the first logit source and ignore aliases to preserve
-                # deterministic behavior across wrapper layouts.
-                continue
+                raise KeyMappingError(
+                    f"sdxl_clip: multiple logit_scale sources: {seen_logit!r},{key!r}"
+                )
             seen_logit = key
             _put("logit_scale", _Direct(raw_key))
             continue
@@ -673,10 +725,22 @@ def _remap_clip_state_dict(
         projection_orientation=resolved_projection_orientation,
         source_style=style.value,
     )
-    return style, resolved_layout, _SDXLCLIPKeymapView(state_dict, mapping)
+    canonical_to_source = {destination: _spec_source(spec) for destination, spec in mapping.items()}
+    return ResolvedKeyspace(
+        style=style,
+        canonical_to_source=canonical_to_source,
+        metadata={
+            "resolver": "sdxl_clip",
+            "qkv_layout": resolved_layout.qkv_layout,
+            "projection_orientation": resolved_layout.projection_orientation,
+            "source_style": resolved_layout.source_style,
+            "keep_projection": bool(keep_projection),
+        },
+        view=_SDXLCLIPKeymapView(state_dict, mapping),
+    )
 
 
-def remap_clip_state_dict_with_layout(
+def resolve_clip_keyspace_with_layout(
     state_dict: MutableMapping[str, _T],
     *,
     num_layers: int,
@@ -685,8 +749,8 @@ def remap_clip_state_dict_with_layout(
     projection_orientation: _ProjectionOrientationTarget = "auto",
     layout_metadata: ClipLayoutMetadata | None = None,
     require_projection: bool = True,
-) -> tuple[KeyStyle, ClipLayoutMetadata, MutableMapping[str, _T]]:
-    return _remap_clip_state_dict(
+) -> ResolvedKeyspace[_T]:
+    return _resolve_clip_keyspace(
         state_dict,
         num_layers=num_layers,
         keep_projection=keep_projection,
@@ -697,15 +761,15 @@ def remap_clip_state_dict_with_layout(
     )
 
 
-def remap_sdxl_clip_l_state_dict_with_layout(
+def resolve_sdxl_clip_l_keyspace_with_layout(
     state_dict: MutableMapping[str, _T],
     *,
     qkv_impl: _QKVImpl = "auto",
     layout_metadata: ClipLayoutMetadata | None = None,
-) -> tuple[KeyStyle, ClipLayoutMetadata, MutableMapping[str, _T]]:
+) -> ResolvedKeyspace[_T]:
     """Keymap SDXL base CLIP-L weights (text_encoder) into Codex IntegratedCLIP keys."""
 
-    return remap_clip_state_dict_with_layout(
+    return resolve_clip_keyspace_with_layout(
         state_dict,
         num_layers=12,
         keep_projection=False,
@@ -716,29 +780,28 @@ def remap_sdxl_clip_l_state_dict_with_layout(
     )
 
 
-def remap_sdxl_clip_l_state_dict(
+def resolve_sdxl_clip_l_keyspace(
     state_dict: MutableMapping[str, _T],
     *,
     qkv_impl: _QKVImpl = "auto",
-) -> tuple[KeyStyle, MutableMapping[str, _T]]:
-    style, _layout, remapped = remap_sdxl_clip_l_state_dict_with_layout(
+) -> ResolvedKeyspace[_T]:
+    return resolve_sdxl_clip_l_keyspace_with_layout(
         state_dict,
         qkv_impl=qkv_impl,
         layout_metadata=None,
     )
-    return style, remapped
 
 
-def remap_sdxl_clip_g_state_dict_with_layout(
+def resolve_sdxl_clip_g_keyspace_with_layout(
     state_dict: MutableMapping[str, _T],
     *,
     qkv_impl: _QKVImpl = "auto",
     projection_orientation: _ProjectionOrientationTarget = "auto",
     layout_metadata: ClipLayoutMetadata | None = None,
-) -> tuple[KeyStyle, ClipLayoutMetadata, MutableMapping[str, _T]]:
+) -> ResolvedKeyspace[_T]:
     """Keymap SDXL base CLIP-G weights (text_encoder_2) into Codex IntegratedCLIP keys."""
 
-    return remap_clip_state_dict_with_layout(
+    return resolve_clip_keyspace_with_layout(
         state_dict,
         num_layers=32,
         keep_projection=True,
@@ -749,27 +812,27 @@ def remap_sdxl_clip_g_state_dict_with_layout(
     )
 
 
-def remap_sdxl_clip_g_state_dict(
+def resolve_sdxl_clip_g_keyspace(
     state_dict: MutableMapping[str, _T],
     *,
     qkv_impl: _QKVImpl = "auto",
     projection_orientation: _ProjectionOrientationTarget = "auto",
-) -> tuple[KeyStyle, MutableMapping[str, _T]]:
-    style, _layout, remapped = remap_sdxl_clip_g_state_dict_with_layout(
+) -> ResolvedKeyspace[_T]:
+    return resolve_sdxl_clip_g_keyspace_with_layout(
         state_dict,
         qkv_impl=qkv_impl,
         projection_orientation=projection_orientation,
         layout_metadata=None,
     )
-    return style, remapped
 
 
 __all__ = [
     "ClipLayoutMetadata",
+    "clip_layout_metadata_from_resolved",
     "detect_clip_layout_metadata",
-    "remap_clip_state_dict_with_layout",
-    "remap_sdxl_clip_g_state_dict_with_layout",
-    "remap_sdxl_clip_g_state_dict",
-    "remap_sdxl_clip_l_state_dict_with_layout",
-    "remap_sdxl_clip_l_state_dict",
+    "resolve_clip_keyspace_with_layout",
+    "resolve_sdxl_clip_g_keyspace_with_layout",
+    "resolve_sdxl_clip_g_keyspace",
+    "resolve_sdxl_clip_l_keyspace_with_layout",
+    "resolve_sdxl_clip_l_keyspace",
 ]

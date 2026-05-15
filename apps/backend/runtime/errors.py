@@ -6,15 +6,16 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Structured error reporting utilities for the Codex backend.
-Provides a thread-safe registry of recent exceptions plus helpers to capture, log, format, and display actionable diagnostics without relying on
-legacy error globals.
+Purpose: Structured backend error-reporting helpers built on the canonical runtime diagnostics seams.
+Provides a thread-safe registry of recent exceptions plus helpers to capture handled failures, emit concise operational summaries through the
+backend logging wrapper, and persist full tracebacks through the centralized exception-log owner instead of ad-hoc logger formatting.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `ExceptionFrame` (dataclass): One captured stack frame (location + optional source line).
 - `ExceptionRecord` (dataclass): Captured exception payload (type/message/context + frames) with dict conversion helper.
 - `ErrorRegistry` (class): Thread-safe bounded registry (deque) of recent exception records.
 - `_format_tb` (function): Converts a traceback into `ExceptionFrame` entries.
+- `_dump_exception_best_effort` (function): Attempts centralized traceback persistence without letting dump-path failures mask the original error flow.
 - `record_exception` (function): Records an exception into the global registry and returns an `ExceptionRecord`.
 - `record_current_exception` (function): Records the current active exception (if any).
 - `get_recent_exceptions` (function): Returns recent exception records (newest first).
@@ -30,15 +31,15 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, asdict
-import logging
 import sys
 import threading
 import traceback
 from types import TracebackType
 from typing import Iterable, List
 
-
-_LOGGER = logging.getLogger("backend.errors")
+from apps.backend.runtime.diagnostics.error_summary import summarize_exception_for_console
+from apps.backend.runtime.diagnostics.exception_hook import dump_exception
+from apps.backend.runtime.logging import emit_backend_message
 
 
 @dataclass(frozen=True)
@@ -134,6 +135,27 @@ def clear_records() -> None:
     _REGISTRY.clear()
 
 
+def _dump_exception_best_effort(
+    exc_type: type[BaseException] | None,
+    exc: BaseException,
+    tb: TracebackType | None,
+    *,
+    where: str,
+    context: dict[str, object] | None = None,
+) -> None:
+    try:
+        dump_exception(exc_type, exc, tb, where=where, context=context)
+    except Exception as dump_error:
+        emit_backend_message(
+            "full exception dump unavailable",
+            logger=__name__,
+            level="WARNING",
+            where=where,
+            dump_error=type(dump_error).__name__,
+            error=str(dump_error),
+        )
+
+
 def report_error(message: str, *, exc_info: bool = False, context: str | None = None) -> None:
     """Log *message* and persist it in the registry.
 
@@ -142,11 +164,34 @@ def report_error(message: str, *, exc_info: bool = False, context: str | None = 
     """
 
     if exc_info:
-        _LOGGER.exception(message)
-        record_current_exception(context=context or "report_error")
-        return
+        exc_type, exc, tb = sys.exc_info()
+        if exc is not None:
+            record_exception(exc, context=context or "report_error", tb=tb)
+            _dump_exception_best_effort(
+                exc_type,
+                exc,
+                tb,
+                where="runtime.errors.report_error",
+                context={"context": context} if context else None,
+            )
+            emit_backend_message(
+                message,
+                logger=__name__,
+                level="ERROR",
+                context=context,
+                summary=summarize_exception_for_console(exc),
+            )
+            return
 
-    _LOGGER.error(message)
+        emit_backend_message(
+            message,
+            logger=__name__,
+            level="ERROR",
+            context=context,
+            summary="no active exception",
+        )
+    else:
+        emit_backend_message(message, logger=__name__, level="ERROR", context=context)
     record = ExceptionRecord(
         exception_type="Message",
         message=message,
@@ -166,11 +211,11 @@ def print_error_explanation(message: str, *, header: str | None = None) -> None:
     banner = "=" * width
     title = f"{header}:" if header else None
     if title:
-        _LOGGER.error(title)
-    _LOGGER.error(banner)
+        emit_backend_message(title, logger=__name__, level="ERROR")
+    emit_backend_message(banner, logger=__name__, level="ERROR")
     for line in lines:
-        _LOGGER.error(line)
-    _LOGGER.error(banner)
+        emit_backend_message(line, logger=__name__, level="ERROR")
+    emit_backend_message(banner, logger=__name__, level="ERROR")
     # Store the explanation so API clients can read it back if needed
     record = ExceptionRecord(
         exception_type="Explanation",
@@ -185,12 +230,19 @@ def display_exception(exc: BaseException, *, context: str | None = None, full_tr
     """Log *exc* with formatted traceback and persist it."""
 
     if full_traceback:
-        _LOGGER.exception("%s", context or exc)
-    else:
-        summary = traceback.TracebackException.from_exception(exc, capture_locals=False)
-        formatted = "".join(summary.format()).rstrip()
-        _LOGGER.error("%s: %s", context or exc.__class__.__name__, exc)
-        _LOGGER.error("%s", formatted)
+        _dump_exception_best_effort(
+            exc.__class__,
+            exc,
+            exc.__traceback__,
+            where="runtime.errors.display_exception",
+            context={"context": context} if context else None,
+        )
+    emit_backend_message(
+        summarize_exception_for_console(exc),
+        logger=__name__,
+        level="ERROR",
+        context=context,
+    )
     return record_exception(exc, context=context)
 
 

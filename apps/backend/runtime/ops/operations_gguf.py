@@ -7,11 +7,11 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: GGUF runtime operations backed by `apps.backend.quantization` (CodexQuantization).
-Provides direct dequantization helpers for runtime GGUF parameters.
+Provides direct dequantization helpers for runtime GGUF parameters and a structural guard for unsupported packed artifacts.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `CodexParameter` (class): Packed GGUF tensor wrapper (imported from `apps.backend.quantization.tensor`).
-- `CodexPackLinearQ4KTilepackV1Parameter` (class): Packed CodexPack linear-weight wrapper (imported from `apps.backend.quantization.codexpack_tensor`).
+- `is_packed_gguf_artifact` (function): Returns True when a tensor/parameter still carries removed packed-artifact markers.
 - `dequantize_tensor` (function): Dequantize a `CodexParameter` to a float tensor (pass-through for non-GGUF tensors).
 - `__all__` (constant): Public export list for GGUF runtime operations.
 """
@@ -19,14 +19,20 @@ Symbols (top-level; keep in sync; no ghosts):
 from __future__ import annotations
 
 from apps.backend.quantization.api import dequantize as codex_dequantize
-from apps.backend.quantization.codexpack_tensor import CodexPackLinearQ4KTilepackV1Parameter
 from apps.backend.quantization.tensor import CodexParameter
 
 __all__ = [
-    "CodexPackLinearQ4KTilepackV1Parameter",
     "CodexParameter",
     "dequantize_tensor",
+    "is_packed_gguf_artifact",
 ]
+
+
+def is_packed_gguf_artifact(tensor) -> bool:
+    """Return True when a tensor/parameter still carries removed packed-artifact markers."""
+    if tensor is None:
+        return False
+    return hasattr(tensor, "keymap_id") or hasattr(tensor, "kernel_id")
 
 
 def dequantize_tensor(tensor):

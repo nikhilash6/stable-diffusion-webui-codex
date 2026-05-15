@@ -13,8 +13,7 @@ and GGUF-specific paths.
 Symbols (top-level; keep in sync; no ghosts):
 - `_parse_positive_int` (function): Parses env/config ints with a non-negative clamp and default fallback.
 - `_log_weight_fetch` (function): Debug logger for repeated weight/bias fetch events (with per-layer mute limit).
-- `_codexpack_require_sm86_cuda` (function): Validates CUDA + SM86+ prerequisites for CodexPack packed-kernel execution.
-- `_codexpack_q4k_tilepack_linear` (function): Calls the CodexPack packed linear kernel op (fail loud when unavailable).
+- `_raise_packed_gguf_unsupported` (function): Raises the canonical root-runtime error for removed packed GGUF artifacts.
 - `OperationContext` (dataclass): Thread-local-ish operation config (device/dtype + manual cast + weight-format hints).
 - `StreamStashEntry` (dataclass): One stashed streaming entry (weight/bias + bookkeeping for swap/stream state).
 - `StreamStash` (dataclass): Tracks streaming stash state across ops (used to coordinate stream workers and cleanup).
@@ -37,6 +36,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import contextlib
 import logging
@@ -53,77 +53,19 @@ from apps.backend.runtime import utils
 from apps.backend.runtime.memory import memory_management, stream
 from apps.backend.runtime.misc.autocast import autocast_disabled
 from .operations_gguf import (
-    CodexPackLinearQ4KTilepackV1Parameter,
     CodexParameter,
     dequantize_tensor,
+    is_packed_gguf_artifact,
 )
 
-logger = logging.getLogger("backend.runtime.ops.operations")
+logger = get_backend_logger("backend.runtime.ops.operations")
 
 
-def _codexpack_require_sm86_cuda(device: torch.device) -> None:
-    if device.type != "cuda":
-        raise RuntimeError(f"CodexPack packed-kernel execution requires CUDA; got device={device}.")
-    major, minor = torch.cuda.get_device_capability(device)
-    if (major, minor) < (8, 6):
-        raise RuntimeError(
-            "CodexPack packed-kernel execution requires NVIDIA SM86+ (RTX 30xx baseline). "
-            f"got compute_capability={(major, minor)}."
-        )
-
-
-def _codexpack_q4k_tilepack_linear(
-    x: torch.Tensor,
-    *,
-    weight: CodexPackLinearQ4KTilepackV1Parameter,
-    bias: torch.Tensor | None,
-) -> torch.Tensor:
-    if x.dtype != torch.float16:
-        raise RuntimeError(
-            "CodexPack packed-kernel execution v1 only supports fp16 activations. "
-            f"got x.dtype={x.dtype}."
-        )
-    _codexpack_require_sm86_cuda(x.device)
-
-    if x.shape[-1] != weight.in_features:
-        raise RuntimeError(
-            "CodexPack packed linear input feature mismatch: "
-            f"x.shape[-1]={x.shape[-1]} weight.in_features={weight.in_features}."
-        )
-
-    import importlib
-
-    _codexpack_cuda = importlib.import_module("apps.backend.runtime.ops.codexpack_cuda")
-    _codexpack_cuda.available()
-    ops = getattr(torch, "ops", None)
-    if ops is None or not hasattr(ops, "codexpack") or not hasattr(ops.codexpack, "q4k_tilepack_linear"):
-        hint = (
-            "Build in-place:\n"
-            "  CODEX_ROOT=\"$(git rev-parse --show-toplevel)\"\n"
-            "  cd \"$CODEX_ROOT/apps/backend/runtime/kernels/codexpack\"\n"
-            "  PYTHONPATH=\"$CODEX_ROOT\" \"$CODEX_ROOT/.venv/bin/python\" setup.py build_ext --inplace\n"
-        )
-        last = _codexpack_cuda.last_error()
-        suffix = f"\nLast error: {last}" if last else ""
-        raise RuntimeError(
-            "CodexPack packed kernel extension is not available (missing `torch.ops.codexpack.q4k_tilepack_linear`)."
-            f"{suffix}\n{hint}"
-        )
-
-    if bias is not None:
-        if bias.dtype != torch.float16:
-            raise RuntimeError(
-                "CodexPack packed linear v1 requires fp16 bias when present. "
-                f"got bias.dtype={bias.dtype}."
-            )
-        if bias.numel() != weight.out_features:
-            raise RuntimeError(
-                "CodexPack packed linear bias size mismatch: "
-                f"bias.numel()={bias.numel()} weight.out_features={weight.out_features}."
-            )
-
-    return torch.ops.codexpack.q4k_tilepack_linear(x, weight, weight.out_features, weight.in_features, bias)
-
+def _raise_packed_gguf_unsupported(where: str) -> None:
+    raise RuntimeError(
+        f"{where}: packed GGUF artifacts are not supported on the root runtime path. "
+        "Load the base `.gguf` artifact instead."
+    )
 
 def _parse_positive_int(value: str | None, default: int) -> int:
     if value is None:
@@ -723,9 +665,9 @@ class CodexOperationsGGUF(CodexOperations):
             computation_dtype: torch.dtype,
             is_weight: bool,
         ) -> torch.Tensor:
+            if is_packed_gguf_artifact(tensor_obj):
+                _raise_packed_gguf_unsupported("GGUF Linear.load_state_dict")
             loaded = tensor_obj.to(device=target_device)
-            if isinstance(loaded, CodexPackLinearQ4KTilepackV1Parameter):
-                return loaded
             if isinstance(loaded, CodexParameter):
                 loaded.computation_dtype = computation_dtype
                 # Transformers UMT5 casts FFN activations to `wo.weight.dtype` unless it is int8.
@@ -810,17 +752,15 @@ class CodexOperationsGGUF(CodexOperations):
                     "GGUF Linear received non-floating activations "
                     f"(dtype={x.dtype}). Expected dequantized floating activations before dense matmul."
                 )
-            if isinstance(self.weight, CodexPackLinearQ4KTilepackV1Parameter):
-                if self.bias is not None:
-                    self.bias = utils.tensor2parameter(dequantize_tensor(self.bias).to(device=x.device, dtype=x.dtype))
-                return _codexpack_q4k_tilepack_linear(x, weight=self.weight, bias=self.bias)
+            if is_packed_gguf_artifact(self.weight) or is_packed_gguf_artifact(self.bias):
+                _raise_packed_gguf_unsupported("GGUF Linear.forward")
 
             if self.bias is not None and self.bias.dtype != x.dtype:
                 self.bias = utils.tensor2parameter(dequantize_tensor(self.bias).to(x.dtype))
             if (
                 self.weight is not None
                 and self.weight.dtype != x.dtype
-                and not isinstance(self.weight, (CodexParameter, CodexPackLinearQ4KTilepackV1Parameter))
+                and not isinstance(self.weight, CodexParameter)
             ):
                 self.weight = utils.tensor2parameter(self.weight.to(x.dtype))
             weight, bias, signal = weights_manual_cast(

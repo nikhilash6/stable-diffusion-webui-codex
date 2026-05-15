@@ -22,6 +22,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `get_layout_metadata` (function): Read cached layout metadata for a given `(sha256, layout_key)`.
 - `set_layout_metadata` (function): Write cached layout metadata for a given `(sha256, layout_key)` (conflict fail-loud).
 - `refresh` (function): Force a registry rescan.
+- `invalidate` (function): Clear in-memory checkpoint/VAE scan snapshots (next read lazily rescans).
 """
 
 from __future__ import annotations
@@ -142,11 +143,16 @@ def refresh() -> None:
     registry.refresh()
 
 
+def invalidate() -> None:
+    registry.invalidate()
+
+
 __all__ = [
     "find_checkpoint",
     "find_checkpoint_by_sha",
     "get_layout_metadata",
     "hash_for_file",
+    "invalidate",
     "list_checkpoints",
     "list_checkpoints_as_dict",
     "list_vaes",

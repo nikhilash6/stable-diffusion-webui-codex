@@ -21,7 +21,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `transformers_convert` (function): Renames legacy transformer keys to HF-style encoder keys (incl. Q/K/V split).
 - `state_dict_key_replace` (function): Applies a direct `{old: new}` key replacement mapping.
 - `state_dict_prefix_replace` (function): Rewrites keys using multiple prefix replacements (optionally into a new dict).
-- `safe_load_state_dict` (function): Conservative loader that copies tensors key-by-key and returns (missing, unexpected) (Windows: materializes SafeTensors once).
+- `safe_load_state_dict` (function): Conservative loader that copies tensors key-by-key, supports caller-owned allowed-missing prefix suppression for proven staged partial loads, and returns (missing, unexpected) (Windows: materializes SafeTensors once).
 """
 
 import torch
@@ -29,6 +29,7 @@ import logging
 import json
 import sys
 from pathlib import Path
+from apps.backend.runtime.logging import get_backend_logger
 
 from apps.backend.infra.config.weight_structural_conversion import (
     ENV_WEIGHT_STRUCTURAL_CONVERSION,
@@ -37,7 +38,7 @@ from apps.backend.infra.config.weight_structural_conversion import (
 from apps.backend.runtime import trace as _trace
 from apps.backend.runtime.state_dict.views import FilterPrefixView
 
-_log = logging.getLogger("backend.state_dict")
+_log = get_backend_logger("backend.state_dict")
 _KEYMAP_DIR = Path("logs")
 _KEYMAP_PATH = _KEYMAP_DIR / "parser_keymap.log"
 
@@ -176,7 +177,7 @@ def state_dict_prefix_replace(state_dict, replace_prefix, filter_keys=False):
     return out
 
 
-def safe_load_state_dict(model, sd, *, log_name=None):
+def safe_load_state_dict(model, sd, *, log_name=None, ignore_missing_prefixes=()):
     """Conservative loader: iterates model keys and copies tensors one by one.
 
     Avoids materializing all tensors and reduces device/dtype edge cases.
@@ -235,6 +236,11 @@ def safe_load_state_dict(model, sd, *, log_name=None):
             _trace.event("load_state_dict_progress", name=log_name, loaded=loaded)
 
     unexpected = [k for k in sd_keys if k not in model_keys]
+    if ignore_missing_prefixes:
+        normalized_prefixes = tuple(str(prefix) for prefix in ignore_missing_prefixes if str(prefix))
+        if normalized_prefixes:
+            missing = [key for key in missing if not any(str(key).startswith(prefix) for prefix in normalized_prefixes)]
+
     if missing:
         _log.warning('%s Missing: %d keys', log_name, len(missing))
         _log.debug("%s missing_count=%d sample=%s", log_name, len(missing), missing[:10])

@@ -16,6 +16,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import emit_backend_message, get_backend_logger
 
 import logging
 from typing import Optional
@@ -30,7 +31,7 @@ from .embed import EmbedND, MLPEmbedder
 from .components import DoubleStreamBlock, LastLayer, SingleStreamBlock
 from apps.backend.runtime.sampling.block_progress import resolve_block_progress_callback
 
-logger = logging.getLogger("backend.runtime.flux")
+logger = get_backend_logger("backend.runtime.flux")
 
 
 class FluxTransformer2DModel(nn.Module):
@@ -103,7 +104,13 @@ class FluxTransformer2DModel(nn.Module):
             if hf_patch_size == 1 and raw_config.get("in_channels", 16) == 64:
                 # Diffusers-style: 64 = 16 * 2 * 2 (VAE channels * patch_size^2)
                 raw_config["in_channels"] = 16
-                logger.debug("Normalized in_channels from 64 (diffusers) to 16 (Codex internal patchification)")
+                emit_backend_message(
+                    "Normalized in_channels from diffusers patchified layout",
+                    logger=logger.name,
+                    level=logging.DEBUG,
+                    from_channels=64,
+                    to_channels=16,
+                )
 
             # Remove keys that don't belong to FluxArchitectureConfig
             raw_config.pop("patch_size", None)  # We handle this in positional config
@@ -183,15 +190,17 @@ class FluxTransformer2DModel(nn.Module):
 
         batch, _, height, width = x.shape
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "Flux forward start: batch=%d latent=%dx%dx%d context=%d vec=%d guidance=%s",
-                batch,
-                height,
-                width,
-                x.size(1),
-                context.shape[1],
-                y.shape[1],
-                guidance is not None,
+            emit_backend_message(
+                "Flux forward start",
+                logger=logger.name,
+                level=logging.DEBUG,
+                batch=batch,
+                latent_height=height,
+                latent_width=width,
+                latent_channels=x.size(1),
+                context_tokens=context.shape[1],
+                vec_dim=y.shape[1],
+                guidance_present=guidance is not None,
             )
         patch = self.patch_size
         pad_h = (-height) % patch
@@ -213,9 +222,11 @@ class FluxTransformer2DModel(nn.Module):
         img = img_target
         if image_latents is not None:
             if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "FluxKontext conditioning enabled: image_latents=%s",
-                    tuple(image_latents.shape),
+                emit_backend_message(
+                    "FluxKontext conditioning enabled",
+                    logger=logger.name,
+                    level=logging.DEBUG,
+                    image_latents=tuple(image_latents.shape),
                 )
             if image_latents.shape[2] != height or image_latents.shape[3] != width:
                 raise ValueError(
@@ -242,12 +253,27 @@ class FluxTransformer2DModel(nn.Module):
 
         if self.config.guidance.enabled:
             if guidance is None:
-                logger.error("[flux] guidance.enabled=True but guidance tensor is None!")
+                emit_backend_message(
+                    "[flux] guidance.enabled=True but guidance tensor is None",
+                    logger=logger.name,
+                    level=logging.ERROR,
+                )
                 raise ValueError("guidance embedding required but not provided")
-            logger.debug("[flux] forward guidance: enabled=True, shape=%s, values=[%.2f]", tuple(guidance.shape), guidance[0].item())
+            emit_backend_message(
+                "[flux] forward guidance enabled",
+                logger=logger.name,
+                level=logging.DEBUG,
+                shape=tuple(guidance.shape),
+                first_value=guidance[0].item(),
+            )
             vec = vec + self.guidance_in(timestep_embedding(guidance, 256).to(img.dtype))
         else:
-            logger.debug("[flux] forward guidance: enabled=False (schnell variant), guidance_arg=%s", guidance is not None)
+            emit_backend_message(
+                "[flux] forward guidance disabled",
+                logger=logger.name,
+                level=logging.DEBUG,
+                guidance_arg_present=guidance is not None,
+            )
 
         txt = self.txt_in(context)
         rotary = self._build_rotary(img_ids, txt_ids)

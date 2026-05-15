@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Vite configuration for the Codex WebUI frontend.
-Configures dev server host/ports + API proxy/HMR and a small plugin that watches root env/Tailwind/PostCSS files to trigger a restart on change.
+Configures dev server host/ports + API proxy/HMR and a small plugin that watches root env files to trigger a restart on change.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `watchRootConfigs` (function): Vite plugin that watches root config files and restarts the dev server on change.
@@ -20,22 +20,15 @@ import path from 'node:path'
 import vue from '@vitejs/plugin-vue'
 import tailwind from '@tailwindcss/vite'
 
-// Restart vite dev server if root .env or Tailwind/PostCSS configs change
+// Restart vite dev server if root env files change.
 const watchRootConfigs = () => ({
   name: 'watch-root-configs',
   configureServer(server) {
     const root = path.resolve(__dirname, '../../')
-    const globs = [
-      path.join(root, '.env'),
-      path.join(root, '.env.local'),
-      path.join(__dirname, 'tailwind.config.*'),
-      path.join(root, 'tailwind.config.*'),
-      path.join(__dirname, 'postcss.config.*')
-    ]
-    server.watcher.add(globs)
+    server.watcher.add(path.join(root, '.env*'))
     server.watcher.on('change', (file) => {
       const base = path.basename(file)
-      if (base.startsWith('.env') || base.startsWith('tailwind.config') || base.startsWith('postcss.config')) {
+      if (base.startsWith('.env')) {
         console.log(`[vite] Detected config change (${base}). Restarting dev server...`)
         server.restart()
       }

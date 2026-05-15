@@ -7,9 +7,11 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Common engine base helpers for diffusion runtimes (component bundles, loading hooks, smart offload/cache integration).
-Defines `CodexObjects` and the shared engine load/unload path, including fail-fast `.gguf` core-only validation and explicit `vae_source`/`tenc_source`
-selection. Also provides default first-stage VAE encode/decode for image engines and canonical task wrappers that delegate to mode use-cases (Option A) so engines stay adapters.
+Defines `CodexObjects` and the shared engine load/unload path, including fail-fast core-only checkpoint validation and explicit
+`vae_source`/`tenc_source` selection. Also provides default first-stage VAE encode/decode for image engines and canonical task wrappers that
+delegate to mode use-cases (Option A) so engines stay adapters.
 External-asset-first families (e.g., Z-Image and Anima) treat `vae_path` as selection rather than a state-dict override.
+State-dict VAE overrides are normalized once before lane resolution so known SDXL/Flow metadata is stripped without reintroducing model-class heuristics.
 Engine lifecycle logs (`load.start` / `load.complete` / `unload.start`) are emitted through the global runtime event emitter.
 Patcher-backed component memory lifecycle (for example denoiser/VAE/CLIP-vision wrappers) uses canonical patcher-first targets so smart-offload bookkeeping does not fork records across wrapper and patcher identities.
 
@@ -21,10 +23,12 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_ComponentTracker` (class): Internal tracker for loaded components/paths (used to decide reload/unload behavior).
 - `CodexDiffusionEngine` (class): Abstract base class for diffusion engines; provides shared load/unload orchestration, canonical task wrappers
   (e.g. `txt2img` delegates to `apps/backend/use_cases/txt2img.py`), and runtime helpers including explicit asset-source selection
-  (`vae_source`/`tenc_source`), default image VAE stage helpers (`encode_first_stage`/`decode_first_stage`), and fail-fast validation for core-only `.gguf` checkpoints (subclasses implement required component sets).
+  (`vae_source`/`tenc_source`), default image VAE stage helpers (`encode_first_stage`/`decode_first_stage`), and fail-fast validation for
+  core-only checkpoints (subclasses implement required component sets).
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import BackendLoggerProxy, get_backend_logger
 
 import logging
 import os
@@ -48,9 +52,9 @@ from apps.backend.runtime.model_registry.specs import ModelFamily
 from apps.backend.runtime.common.vae_lane_policy import (
     detect_vae_layout,
     resolve_vae_layout_lane,
-    strip_known_vae_prefixes,
     uses_ldm_native_lane,
 )
+from apps.backend.runtime.common.vae import prepare_external_vae_override_state_dict
 from apps.backend.runtime.common.vae_ldm import is_ldm_native_vae_instance
 from apps.backend.runtime.models.loader import DiffusionModelBundle, resolve_diffusion_bundle
 from apps.backend.runtime.models.text_encoder_overrides import TextEncoderOverrideConfig
@@ -59,7 +63,7 @@ from apps.backend.runtime.checkpoint.io import load_torch_file
 from apps.backend.runtime.models.state_dict import safe_load_state_dict
 
 
-logger = logging.getLogger("backend.engines.common.base")
+logger = get_backend_logger(__name__)
 
 
 class EngineStatus(TypedDict, total=False):
@@ -81,6 +85,8 @@ class LoadOptions:
     text_encoder_override: TextEncoderOverrideConfig | None = None
     vae_path: str | None = None
     vae_source: Literal["built_in", "external"] | None = None
+    checkpoint_core_only: bool | None = None
+    model_format: Literal["checkpoint", "diffusers", "gguf"] | None = None
     core_streaming_enabled: bool | None = None
     extras: dict[str, object] = field(default_factory=dict)
 
@@ -139,29 +145,30 @@ class LoadOptions:
         elif vae_source_raw is not None and not isinstance(vae_source_raw, str):
             raise TypeError("vae_source must be a non-empty string when provided.")
 
-        explicit_streaming: bool | None = None
-        legacy_streaming: bool | None = None
+        checkpoint_core_only_raw = working.pop("checkpoint_core_only", None)
+        checkpoint_core_only: bool | None = None
+        if checkpoint_core_only_raw is not None:
+            if not isinstance(checkpoint_core_only_raw, bool):
+                raise TypeError("checkpoint_core_only must be a boolean when provided.")
+            checkpoint_core_only = checkpoint_core_only_raw
+
+        model_format_raw = working.pop("model_format", None)
+        model_format: Literal["checkpoint", "diffusers", "gguf"] | None = None
+        if isinstance(model_format_raw, str) and model_format_raw.strip():
+            normalized_model_format = model_format_raw.strip().lower()
+            if normalized_model_format not in {"checkpoint", "diffusers", "gguf"}:
+                raise RuntimeError("model_format must be one of: checkpoint, diffusers, gguf.")
+            model_format = cast(Literal["checkpoint", "diffusers", "gguf"], normalized_model_format)
+        elif model_format_raw is not None and not isinstance(model_format_raw, str):
+            raise TypeError("model_format must be a non-empty string when provided.")
+
         if "core_streaming_enabled" in working:
             explicit_streaming_raw = working.pop("core_streaming_enabled")
             if not isinstance(explicit_streaming_raw, bool):
                 raise TypeError("core_streaming_enabled must be a boolean when provided.")
-            explicit_streaming = explicit_streaming_raw
-        if "codex_core_streaming" in working:
-            legacy_streaming_raw = working.pop("codex_core_streaming")
-            if not isinstance(legacy_streaming_raw, bool):
-                raise TypeError("codex_core_streaming must be a boolean when provided.")
-            legacy_streaming = legacy_streaming_raw
-        if (
-            explicit_streaming is not None
-            and legacy_streaming is not None
-            and explicit_streaming != legacy_streaming
-        ):
-            raise RuntimeError(
-                "Conflicting streaming flags: core_streaming_enabled and codex_core_streaming must match."
-            )
-        core_streaming_enabled = (
-            explicit_streaming if explicit_streaming is not None else legacy_streaming
-        )
+            core_streaming_enabled: bool | None = explicit_streaming_raw
+        else:
+            core_streaming_enabled = None
 
         return cls(
             tenc_source=tenc_source,
@@ -169,6 +176,8 @@ class LoadOptions:
             text_encoder_override=text_encoder_override,
             vae_path=vae_path,
             vae_source=vae_source,
+            checkpoint_core_only=checkpoint_core_only,
+            model_format=model_format,
             core_streaming_enabled=core_streaming_enabled,
             extras=working,
         )
@@ -184,6 +193,10 @@ class LoadOptions:
             options["vae_path"] = self.vae_path
         if self.vae_source is not None:
             options["vae_source"] = self.vae_source
+        if self.checkpoint_core_only is not None:
+            options["checkpoint_core_only"] = self.checkpoint_core_only
+        if self.model_format is not None:
+            options["model_format"] = self.model_format
         if self.core_streaming_enabled is not None:
             options["core_streaming_enabled"] = self.core_streaming_enabled
         return options
@@ -274,7 +287,7 @@ class CodexObjects:
 class _ComponentTracker:
     """Tracks active/original/LoRA component snapshots for an engine."""
 
-    def __init__(self, *, logger: logging.Logger) -> None:
+    def __init__(self, *, logger: BackendLoggerProxy) -> None:
         self._logger = logger
         self._active: CodexObjects | None = None
         self._original: CodexObjects | None = None
@@ -375,11 +388,10 @@ class CodexDiffusionEngine(BaseInferenceEngine, ABC):
         "sdxl": "is_sdxl",
     }
 
-    def __init__(self, *, logger: logging.Logger | None = None) -> None:  # noqa: D401
+    def __init__(self, *, logger: BackendLoggerProxy | None = None) -> None:  # noqa: D401
         super().__init__()
-        self._logger = logger or logging.getLogger(self.__class__.__name__)
+        self._logger = logger or get_backend_logger(__name__)
         self.model_config: object | None = None
-        self.is_inpaint: bool = False
         self.current_lora_hash = "[]"
         self._component_tracker = _ComponentTracker(logger=self._logger)
         self._model_families: set[str] = set()
@@ -499,8 +511,8 @@ class CodexDiffusionEngine(BaseInferenceEngine, ABC):
         bundle_obj = raw_options.pop("_bundle", None)
 
         # Text encoder selection/override is explicit via `tenc_source` + `tenc_path` (engine-side) or
-        # `text_encoder_override` (loader-side). GGUF checkpoints are core-only and therefore require
-        # external text encoder weights; full checkpoints default to built-in unless overridden.
+        # `text_encoder_override` (loader-side). Core-only checkpoints require external text encoder
+        # weights; full checkpoints default to built-in unless overridden.
         raw_tenc_path = raw_options.get("tenc_path")
         tenc_path: str | list[str] | None = None
         if isinstance(raw_tenc_path, str):
@@ -615,13 +627,38 @@ class CodexDiffusionEngine(BaseInferenceEngine, ABC):
         if bundle.family is ModelFamily.ANIMA and isinstance(tenc_path, list):
             raise RuntimeError("Anima supports exactly 1 text encoder; tenc_path must be a string.")
 
-        checkpoint_suffix = os.path.splitext(str(getattr(bundle, "model_ref", "") or ""))[1].lower()
-        is_core_only_gguf = checkpoint_suffix == ".gguf"
-        if is_core_only_gguf and self.required_text_encoders and tenc_source != "external":
+        load_options_payload: dict[str, Any] = dict(raw_options)
+        if te_override_cfg is not None:
+            load_options_payload["text_encoder_override"] = te_override_cfg
+        load_options = LoadOptions.from_mapping(load_options_payload)
+
+        explicit_model_format = load_options.model_format
+        if explicit_model_format is None:
             raise RuntimeError(
-                "Core-only GGUF checkpoint requires external text encoder(s). "
+                "Image load requires explicit model_format in load options; "
+                "router/task must forward the request-authoritative selector."
+            )
+        checkpoint_is_core_only = load_options.checkpoint_core_only
+        if checkpoint_is_core_only is None:
+            raise RuntimeError(
+                "Image load requires explicit checkpoint_core_only in load options; "
+                "router/task must forward the request-authoritative selector."
+            )
+        if explicit_model_format == "gguf" and checkpoint_is_core_only is False:
+            raise RuntimeError("model_format='gguf' is incompatible with checkpoint_core_only=False.")
+        if explicit_model_format == "diffusers" and checkpoint_is_core_only is True:
+            raise RuntimeError("model_format='diffusers' is incompatible with checkpoint_core_only=True.")
+
+        api_tenc_selector_hint = (
+            "'extras.tenc1_sha'/'extras.tenc2_sha'"
+            if bundle.family in {ModelFamily.SDXL, ModelFamily.SDXL_REFINER} and checkpoint_is_core_only
+            else "'extras.tenc_sha'"
+        )
+        if checkpoint_is_core_only and self.required_text_encoders and tenc_source != "external":
+            raise RuntimeError(
+                "Core-only checkpoint requires external text encoder(s). "
                 "Provide them via engine option 'tenc_path' or 'text_encoder_override' "
-                "(or via the API 'extras.tenc_sha' selector)."
+                f"(or via the API {api_tenc_selector_hint} selector)."
             )
 
         emit_backend_event(
@@ -636,37 +673,30 @@ class CodexDiffusionEngine(BaseInferenceEngine, ABC):
         self._current_bundle = bundle
         self._current_model_ref = model_ref
         self._component_source = bundle.components
-        load_options_payload: dict[str, Any] = dict(raw_options)
-        if te_override_cfg is not None:
-            load_options_payload["text_encoder_override"] = te_override_cfg
-        self._load_options = LoadOptions.from_mapping(load_options_payload)
+        self._load_options = load_options
 
         self.model_config = bundle.estimated_config
-        try:
-            self.is_inpaint = bool(bundle.estimated_config.inpaint_model())
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError("Failed to determine inpaint capability.") from exc
 
         components = self._build_components(bundle, options=self._load_options.to_component_options())
 
-        # For GGUF checkpoints, text encoders are never embedded; fail fast with a clear message.
-        if is_core_only_gguf:
+        # For core-only checkpoints, text encoders are never embedded; fail fast with a clear message.
+        if checkpoint_is_core_only:
             te_map = getattr(components, "text_encoders", None)
             if not isinstance(te_map, dict):
                 te_map = {}
             missing_tenc = [name for name in self.required_text_encoders if not te_map.get(name)]
             if missing_tenc:
                 raise RuntimeError(
-                    "Core-only GGUF checkpoint requires external text encoder(s). "
+                    "Core-only checkpoint requires external text encoder(s). "
                     f"Missing: {', '.join(missing_tenc)}. "
                     "Provide them via engine option 'tenc_path' or 'text_encoder_override' "
-                    "(or via the API 'extras.tenc_sha' selector)."
+                    f"(or via the API {api_tenc_selector_hint} selector)."
                 )
 
         # VAE selection/override
         #
         # Rule of thumb:
-        # - For core-only GGUF checkpoints, `vae_path` is an *external asset selection*,
+        # - For core-only checkpoints, `vae_path` is an *external asset selection*,
         #   not a state-dict override. It must be handled during bundle resolution or
         #   engine-specific assembly.
         # - For full checkpoints, engines may treat `vae_path` as an optional state-dict
@@ -676,7 +706,10 @@ class CodexDiffusionEngine(BaseInferenceEngine, ABC):
 
         vae_source = self._load_options.vae_source
         if vae_source is None:
-            vae_source = "external" if vae_path else "built_in"
+            raise RuntimeError(
+                "Image load requires explicit vae_source in load options; "
+                "router/task must forward the request-authoritative selector."
+            )
         if vae_source not in {"built_in", "external"}:
             raise RuntimeError("vae_source must be 'built_in' or 'external' when provided.")
         if vae_source == "built_in":
@@ -686,15 +719,15 @@ class CodexDiffusionEngine(BaseInferenceEngine, ABC):
             if vae_path is None:
                 raise RuntimeError("vae_source='external' requires vae_path.")
 
-        # For GGUF checkpoints, VAE is never embedded; fail fast if the assembly stage didn't supply one.
-        if is_core_only_gguf and getattr(components, "vae", None) is None:
+        # For core-only checkpoints, VAE is never embedded; fail fast if the assembly stage didn't supply one.
+        if checkpoint_is_core_only and getattr(components, "vae", None) is None:
             raise RuntimeError(
-                "Core-only GGUF checkpoint requires an external VAE. "
+                "Core-only checkpoint requires an external VAE. "
                 "Provide one via engine option 'vae_path' (or via the API 'extras.vae_sha' selector)."
             )
 
         # ZImage and Anima treat `vae_path` as external selection; do not apply a state-dict override here.
-        if vae_source == "external" and vae_path and (bundle.family not in (ModelFamily.ZIMAGE, ModelFamily.ANIMA)) and (not is_core_only_gguf):
+        if vae_source == "external" and vae_path and (bundle.family not in (ModelFamily.ZIMAGE, ModelFamily.ANIMA)) and (not checkpoint_is_core_only):
             if not os.path.isfile(vae_path):
                 raise FileNotFoundError(f"vae_path '{vae_path}' does not exist.")
             if getattr(components, "vae", None) is None:
@@ -703,8 +736,10 @@ class CodexDiffusionEngine(BaseInferenceEngine, ABC):
                     "cannot apply override."
                 )
             vae_device = getattr(components.vae, "device", None) or getattr(components.vae, "load_device", None)
-            state_dict = load_torch_file(vae_path, device=vae_device)
-            state_dict = strip_known_vae_prefixes(state_dict)
+            state_dict = prepare_external_vae_override_state_dict(
+                state_dict=load_torch_file(vae_path, device=vae_device),
+                family=bundle.family,
+            )
             vae_layout = detect_vae_layout(state_dict)
             vae_lane = resolve_vae_layout_lane(family=bundle.family, layout=vae_layout)
             vae_target = getattr(components.vae, "first_stage_model", components.vae)
@@ -724,9 +759,9 @@ class CodexDiffusionEngine(BaseInferenceEngine, ABC):
                     ModelFamily.FLUX_KONTEXT,
                     ModelFamily.ZIMAGE,
                 ):
-                    from apps.backend.runtime.state_dict.keymap_sdxl_vae import remap_sdxl_vae_state_dict
+                    from apps.backend.runtime.state_dict.keymap_sdxl_vae import resolve_sdxl_vae_keyspace
 
-                    _, state_dict = remap_sdxl_vae_state_dict(state_dict)
+                    state_dict = resolve_sdxl_vae_keyspace(state_dict).view
             if not hasattr(vae_target, "state_dict"):
                 raise TypeError(
                     "VAE override target does not expose state_dict(); "
@@ -799,7 +834,6 @@ class CodexDiffusionEngine(BaseInferenceEngine, ABC):
         finally:
             self._reset_state()
             self.model_config = None
-            self.is_inpaint = False
             self._component_source = None
             self._current_bundle = None
             self._current_model_ref = None
@@ -996,14 +1030,14 @@ class CodexDiffusionEngine(BaseInferenceEngine, ABC):
         return self._canonical_patcher_target(getattr(self.codex_objects, "denoiser", None))
 
     @torch.inference_mode()
-    def encode_first_stage(self, x: torch.Tensor) -> torch.Tensor:
+    def encode_first_stage(self, x: torch.Tensor, *, encode_seed: int | None = None) -> torch.Tensor:
         from apps.backend.runtime.memory import memory_management
 
         vae_target = self._vae_memory_target()
         memory_management.manager.load_model(vae_target)
         unload_vae = self.smart_offload_enabled
         try:
-            sample = self.codex_objects.vae.encode(x.movedim(1, -1) * 0.5 + 0.5)
+            sample = self.codex_objects.vae.encode(x.movedim(1, -1) * 0.5 + 0.5, encode_seed=encode_seed)
             sample = self.codex_objects.vae.first_stage_model.process_in(sample)
             return sample.to(x)
         finally:

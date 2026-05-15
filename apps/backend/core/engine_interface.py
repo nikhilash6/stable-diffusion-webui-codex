@@ -16,6 +16,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from abc import ABC, abstractmethod
@@ -26,7 +27,7 @@ from typing import Any, Iterator, Mapping, Sequence
 from .exceptions import UnsupportedTaskError
 
 
-logger = logging.getLogger(__name__)
+logger = get_backend_logger(__name__)
 
 
 class TaskType(str, Enum):

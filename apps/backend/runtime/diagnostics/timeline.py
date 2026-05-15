@@ -28,7 +28,6 @@ Symbols (top-level; keep in sync; no ghosts):
 
 from __future__ import annotations
 
-import logging
 import threading
 import time
 import contextlib
@@ -42,8 +41,7 @@ import torch
 
 from apps.backend.infra.stdio import write_stdout
 from apps.backend.infra.config.env_flags import env_flag, env_int
-
-_log = logging.getLogger("backend.timeline")
+from apps.backend.runtime.logging import emit_backend_message
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -124,12 +122,12 @@ class TimelineCollector:
     def enable(self) -> None:
         """Enable timeline collection."""
         self._enabled = True
-        _log.info("[timeline] Enabled")
+        emit_backend_message("[timeline] Enabled", logger=__name__)
     
     def disable(self) -> None:
         """Disable timeline collection."""
         self._enabled = False
-        _log.info("[timeline] Disabled")
+        emit_backend_message("[timeline] Disabled", logger=__name__)
     
     def _get_depth(self) -> int:
         return getattr(self._depth, "value", 0)
@@ -494,9 +492,9 @@ def save_to_logs(capture: Optional[TimelineCapture] = None) -> Optional[str]:
     json_content = export_chrome_trace(capture)
     json_path.write_text(json.dumps(json_content, indent=2), encoding="utf-8")
     
-    _log.info(f"[timeline] Saved trace to: {txt_path}")
-    _log.info(f"[timeline] Chrome trace: {json_path}")
-    _log.info("[timeline] View at: https://ui.perfetto.dev/ (drag & drop the JSON)")
+    emit_backend_message(f"[timeline] Saved trace to: {txt_path}", logger=__name__)
+    emit_backend_message(f"[timeline] Chrome trace: {json_path}", logger=__name__)
+    emit_backend_message("[timeline] View at: https://ui.perfetto.dev/ (drag & drop the JSON)", logger=__name__)
     
     return str(txt_path)
 

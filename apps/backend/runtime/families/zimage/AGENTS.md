@@ -32,6 +32,7 @@ Status: Active
   - `x = x + ffn_norm2(feed_forward(ffn_norm1(x)))`
   Avoid applying `attention_norm2(attention_norm1(x))` as attention input (double-norm) or feeding `ffn_norm2(...)` into the MLP.
 - **VAE normalization:** Flow16 (Flux/Z-Image) scaling/shift is applied outside the runtime core via `vae.first_stage_model.process_in/out`.
+- **Masked img2img channel truth:** `ZImageTransformer2DModel.codex_config.in_channels` must expose the raw latent-channel contract (`latent_channels=16`), not the patchified transformer input width (`config.in_channels=64`), because canonical `img2img_conditioning(...)` uses `codex_config` to decide whether the engine is a plain latent-channel denoiser or a real inpaint-channel model.
 - **Tokenizer source of truth:** prefer the vendored HF tokenizer (no hub fetch):
   - Turbo: `apps/backend/huggingface/Tongyi-MAI/Z-Image-Turbo/tokenizer`
   - Base: `apps/backend/huggingface/Tongyi-MAI/Z-Image/tokenizer`
@@ -41,12 +42,13 @@ Status: Active
 - 2026-03-03: ZImage safetensors text-encoder path (`text_encoder.py:from_state_dict`) now uses generic strict Qwen keymap normalization (`runtime/state_dict/keymap_qwen_text_encoder.py`) before native `Qwen3_4B` strict load, accepting known auxiliary heads while failing loud on unknown keyspaces.
 - 2026-01-04: Added `runtime/families/zimage/inference.py` and updated detector/loader to use it (prevents drift in hidden/context/latent/layer inference; supports prefixed SafeTensors exports).
 - 2026-01-02: Added standardized file header docstrings to Z-Image runtime facade/debug modules (doc-only change; part of rollout).
-- 2026-01-23: Centralized llama.cpp-style GGUF tensor-name remapping for Qwen3 in `apps/backend/runtime/state_dict/keymap_llama_gguf.py`; `qwen3.py:remap_gguf_keys` delegates and fails loud on unknown keys.
+- 2026-01-23: Centralized llama.cpp-style GGUF tensor-name keyspace resolution for Qwen3 in `apps/backend/runtime/state_dict/keymap_llama_gguf.py`; `qwen3.py:resolve_qwen3_gguf_keyspace` delegates and fails loud on unknown keys without materializing a renamed state dict.
 - 2026-01-30: Fixed Qwen3 causal+padding attention-mask construction (avoids `0 * -inf` NaNs) and removed always-on debug logs; deep diagnostics remain opt-in behind `CODEX_ZIMAGE_DEBUG_*`.
-- 2026-02-07: Updated Qwen3 attention-mask sentinel to a finite `finfo.min/4` value (ComfyUI parity); if Z-Image output quality regresses, re-check this mask behavior.
+- 2026-02-07: Updated Qwen3 attention-mask sentinel to a finite `finfo.min/4` value to keep the combined causal+padding mask numerically stable; if Z-Image output quality regresses, re-check this mask behavior.
 - 2026-02-10: Hardened strict-load behavior: ZImage transformer/text-encoder paths now fail loud on missing/unexpected keys (`model.py`, `qwen3.py`, `text_encoder.py`) instead of warning-only continuation.
 - 2026-02-20: `model.py` and `qwen3.py` attention lanes now route through runtime dispatcher helper `attention_function_pre_shaped(...)` with explicit PyTorch backend, removing direct family-level SDPA bypasses.
 - 2026-02-23: `text_encoder.py` device metadata fallback now resolves from memory-manager CPU device (`manager.cpu_device`) instead of constructing a local CPU literal when parameter iterators are empty.
+- 2026-04-05: `ZImageTransformer2DModel` now publishes a dedicated runtime `codex_config` with raw latent-channel truth (`in_channels=latent_channels`) instead of reusing the patchified transformer config; masked img2img still skips SD-style `image_conditioning` and relies on latent-mask enforcement only.
 - **Debugging:** enable extra logs with env flags:
   - `CODEX_ZIMAGE_DEBUG_PROMPT=1` (engine prompt string + distilled cfg scale)
   - `CODEX_ZIMAGE_DEBUG_TENC_TEXT=1`, `CODEX_ZIMAGE_DEBUG_TENC_TOKENS=1`, `CODEX_ZIMAGE_DEBUG_TENC_DECODE=1`, `CODEX_ZIMAGE_DEBUG_TENC_RUN=1` (tokenization + embedding stats)

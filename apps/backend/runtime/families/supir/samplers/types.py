@@ -7,11 +7,12 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: SUPIR sampler type definitions.
-Defines the stable identifiers used by the SUPIR enhance runtime, independent of UI labels.
+Defines the stable identifiers used by the native SUPIR runtime, including the canonical
+native sampler/scheduler tuple exposed to the UI diagnostics surface.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `SupirSamplerId` (enum): Canonical sampler IDs (stable + dev variants).
-- `SupirSamplerSpec` (dataclass): Registry record for one sampler option (label + stability + tiling support).
+- `SupirSamplerSpec` (dataclass): Registry record for one sampler option (UI label + stability + native tuple).
 """
 
 from __future__ import annotations
@@ -38,6 +39,8 @@ class SupirSamplerSpec:
     label: str
     stability: str  # 'stable' | 'dev'
     supports_tiling: bool
+    native_sampler: str
+    native_scheduler: str
 
 
 __all__ = ["SupirSamplerId", "SupirSamplerSpec"]

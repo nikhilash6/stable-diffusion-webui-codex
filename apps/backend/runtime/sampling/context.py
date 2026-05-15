@@ -18,6 +18,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import emit_backend_message
 
 import logging
 from dataclasses import dataclass
@@ -31,9 +32,6 @@ from apps.backend.infra.config.env_flags import env_flag
 from apps.backend.runtime.live_preview import preview_interval_steps
 from apps.backend.runtime.sampling.flow_shift_resolver import resolve_flow_shift_for_sampling
 from apps.backend.runtime.sampling.sigma_schedules import SchedulerName, build_sigma_schedule
-
-
-_LOGGER = logging.getLogger(__name__ + ".context")
 
 
 @dataclass
@@ -156,16 +154,18 @@ def build_sampling_context(
         flow_shift_repo_dir=flow_shift_repo_dir,
     )
 
-    _LOGGER.debug(
-        "sampling-context sampler=%s scheduler=%s steps=%d source=%s eta_delta=%d prediction=%s sigma_min=%.6g sigma_max=%.6g",
-        context.sampler_kind.value,
-        context.scheduler_name,
-        context.steps,
-        context.noise_settings.source.value,
-        context.noise_settings.eta_noise_seed_delta,
-        context.prediction_type,
-        float(context.sigma_min) if context.sigma_min is not None else float("nan"),
-        float(context.sigma_max) if context.sigma_max is not None else float("nan"),
+    emit_backend_message(
+        "sampling-context",
+        logger=__name__,
+        level=logging.DEBUG,
+        sampler=context.sampler_kind.value,
+        scheduler=context.scheduler_name,
+        steps=context.steps,
+        noise_source=context.noise_settings.source.value,
+        eta_delta=context.noise_settings.eta_noise_seed_delta,
+        prediction=context.prediction_type,
+        sigma_min=float(context.sigma_min) if context.sigma_min is not None else float("nan"),
+        sigma_max=float(context.sigma_max) if context.sigma_max is not None else float("nan"),
     )
     return context
 

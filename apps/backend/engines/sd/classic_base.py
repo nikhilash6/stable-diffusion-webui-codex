@@ -14,6 +14,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from typing import Any, List, Mapping, Optional
@@ -38,7 +39,7 @@ class CodexSDClassicEngineBase(CodexDiffusionEngine):
     _model_family: str
 
     def __init__(self) -> None:
-        super().__init__(logger=logging.getLogger(f"backend.engines.sd.{self.engine_id}"))
+        super().__init__(logger=get_backend_logger(f"backend.engines.sd.{self.engine_id}"))
         self._runtime: Optional[SDEngineRuntime] = None
         self._primary_branch: Optional[str] = None
 

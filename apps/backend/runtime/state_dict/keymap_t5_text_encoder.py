@@ -6,12 +6,12 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Canonical key-style detection + remap for T5 text-encoder state_dict keys.
+Purpose: Canonical key-style detection + keyspace resolver for T5 text-encoder state_dict keys.
 Provides strict, fail-loud mapping from HF-style T5 keys (`encoder.*`, `shared.weight`, `embed_tokens*`)
-into Codex IntegratedT5 layout (`transformer.*`) so loader paths do not perform ad-hoc remap logic.
+into Codex IntegratedT5 layout (`transformer.*`) so loader paths do not perform ad-hoc generic key preprocessing.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `remap_t5_text_encoder_state_dict` (function): Remaps a T5 encoder state_dict into canonical IntegratedT5 keys.
+- `resolve_t5_text_encoder_keyspace` (function): Resolves a T5 encoder state_dict into canonical IntegratedT5 keyspace.
 """
 
 from __future__ import annotations
@@ -24,8 +24,9 @@ from apps.backend.runtime.state_dict.key_mapping import (
     KeyStyle,
     KeyStyleDetector,
     KeyStyleSpec,
+    ResolvedKeyspace,
     SentinelKind,
-    remap_state_dict_view,
+    resolve_state_dict_keyspace,
 )
 
 _T = TypeVar("_T")
@@ -54,33 +55,31 @@ _DETECTOR = KeyStyleDetector(
 )
 
 
-def remap_t5_text_encoder_state_dict(
+def resolve_t5_text_encoder_keyspace(
     state_dict: MutableMapping[str, _T],
-) -> tuple[KeyStyle, MutableMapping[str, _T]]:
-    """Return a view that remaps T5 text-encoder keys into canonical IntegratedT5 keys.
+) -> ResolvedKeyspace[_T]:
+    """Resolve T5 text-encoder keys into canonical IntegratedT5 keys.
 
     - CODEX style (`transformer.*`) is a no-op.
-    - HF style (`encoder.*`, `shared.weight`, `embed_tokens*`) is remapped to `transformer.*`.
+    - HF style (`encoder.*`, `shared.weight`, `embed_tokens*`) is mapped to `transformer.*`.
     - Unknown/ambiguous styles fail loud via key-style detection.
     """
-
-    def _normalize(key: str) -> str:
-        return str(key)
 
     def _map_hf(key: str) -> str:
         if key.startswith("encoder.") or key == "shared.weight" or key.startswith("embed_tokens"):
             return f"transformer.{key}"
         return key
 
-    mappers = {
-        KeyStyle.CODEX: lambda k: k,
-        KeyStyle.HF: _map_hf,
-    }
-
-    return remap_state_dict_view(
+    resolved = resolve_state_dict_keyspace(
         state_dict,
         detector=_DETECTOR,
-        normalize=_normalize,
-        mappers=mappers,
+        mappers={
+            KeyStyle.CODEX: lambda k: k,
+            KeyStyle.HF: _map_hf,
+        },
     )
+    resolved.metadata.setdefault("resolver", "t5_text_encoder")
+    return resolved
 
+
+__all__ = ["resolve_t5_text_encoder_keyspace"]

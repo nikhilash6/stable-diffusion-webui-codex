@@ -17,6 +17,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from typing import Any, Optional
@@ -24,7 +25,7 @@ from typing import Any, Optional
 from apps.backend.runtime.memory import memory_management
 
 
-_LOGGER = logging.getLogger("backend.engines.util.attention")
+_LOGGER = get_backend_logger("backend.engines.util.attention")
 _FLASH_DIFFUSERS_FALLBACK_LOGGED: set[str] = set()
 
 

@@ -7,11 +7,14 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: SafeTensors header readers for lightweight runtime tooling.
-Provides header-only helpers to read the SafeTensors JSON header and derive small metadata hints (e.g. primary dtype) without importing torch
-or loading tensor payloads.
+Provides header-only helpers to read the SafeTensors JSON header and derive small metadata hints (e.g. primary dtype, tensor shapes)
+without importing torch or loading tensor payloads.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `read_safetensors_header` (function): Reads and parses the SafeTensors JSON header (no tensor payload reads).
+- `extract_safetensors_tensor_shapes_from_header` (function): Extracts a tensor-name -> shape map from an already-read SafeTensors header.
+- `read_safetensors_tensor_shapes` (function): Reads a SafeTensors header and returns a tensor-name -> shape map.
+- `detect_safetensors_primary_dtype_from_header` (function): Best-effort primary dtype hint from an already-read SafeTensors header mapping.
 - `detect_safetensors_primary_dtype` (function): Best-effort dtype hint for `.safetensors` (header-only parse; whole-file).
 """
 
@@ -20,7 +23,7 @@ from __future__ import annotations
 import json
 import struct
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Mapping
 
 
 def read_safetensors_header(path: Path) -> dict[str, object]:
@@ -48,32 +51,15 @@ def read_safetensors_header(path: Path) -> dict[str, object]:
     return data  # type: ignore[return-value]
 
 
-def detect_safetensors_primary_dtype(path: Path) -> str | None:
-    """Best-effort dtype hint for `.safetensors` (header-only parse).
-
-    Computes the dominant float dtype by summing tensor payload sizes per dtype
-    using header offsets. Returns a normalized dtype label suitable for UI/debug
-    (e.g. `fp16`, `bf16`, `fp32`).
-    """
-
-    suffix = path.suffix.lower()
-    if suffix not in {".safetensor", ".safetensors"}:
-        return None
-
-    try:
-        data = read_safetensors_header(path)
-    except Exception:
-        return None
-
-    if not isinstance(data, dict):
-        return None
+def detect_safetensors_primary_dtype_from_header(header: Mapping[str, object]) -> str | None:
+    """Best-effort primary dtype hint from an already-read SafeTensors header."""
 
     float_types = {"F16", "BF16", "F32", "F64", "F8_E4M3FN", "F8_E5M2"}
     totals: Dict[str, int] = {}
-    for name, meta in data.items():
+    for name, meta in header.items():
         if name == "__metadata__":
             continue
-        if not isinstance(meta, dict):
+        if not isinstance(meta, Mapping):
             continue
         dtype = meta.get("dtype")
         if not isinstance(dtype, str) or dtype not in float_types:
@@ -105,5 +91,62 @@ def detect_safetensors_primary_dtype(path: Path) -> str | None:
     return mapping.get(best)
 
 
-__all__ = ["detect_safetensors_primary_dtype", "read_safetensors_header"]
+def extract_safetensors_tensor_shapes_from_header(header: Mapping[str, object]) -> dict[str, tuple[int, ...]]:
+    """Extract tensor-name -> shape tuples from an already-read SafeTensors header."""
 
+    shapes: dict[str, tuple[int, ...]] = {}
+    for name, meta in header.items():
+        if name == "__metadata__":
+            continue
+        if not isinstance(meta, Mapping):
+            continue
+        raw_shape = meta.get("shape")
+        if not isinstance(raw_shape, (list, tuple)):
+            continue
+        try:
+            shape = tuple(int(dim) for dim in raw_shape)
+        except Exception:
+            continue
+        shapes[str(name)] = shape
+    return shapes
+
+
+def read_safetensors_tensor_shapes(path: Path) -> dict[str, tuple[int, ...]]:
+    """Read a SafeTensors header and return a tensor-name -> shape map."""
+
+    header = read_safetensors_header(path)
+    if not isinstance(header, Mapping):
+        raise ValueError("Invalid safetensors header (expected a JSON object).")
+    return extract_safetensors_tensor_shapes_from_header(header)
+
+
+def detect_safetensors_primary_dtype(path: Path) -> str | None:
+    """Best-effort dtype hint for `.safetensors` (header-only parse).
+
+    Computes the dominant float dtype by summing tensor payload sizes per dtype
+    using header offsets. Returns a normalized dtype label suitable for UI/debug
+    (e.g. `fp16`, `bf16`, `fp32`).
+    """
+
+    suffix = path.suffix.lower()
+    if suffix not in {".safetensor", ".safetensors"}:
+        return None
+
+    try:
+        data = read_safetensors_header(path)
+    except Exception:
+        return None
+
+    if not isinstance(data, Mapping):
+        return None
+
+    return detect_safetensors_primary_dtype_from_header(data)
+
+
+__all__ = [
+    "detect_safetensors_primary_dtype",
+    "detect_safetensors_primary_dtype_from_header",
+    "extract_safetensors_tensor_shapes_from_header",
+    "read_safetensors_header",
+    "read_safetensors_tensor_shapes",
+]

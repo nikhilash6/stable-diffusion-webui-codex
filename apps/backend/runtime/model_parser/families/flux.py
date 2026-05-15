@@ -124,8 +124,9 @@ def _validate_transformer_core(context):
     if key not in unet:
         if any(k.startswith(("transformer_blocks.", "single_transformer_blocks.")) for k in unet):
             raise ValidationError(
-                "Flux transformer looks like a Diffusers export (transformer_blocks.*); expected Comfy/Codex layout (double_blocks.*). "
-                "Re-convert the weights via Tools → GGUF Converter with Comfy Layout enabled.",
+                "Flux transformer reached the parser with source/native Diffusers block keys "
+                "(`transformer_blocks.*`, `single_transformer_blocks.*`) instead of the resolved Flux runtime keyspace (`double_blocks.*`). "
+                "Resolve the checkpoint through the expected-family keyspace path before parser execution.",
                 component="transformer",
             )
         raise ValidationError("Flux transformer missing double block attn scale", component="transformer")

@@ -8,7 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: Dataclasses for the Codex model parser (plans, context, and estimated config).
 Defines the declarative parser plan model (splits/converters/validations) plus the `ParserContext` and `CodexEstimatedConfig` structures used
-to return a normalized view of checkpoint components to loaders/adapters.
+to return a normalized view of checkpoint components to loaders/adapters without synthetic inpaint-capability heuristics.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `SplitSpec` (dataclass): Declares how to split a state dict into one component by key prefix.
@@ -119,11 +119,6 @@ class CodexEstimatedConfig:
     text_encoder_map: Dict[str, str]
     extras: Dict[str, Any] = field(default_factory=dict)
     core_config: Dict[str, Any] = field(default_factory=dict)
-
-    def inpaint_model(self) -> bool:
-        # Fallback to SD heuristic (channels_in > 4) when temporal info absent.
-        channels_in = self.signature.core.channels_in
-        return bool(channels_in and channels_in > 4)
 
     @property
     def huggingface_repo(self) -> str:

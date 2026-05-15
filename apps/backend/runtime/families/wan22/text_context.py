@@ -16,6 +16,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `WAN22_DEFAULT_MAX_SEQUENCE_LENGTH` (constant): Default token length used for WAN22 prompt embeddings (aligns with Diffusers default).
 - `_prompt_clean` (function): Diffusers-style prompt cleaning (optional ftfy + HTML unescape + whitespace collapse).
 - `_resolve_max_sequence_length` (function): Chooses a safe tokenizer max length, clamped to `WAN22_DEFAULT_MAX_SEQUENCE_LENGTH`.
+- `_raise_unsupported_packed_text_encoder` (function): Raises the canonical root-runtime error for removed packed GGUF text-encoder artifacts.
 - `_place_gguf_non_quant_tensors` (function): Moves non-quantized TE params/buffers to target device and applies floating dtype casts while preserving integer buffers.
 - `get_text_context` (function): Builds text conditioning/context (single or batched prompt + negative prompt inputs) for the WAN transformer with strict fail-loud text-encoder key validation, device-aware TE weight loading, and global GGUF dequant policy alignment.
 """
@@ -32,6 +33,7 @@ import torch
 
 from apps.backend.runtime.memory import memory_management
 from apps.backend.runtime.memory.smart_offload import SmartOffloadAction, log_smart_offload_action
+from apps.backend.runtime.ops.operations_gguf import is_packed_gguf_artifact
 from .config import as_torch_dtype, resolve_device_name
 from .diagnostics import get_logger
 
@@ -66,15 +68,19 @@ def _resolve_max_sequence_length(tok: Any) -> int:
     return int(max_len)
 
 
+def _raise_unsupported_packed_text_encoder() -> None:
+    raise RuntimeError(
+        "WAN22 GGUF: packed GGUF text-encoder artifacts are not supported on the root runtime path. "
+        "Load the base `.gguf` text encoder artifact instead."
+    )
+
+
 def _is_gguf_quantized_tensor(tensor_obj: Any) -> bool:
     if getattr(tensor_obj, "qtype", None) is not None:
         return True
-    try:
-        from apps.backend.quantization.codexpack_tensor import CodexPackLinearQ4KTilepackV1Parameter
-
-        return isinstance(tensor_obj, CodexPackLinearQ4KTilepackV1Parameter)
-    except Exception:
-        return False
+    if is_packed_gguf_artifact(tensor_obj):
+        _raise_unsupported_packed_text_encoder()
+    return False
 
 
 def _place_gguf_non_quant_tensors(

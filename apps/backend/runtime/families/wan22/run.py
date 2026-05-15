@@ -7,26 +7,35 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: WAN22 GGUF run entrypoints (txt2vid/img2vid; batch + streaming).
-Orchestrates text context, per-stage sampling, ordered stage-LoRA application (`high/low.loras`), and VAE encode/decode (including file-VAE metadata config forwarding) while keeping GGUF support anchored in the shared quantization/ops layer.
-For img2vid, forwards no-stretch guide controls from `RunConfig` (`img2vid_image_scale` + crop offsets) into VAE init-image preprocessing so runtime framing matches UI projection.
+Orchestrates exact WAN 2.2 stage layouts: truthful single-stage 5B entrypoints (`cfg.single`) and dual-stage 14B entrypoints
+(`cfg.high` + `cfg.low`), including ordered stage-LoRA application and VAE encode/decode (with file-VAE metadata config forwarding),
+while keeping GGUF support anchored in the shared quantization/ops layer.
+For img2vid, forwards no-stretch guide controls from `RunConfig` (`img2vid_image_scale` + crop offsets) into VAE init-image preprocessing
+so runtime framing matches UI projection, and keeps non-solo 5B temporal modes fail-loud at the use-case seam until a truthful single-stage
+runtime exists for them. Shared scheduler resolution now requires explicit normalized stage scheduler values and fail-loud continuity checks
+before runtime scheduler construction.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_USE_CFG_SEED` (constant): Sentinel that distinguishes implicit cfg-seed usage from explicit random (`None`) override in chunked seeding.
 - `_WAN_CHUNK_HYBRID_RAM_BUDGET_MB` (constant): Default RAM budget threshold (MB) used by `chunk_buffer_mode='hybrid'` when resolving low/decode tensor storage (`ram` vs `ram+hd`).
 - `_wan_trace_inference_enabled` (function): Returns whether WAN orchestration trace checkpoints are enabled (`CODEX_TRACE_INFERENCE_DEBUG`).
 - `_wan_trace` (function): Emits gated `[wan22.trace]` DEBUG checkpoints for run-level orchestration boundaries.
+- `_WAN_PROGRESS_ADAPTER_NAME` (constant): Stable id for WAN unified progress-adapter payload metadata.
+- `_coarse_progress_event` (function): Emits explicit coarse-progress payloads for non-block phases.
+- `_WanUnifiedBlockProgressAdapter` (class): Canonical WAN stage adapter that wires/validates block-progress callback wiring.
 - `_MemoryManagedModule` (class): Small adapter integrating plain nn.Modules with the Codex memory manager (explicit unload honors manager-provided target device).
 - `_teardown_stage` (function): Deterministic stage finalizer (unload from memory manager + cache/gc cleanup).
 - `_stage_transition_barrier` (function): Enforce a deterministic memory barrier between heavyweight stage transitions (release/sync/cache-gc/log) without altering mount policy.
 - `_resolve_offload_level` (function): Resolve the effective offload profile level from the run config.
 - `_require_flow_shift` (function): Validate that a stage has a usable flow_shift value (strict).
-- `_parse_sampler` (function): Parse WAN sampler strings into `(name, solver_hint)` while tolerating non-UniPC multi-token inputs.
+- `_parse_sampler` (function): Parse WAN sampler strings into strict WAN22 runtime lanes `(lane, solver_hint)` with fail-loud validation.
 - `_ResolvedSharedSchedulerSpec` (dataclass): Frozen shared scheduler spec (validated/normalized flow_shift + sampler/scheduler + total_steps) reused across scheduler instantiations.
 - `_resolve_shared_scheduler_spec` (function): Validate/normalize high+low scheduler inputs into a frozen shared scheduler spec with fail-loud continuity checks.
 - `_build_shared_scheduler_from_spec` (function): Instantiate a scheduler from a previously resolved shared scheduler spec.
 - `_build_shared_scheduler` (function): Build a single shared scheduler instance for high/low stage continuity with fail-loud sampler/scheduler lane mismatch checks.
 - `_resolve_frame_counts` (function): Resolve output vs latent frame counts for the WAN VAE temporal scale.
 - `_infer_stage_variant` (function): Infer WAN model variant (`5b`/`14b`) from a stage GGUF filename.
+- `_resolve_single_stage_variant` (function): Resolve the exact single-stage WAN model variant with API variant authority and fail-loud mismatches.
 - `_resolve_stage_pair_variant` (function): Resolve a single variant for high/low stages with API variant authority and fail loud mismatches.
 - `_build_i2v_seed_state` (function): Build the initial I2V state `[lat16 + mask4 + img16]` (RNG noise scaled by `init_noise_sigma` + deterministic condition).
 - `_extract_i2v_decode_latents` (function): Extract pure latent channels from I2V model state before VAE decode (order-aware `lat_first`/`lat_last`).
@@ -36,16 +45,21 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_blend_anchor_latent` (function): Blend previous chunk anchor latent window with base conditioning latent for chunk continuity without pixel-space decode.
 - `_assemble_svi2_condition_latents` (function): Build SVI 2.0 conditioning latents (`slot0=prev_tail`, `slot1..=anchor`).
 - `_assemble_svi2_pro_condition_latents` (function): Build SVI 2.0 Pro conditioning latents (`slot0=anchor`, `slot1=prev_tail`, `slot2..=zero`).
-- `_sample_chunk_stage_with_progress` (function): Run a chunk stage sampler and remap local progress into a global phase percent.
+- `_sample_chunk_stage_with_progress` (function): Run a chunk stage sampler and project local progress into a global phase percent.
 - `_resolve_stage_prompt_pairs` (function): Resolve high/low stage prompt+negative pairs (stage prompts required; negative falls back only when missing).
+- `_resolve_single_stage_prompt_pair` (function): Resolve the single-stage prompt+negative pair from the truthful `cfg.single` owner.
 - `_resolve_stage_text_embeddings` (function): Build stage-specific high/low embeddings from a single text-encoder load.
-- `_resolve_wan_fused_summary_fields_for_run` (function): Resolves fused attention-core summary fields (`attn_core`, `attn_core_source`, `attn_core_raw`) once from deterministic run intent (`resolve_effective_wan_fused_mode`).
-- `_WanFusedSummaryLogger` (class): Lightweight logger proxy that augments the fused runtime summary line with stable extra key/value fields.
-- `_resolve_wan_fused_run_label` (function): Builds stable run labels for fused-attention observability lifecycle.
-- `_with_wan_fused_runtime_metrics` (function): Decorator that wraps WAN run/stream entrypoints with fused metrics reset + end-of-run summary.
+- `_resolve_single_stage_text_embeddings` (function): Build single-stage prompt+negative embeddings from a single text-encoder load.
+- `_resolve_sram_attention_summary_mode_for_run` (function): Resolves the effective SRAM attention mode once from deterministic run intent.
+- `_resolve_sram_attention_run_label` (function): Builds stable run labels for SRAM-attention observability lifecycle.
+- `_with_sram_attention_runtime_metrics` (function): Decorator that wraps WAN run/stream entrypoints with SRAM metrics reset + end-of-run summary.
+- `run_txt2vid_single` (function): Batch txt2vid runner for truthful WAN 2.2 5B single-stage GGUF execution.
 - `run_txt2vid` (function): Batch txt2vid runner; orchestrates text context, stage sampling, and VAE decode.
+- `stream_txt2vid_single` (function): Streaming single-stage txt2vid generator; yields progress while sampling/decoding.
 - `stream_txt2vid` (function): Streaming txt2vid generator; yields progress while sampling/decoding.
+- `run_img2vid_single` (function): Batch img2vid runner for truthful WAN 2.2 5B single-stage GGUF execution.
 - `run_img2vid` (function): Batch img2vid runner; builds I2V conditioning + seeded noise state, runs stages, decodes frames (with explicit VAE config-dir forwarding).
+- `stream_img2vid_single` (function): Streaming single-stage img2vid generator; yields progress while sampling/decoding.
 - `stream_img2vid` (function): Streaming img2vid generator; yields progress while sampling/decoding (I2V conditioning + seeded noise state, with explicit VAE config-dir forwarding).
 - `stream_img2vid_chunked` (function): Chunked img2vid runner with chunk-major sequencing (for each chunk: high pass -> low pass in latent space, then final decode/stitch pass), configurable anchor-reset continuity policy, and shared VAE decode-session reuse.
 - `stream_img2vid_sliding_window` (function): Sliding-window img2vid runner built on the chunked runtime with explicit window/stride/commit controls.
@@ -69,15 +83,19 @@ from typing import Any, Optional
 import torch
 
 from apps.backend.infra.config.env_flags import env_flag
-from apps.backend.runtime.attention.wan_fused_v1 import (
-    resolve_effective_wan_fused_mode,
-    resolve_effective_wan_fused_attn_core,
-    wan_fused_runtime_metrics_is_active,
-    wan_fused_runtime_metrics_log_summary,
-    wan_fused_runtime_metrics_reset,
+from apps.backend.runtime.attention.sram import (
+    resolve_effective_sram_attention_mode,
+    sram_attention_runtime_metrics_is_active,
+    sram_attention_runtime_metrics_log_summary,
+    sram_attention_runtime_metrics_reset,
 )
 from apps.backend.runtime.memory import memory_management
 from apps.backend.runtime.memory.smart_offload import smart_offload_enabled
+from apps.backend.runtime.sampling.block_progress import (
+    BLOCK_PROGRESS_CALLBACK_KEY,
+    RichBlockProgressController,
+    validate_block_progress_payload,
+)
 
 from .config import (
     RunConfig,
@@ -116,6 +134,84 @@ _WAN_CONTINUITY_PROFILE_OVERLAP = "overlap"
 _WAN_CONTINUITY_PROFILE_SVI2 = "svi2"
 _WAN_CONTINUITY_PROFILE_SVI2_PRO = "svi2_pro"
 _WAN_CHUNK_HYBRID_RAM_BUDGET_MB = 2048.0
+_WAN_PROGRESS_ADAPTER_NAME = "wan22_block_progress_v1"
+
+
+def _coarse_progress_event(
+    *,
+    stage: str,
+    step: int,
+    total: int,
+    percent: float,
+    reason: str,
+    eta_seconds: float | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "type": "progress",
+        "stage": str(stage),
+        "step": int(step),
+        "total": int(total),
+        "percent": float(percent),
+        "progress_adapter": _WAN_PROGRESS_ADAPTER_NAME,
+        "progress_granularity": "coarse",
+        "coarse_reason": str(reason),
+    }
+    if eta_seconds is not None:
+        payload["eta_seconds"] = float(eta_seconds)
+    return payload
+
+
+class _WanUnifiedBlockProgressAdapter:
+    """Canonical WAN stage adapter for block-progress callback wiring."""
+
+    def __init__(self, *, stage_name: str) -> None:
+        normalized_stage = str(stage_name or "").strip()
+        self._stage_name = normalized_stage if normalized_stage else "stage"
+        self._controller = RichBlockProgressController(enabled=env_flag("CODEX_PROGRESS_BAR", default=True))
+        self._wired = False
+        self._callback_hits = 0
+
+    def transformer_options(self) -> dict[str, Any]:
+        if self._wired:
+            raise RuntimeError(
+                "WAN22 GGUF: block-progress adapter reuse detected. "
+                f"Create a fresh adapter per stage branch (stage={self._stage_name!r})."
+            )
+        self._wired = True
+
+        def _on_block_progress(block_index: int, total_blocks: int) -> None:
+            normalized_index, normalized_total = validate_block_progress_payload(
+                block_index=block_index,
+                total_blocks=total_blocks,
+            )
+            self._callback_hits += 1
+            self._controller.update(
+                block_index=normalized_index,
+                total_blocks=normalized_total,
+                label=f"{self._stage_name}.layer",
+            )
+
+        return {BLOCK_PROGRESS_CALLBACK_KEY: _on_block_progress}
+
+    def assert_wired(self, *, branch: str) -> None:
+        if self._wired:
+            return
+        raise RuntimeError(
+            "WAN22 GGUF: missing block-progress emitter hookup before stage sampling "
+            f"(branch={branch!r} stage={self._stage_name!r})."
+        )
+
+    def assert_emitted(self, *, branch: str) -> None:
+        if self._callback_hits > 0:
+            return
+        raise RuntimeError(
+            "WAN22 GGUF: stage sampling completed without any block-progress callback emission "
+            f"(branch={branch!r} stage={self._stage_name!r}). "
+            "This indicates missing emitter wiring or a contract mismatch in the stage forward path."
+        )
+
+    def close(self) -> None:
+        self._controller.close()
 
 
 def _wan_trace_inference_enabled() -> bool:
@@ -128,33 +224,14 @@ def _wan_trace(log: Any, message: str, *args: Any) -> None:
         logger_obj.debug("[wan22.trace] " + message, *args)
 
 
-def _resolve_wan_fused_summary_context_for_run() -> tuple[tuple[str, str, str], bool]:
-    fused_mode = resolve_effective_wan_fused_mode(None)
-    should_emit_when_idle = str(getattr(fused_mode, "value", fused_mode)).strip().lower() != "off"
-    return resolve_effective_wan_fused_attn_core(fused_mode), should_emit_when_idle
+def _resolve_sram_attention_summary_mode_for_run() -> tuple[str, bool]:
+    sram_mode = resolve_effective_sram_attention_mode(None)
+    mode_value = str(getattr(sram_mode, "value", sram_mode)).strip().lower()
+    should_emit_when_idle = mode_value != "off"
+    return mode_value, should_emit_when_idle
 
 
-class _WanFusedSummaryLogger:
-    """Logger proxy that appends deterministic fused-summary metadata fields."""
-
-    def __init__(self, logger_obj: Any, *, summary_fields: tuple[str, str, str]) -> None:
-        self._logger = logger_obj
-        self._summary_fields = summary_fields
-
-    def info(self, msg: str, *args: Any, **kwargs: Any) -> Any:
-        message = str(msg)
-        if "fused runtime summary:" in message:
-            attn_core, attn_core_source, attn_core_raw = self._summary_fields
-            message = message.replace(
-                "fused runtime summary:",
-                "fused runtime summary: attn_core=%s attn_core_source=%s attn_core_raw=%s",
-                1,
-            )
-            args = (attn_core, attn_core_source, attn_core_raw, *args)
-        return self._logger.info(message, *args, **kwargs)
-
-
-def _resolve_wan_fused_run_label(func_name: str, cfg: Any) -> str:
+def _resolve_sram_attention_run_label(func_name: str, cfg: Any) -> str:
     variant = str(getattr(cfg, "wan_engine_variant", None) or "auto")
     frames = int(getattr(cfg, "num_frames", 0) or 0)
     height = int(getattr(cfg, "height", 0) or 0)
@@ -162,24 +239,23 @@ def _resolve_wan_fused_run_label(func_name: str, cfg: Any) -> str:
     return f"{str(func_name)}(variant={variant},frames={frames},size={height}x{width})"
 
 
-def _with_wan_fused_runtime_metrics(func):
+def _with_sram_attention_runtime_metrics(func):
     @wraps(func)
     def _wrapped(*args, **kwargs):
-        if wan_fused_runtime_metrics_is_active():
+        if sram_attention_runtime_metrics_is_active():
             return func(*args, **kwargs)
         cfg = kwargs.get("cfg", None)
         if cfg is None and args:
             cfg = args[0]
         log = get_logger(kwargs.get("logger", None))
-        summary_fields, emit_summary_when_idle = _resolve_wan_fused_summary_context_for_run()
-        summary_log = _WanFusedSummaryLogger(log, summary_fields=summary_fields)
-        run_label = _resolve_wan_fused_run_label(func.__name__, cfg)
-        wan_fused_runtime_metrics_reset(run_label=run_label)
+        mode_value, emit_summary_when_idle = _resolve_sram_attention_summary_mode_for_run()
+        run_label = _resolve_sram_attention_run_label(func.__name__, cfg)
+        sram_attention_runtime_metrics_reset(run_label=run_label, mode=mode_value)
         try:
             result = func(*args, **kwargs)
         except Exception:
-            wan_fused_runtime_metrics_log_summary(
-                logger_obj=summary_log,
+            sram_attention_runtime_metrics_log_summary(
+                logger_obj=log,
                 reset=True,
                 emit_when_idle=emit_summary_when_idle,
             )
@@ -190,16 +266,16 @@ def _with_wan_fused_runtime_metrics(func):
                 try:
                     yield from result
                 finally:
-                    wan_fused_runtime_metrics_log_summary(
-                        logger_obj=summary_log,
+                    sram_attention_runtime_metrics_log_summary(
+                        logger_obj=log,
                         reset=True,
                         emit_when_idle=emit_summary_when_idle,
                     )
 
             return _generator()
 
-        wan_fused_runtime_metrics_log_summary(
-            logger_obj=summary_log,
+        sram_attention_runtime_metrics_log_summary(
+            logger_obj=log,
             reset=True,
             emit_when_idle=emit_summary_when_idle,
         )
@@ -356,20 +432,53 @@ def _parse_sampler(value: object | None) -> tuple[str | None, str | None]:
     raw = value.strip().lower()
     if not raw:
         return None, None
+
+    from apps.backend.types.samplers import SamplerKind
+
     parts = raw.split()
-    if len(parts) == 1:
-        return parts[0], None
-    if parts[0] == "uni-pc":
-        return parts[0], parts[1]
-    return parts[0], None
+    sampler_name = parts[0]
+    if sampler_name == SamplerKind.UNI_PC.value:
+        if len(parts) > 2:
+            raise RuntimeError(
+                f"WAN22 GGUF: sampler must be 'uni-pc' or 'uni-pc <solver_hint>', got {value!r}."
+            )
+        if len(parts) == 1:
+            return SamplerKind.UNI_PC.value, None
+        solver_hint = parts[1]
+        if re.fullmatch(r"[a-z0-9][a-z0-9._-]*", solver_hint) is None:
+            raise RuntimeError(
+                f"WAN22 GGUF: invalid UniPC solver hint {solver_hint!r} in sampler {value!r}; "
+                "use lowercase [a-z0-9._-] tokens only."
+            )
+        return SamplerKind.UNI_PC.value, solver_hint
+
+    try:
+        sampler_kind = SamplerKind.from_string(raw)
+    except Exception as exc:
+        raise RuntimeError(
+            f"WAN22 GGUF: unsupported sampler {value!r}. "
+            "Supported WAN22 sampler lanes: 'uni-pc' (optional solver hint), 'euler', 'euler a'."
+        ) from exc
+
+    if sampler_kind in {SamplerKind.UNI_PC, SamplerKind.UNI_PC_BH2}:
+        return SamplerKind.UNI_PC.value, ("bh2" if sampler_kind is SamplerKind.UNI_PC_BH2 else None)
+    if sampler_kind is SamplerKind.EULER:
+        return SamplerKind.EULER.value, None
+    if sampler_kind is SamplerKind.EULER_A:
+        return SamplerKind.EULER_A.value, None
+
+    raise RuntimeError(
+        f"WAN22 GGUF: unsupported sampler {value!r}. "
+        "Supported WAN22 sampler lanes: 'uni-pc' (optional solver hint), 'euler', 'euler a'."
+    )
 
 
 @dataclass(frozen=True, slots=True)
 class _ResolvedSharedSchedulerSpec:
     total_steps: int
     flow_shift: float
-    sampler: str | None
-    scheduler: str | None
+    sampler_configured: str | None
+    scheduler_configured: str | None
 
 
 def _resolve_shared_scheduler_spec(
@@ -389,15 +498,13 @@ def _resolve_shared_scheduler_spec(
             f"High={flow_shift_hi} Low={flow_shift_lo}. Schedule must be continuous."
         )
 
-    from apps.backend.types.samplers import SamplerKind
-
     hi_sampler_raw = sampler_hi.strip() if isinstance(sampler_hi, str) and sampler_hi.strip() else None
     lo_sampler_raw = sampler_lo.strip() if isinstance(sampler_lo, str) and sampler_lo.strip() else None
 
-    hi_name, hi_solver = _parse_sampler(hi_sampler_raw)
-    lo_name, lo_solver = _parse_sampler(lo_sampler_raw)
-    hi_is_unipc = hi_name == "uni-pc"
-    lo_is_unipc = lo_name == "uni-pc"
+    hi_lane, hi_solver = _parse_sampler(hi_sampler_raw)
+    lo_lane, lo_solver = _parse_sampler(lo_sampler_raw)
+    hi_is_unipc = hi_lane == "uni-pc"
+    lo_is_unipc = lo_lane == "uni-pc"
 
     if hi_is_unipc and lo_is_unipc and hi_solver and lo_solver and hi_solver != lo_solver:
         raise RuntimeError(
@@ -417,56 +524,43 @@ def _resolve_shared_scheduler_spec(
     if scheduler_lo is not None and not isinstance(scheduler_lo, str):
         raise RuntimeError(f"WAN22 GGUF: low scheduler must be a string when provided, got {scheduler_lo!r}.")
 
-    def _sampler_lane(raw: str | None) -> str | None:
-        if raw is None:
-            return None
-        raw_norm = str(raw).strip().lower()
-        if raw_norm.startswith("uni-pc"):
-            return "uni-pc"
-        try:
-            kind = SamplerKind.from_string(raw_norm)
-        except Exception:
-            return "metadata"
-        if kind in {SamplerKind.UNI_PC, SamplerKind.UNI_PC_BH2}:
-            return "uni-pc"
-        if kind in {SamplerKind.EULER, SamplerKind.EULER_CFG_PP}:
-            return "euler"
-        if kind in {SamplerKind.EULER_A, SamplerKind.EULER_A_CFG_PP}:
-            return "euler-a"
-        return "metadata"
-
-    hi_lane = _sampler_lane(hi_sampler_raw)
-    lo_lane = _sampler_lane(lo_sampler_raw)
     if hi_lane and lo_lane and hi_lane != lo_lane:
         raise RuntimeError(
             "WAN22 GGUF: high/low sampler lane mismatch for shared scheduler continuity "
             f"(high={sampler_hi!r} lane={hi_lane!r}, low={sampler_lo!r} lane={lo_lane!r})."
         )
-    if (
-        hi_lane == "metadata"
-        and lo_lane == "metadata"
-        and hi_sampler_raw is not None
-        and lo_sampler_raw is not None
-        and hi_sampler_raw.lower() != lo_sampler_raw.lower()
-    ):
-        raise RuntimeError(
-            "WAN22 GGUF: high/low sampler mismatch for unsupported sampler lanes "
-            f"(high={sampler_hi!r}, low={sampler_lo!r}). Use the same sampler for both stages."
-        )
 
     resolved_lane = hi_lane or lo_lane
     if resolved_lane == "uni-pc":
         solver = hi_solver or lo_solver
-        sampler_eff = f"uni-pc {solver}" if solver else "uni-pc"
+        sampler_configured = f"uni-pc {solver}" if solver else "uni-pc"
     else:
-        sampler_eff = hi_sampler_raw or lo_sampler_raw
+        sampler_configured = resolved_lane
 
-    hi_scheduler_raw = scheduler_hi.strip() if isinstance(scheduler_hi, str) and scheduler_hi.strip() else None
-    lo_scheduler_raw = scheduler_lo.strip() if isinstance(scheduler_lo, str) and scheduler_lo.strip() else None
+    hi_scheduler_raw = (
+        scheduler_hi.strip().lower()
+        if isinstance(scheduler_hi, str) and scheduler_hi.strip()
+        else None
+    )
+    lo_scheduler_raw = (
+        scheduler_lo.strip().lower()
+        if isinstance(scheduler_lo, str) and scheduler_lo.strip()
+        else None
+    )
+    if hi_scheduler_raw is None and lo_scheduler_raw is None:
+        raise RuntimeError(
+            "WAN22 GGUF: shared scheduler resolution requires explicit stage scheduler values "
+            "(missing high/low scheduler after config normalization)."
+        )
+    for stage_name, scheduler_value in (("high", hi_scheduler_raw), ("low", lo_scheduler_raw)):
+        if scheduler_value is not None and scheduler_value != "simple":
+            raise RuntimeError(
+                f"WAN22 GGUF: {stage_name} scheduler must be 'simple', got {scheduler_value!r}."
+            )
     if (
         hi_scheduler_raw is not None
         and lo_scheduler_raw is not None
-        and hi_scheduler_raw.lower() != lo_scheduler_raw.lower()
+        and hi_scheduler_raw != lo_scheduler_raw
     ):
         raise RuntimeError(
             "WAN22 GGUF: high/low scheduler mismatch for shared scheduler continuity "
@@ -476,19 +570,21 @@ def _resolve_shared_scheduler_spec(
     return _ResolvedSharedSchedulerSpec(
         total_steps=int(total_steps),
         flow_shift=float(flow_shift_hi),
-        sampler=sampler_eff,
-        scheduler=(hi_scheduler_raw or lo_scheduler_raw),
+        sampler_configured=sampler_configured,
+        scheduler_configured=(hi_scheduler_raw or lo_scheduler_raw),
     )
 
 
 def _build_shared_scheduler_from_spec(cfg: RunConfig, *, spec: _ResolvedSharedSchedulerSpec):
-    return make_scheduler(
+    scheduler_obj, effective_sampler = make_scheduler(
         int(spec.total_steps),
         metadata_dir=str(cfg.metadata_dir or ""),
         flow_shift=float(spec.flow_shift),
-        sampler=spec.sampler,
-        scheduler=spec.scheduler,
-    ), int(spec.total_steps)
+        sampler=spec.sampler_configured,
+        scheduler=spec.scheduler_configured,
+        return_effective_sampler=True,
+    )
+    return scheduler_obj, int(spec.total_steps), spec.sampler_configured, str(effective_sampler)
 
 
 def _build_shared_scheduler(
@@ -611,6 +707,33 @@ def _resolve_stage_pair_variant(
         raise RuntimeError(
             f"WAN22 GGUF ({mode}) could not infer 5b/14b from stage filenames and no explicit variant was provided "
             f"(high={hi_path!r} low={lo_path!r})."
+        )
+    return inferred
+
+
+def _resolve_single_stage_variant(
+    stage_path: str,
+    *,
+    mode: str,
+    requested_variant: str | None,
+) -> str:
+    inferred = _infer_stage_variant(stage_path, stage="single", mode=mode)
+    if requested_variant is not None:
+        normalized_requested = str(requested_variant).strip().lower()
+        if normalized_requested not in {"5b", "14b"}:
+            raise RuntimeError(
+                f"WAN22 GGUF ({mode}) invalid requested variant={requested_variant!r}; expected '5b' or '14b'."
+            )
+        if inferred is not None and inferred != normalized_requested:
+            raise RuntimeError(
+                f"WAN22 GGUF ({mode}) variant mismatch: requested={normalized_requested} inferred={inferred} "
+                f"(single={stage_path!r})"
+            )
+        return normalized_requested
+    if inferred is None:
+        raise RuntimeError(
+            f"WAN22 GGUF ({mode}) could not infer 5b/14b from the single-stage filename and no explicit variant was provided "
+            f"(single={stage_path!r})."
         )
     return inferred
 
@@ -970,6 +1093,10 @@ def _sample_chunk_stage_with_progress(
     chunk_index: int,
     chunk_total: int,
 ):
+    branch_label = f"chunk:{phase_name}:{stage_name}"
+    progress_adapter = _WanUnifiedBlockProgressAdapter(stage_name=stage_name)
+    transformer_options = progress_adapter.transformer_options()
+    progress_adapter.assert_wired(branch=branch_label)
     generator = sample_stage_latents_generator(
         model=model,
         geom=geom,
@@ -993,30 +1120,37 @@ def _sample_chunk_stage_with_progress(
         flow_multiplier=flow_multiplier,
         stage_name=stage_name,
         emit_logs=False,
+        transformer_options=transformer_options,
     )
 
-    while True:
-        try:
-            event = next(generator)
-        except StopIteration as stop:
-            return stop.value
+    try:
+        while True:
+            try:
+                event = next(generator)
+            except StopIteration as stop:
+                progress_adapter.assert_emitted(branch=branch_label)
+                return stop.value
 
-        if not isinstance(event, dict) or event.get("type") != "progress":
-            continue
+            if not isinstance(event, dict) or event.get("type") != "progress":
+                continue
 
-        local_pct = float(event.get("percent", 0.0))
-        if local_pct > 1.0:
-            local_pct = local_pct / 100.0
-        local_pct = max(0.0, min(1.0, local_pct))
-        chunk_progress = (float(chunk_index) + local_pct) / max(float(chunk_total), 1.0)
-        yield {
-            "type": "progress",
-            "stage": phase_name,
-            "step": int(event.get("step", 0)),
-            "total": int(event.get("total", 0)),
-            "eta_seconds": event.get("eta_seconds"),
-            "percent": float(phase_start_pct) + (float(phase_span_pct) * chunk_progress),
-        }
+            local_pct = float(event.get("percent", 0.0))
+            if local_pct > 1.0:
+                local_pct = local_pct / 100.0
+            local_pct = max(0.0, min(1.0, local_pct))
+            chunk_progress = (float(chunk_index) + local_pct) / max(float(chunk_total), 1.0)
+            yield {
+                "type": "progress",
+                "stage": phase_name,
+                "step": int(event.get("step", 0)),
+                "total": int(event.get("total", 0)),
+                "eta_seconds": event.get("eta_seconds"),
+                "percent": float(phase_start_pct) + (float(phase_span_pct) * chunk_progress),
+                "progress_adapter": _WAN_PROGRESS_ADAPTER_NAME,
+                "progress_granularity": "coarse_step",
+            }
+    finally:
+        progress_adapter.close()
 
 
 def _resolve_stage_prompt_pairs(cfg: RunConfig) -> tuple[str, str, str, str]:
@@ -1056,6 +1190,25 @@ def _resolve_stage_prompt_pairs(cfg: RunConfig) -> tuple[str, str, str, str]:
         raise RuntimeError("WAN22 GGUF: low stage negative prompt must be a string when provided.")
 
     return high_prompt, high_negative, low_prompt, low_negative
+
+
+def _resolve_single_stage_prompt_pair(cfg: RunConfig) -> tuple[str, str]:
+    single_stage = getattr(cfg, "single", None)
+    raw_prompt = getattr(single_stage, "prompt", None)
+    if not isinstance(raw_prompt, str):
+        raise RuntimeError("WAN22 GGUF: single-stage prompt is required and must be a string.")
+    prompt = raw_prompt.strip()
+    if not prompt:
+        raise RuntimeError("WAN22 GGUF: single-stage prompt must not be empty.")
+
+    raw_negative = getattr(single_stage, "negative_prompt", None)
+    if raw_negative is None:
+        negative = str(getattr(cfg, "negative_prompt", "") or "").strip()
+    elif isinstance(raw_negative, str):
+        negative = raw_negative.strip()
+    else:
+        raise RuntimeError("WAN22 GGUF: single-stage negative prompt must be a string when provided.")
+    return prompt, negative
 
 
 def _resolve_stage_text_embeddings(
@@ -1135,7 +1288,342 @@ def _resolve_stage_text_embeddings(
     return high_prompt_embeds, high_negative_embeds, low_prompt_embeds, low_negative_embeds
 
 
-@_with_wan_fused_runtime_metrics
+def _resolve_single_stage_text_embeddings(
+    *,
+    cfg: RunConfig,
+    model_dir: str,
+    model_key: str,
+    dev_name: str,
+    dev: torch.device,
+    dt: torch.dtype,
+    te_device: str,
+    logger: Any,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    prompt, negative = _resolve_single_stage_prompt_pair(cfg)
+    _wan_trace(
+        logger,
+        "te.resolve.single.start: model_key=%s te_device=%s runtime_device=%s runtime_dtype=%s",
+        model_key,
+        te_device,
+        dev_name,
+        str(dt),
+    )
+    prompt_embeds, negative_embeds = get_text_context(
+        model_dir=model_dir,
+        prompt=[prompt],
+        negative=[negative],
+        device=dev_name,
+        dtype=cfg.dtype,
+        text_encoder_dir=cfg.text_encoder_dir,
+        tokenizer_dir=cfg.tokenizer_dir,
+        vae_dir=cfg.vae_dir,
+        model_key=model_key,
+        metadata_dir=cfg.metadata_dir,
+        logger=logger,
+        offload_after=smart_offload_enabled(),
+        te_device=te_device,
+    )
+    if int(prompt_embeds.shape[0]) != 1 or int(negative_embeds.shape[0]) != 1:
+        raise RuntimeError(
+            "WAN22 GGUF: single-stage text context batch mismatch "
+            f"(prompt={tuple(prompt_embeds.shape)} negative={tuple(negative_embeds.shape)} expected_batch=1)."
+        )
+    prompt_embeds = prompt_embeds.to(device=dev, dtype=dt)
+    negative_embeds = negative_embeds.to(device=dev, dtype=dt)
+    _wan_trace(
+        logger,
+        "te.resolve.single.done: prompt=%s negative=%s dtype=%s device=%s",
+        tuple(prompt_embeds.shape),
+        tuple(negative_embeds.shape),
+        str(prompt_embeds.dtype),
+        str(prompt_embeds.device),
+    )
+    return prompt_embeds, negative_embeds
+
+
+@_with_sram_attention_runtime_metrics
+def run_txt2vid_single(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) -> list[object]:
+    log = get_logger(logger)
+    single_path = pick_stage_gguf(getattr(cfg.single, "model_dir", None) if cfg.single else None, stage="single")
+    if not single_path:
+        raise RuntimeError("WAN22 GGUF (txt2vid single-stage) requires a .gguf single stage")
+    log.info("[wan22.gguf] single=%s", single_path)
+
+    set_sdpa_settings(
+        getattr(cfg, "sdpa_policy", None),
+        getattr(cfg, "attn_chunk_size", None),
+        getattr(cfg, "attention_mode", None),
+    )
+    if on_progress:
+        try:
+            on_progress(stage="prepare", step=0, total=1, percent=0.0)
+        except Exception:
+            pass
+
+    dev_name = resolve_device_name(getattr(cfg, "device", None))
+    dev = torch.device(dev_name)
+    dt = as_torch_dtype(cfg.dtype)
+    flow_multiplier = resolve_wan_flow_multiplier(str(cfg.metadata_dir or ""))
+    variant = _resolve_single_stage_variant(
+        single_path,
+        mode="txt2vid",
+        requested_variant=getattr(cfg, "wan_engine_variant", None),
+    )
+    if variant != "5b":
+        raise RuntimeError(f"WAN22 GGUF (txt2vid) single-stage runtime is only implemented for 5B, got {variant!r}.")
+    model_key = f"wan_t2v_{variant}"
+    lvl = _resolve_offload_level(cfg)
+
+    single_model: torch.nn.Module | None = None
+    single_mm: _MemoryManagedModule | None = None
+    try:
+        single_model = mount_stage_model_from_gguf(
+            single_path,
+            stage="single",
+            dtype=dt,
+            loras=(getattr(cfg.single, "loras", ()) if cfg.single else ()),
+            logger=log,
+        )
+        single_mm = _MemoryManagedModule(single_model, load_device=dev)
+        if on_progress:
+            try:
+                on_progress(stage="prepare", step=0, total=1, percent=0.05)
+            except Exception:
+                pass
+
+        te_dev_eff = getattr(cfg, "te_device", None) or dev_name
+        t_out, t_lat = _resolve_frame_counts(int(cfg.num_frames), logger=log)
+        h_lat = max(8, int(cfg.height) // 8)
+        w_lat = max(8, int(cfg.width) // 8)
+        t = int(t_lat)
+        geom = infer_patch_geometry(single_model, t=t, h_lat=h_lat, w_lat=w_lat)
+        prompt_embeds, negative_embeds = _resolve_single_stage_text_embeddings(
+            cfg=cfg,
+            model_dir=os.path.dirname(single_path),
+            model_key=model_key,
+            dev_name=dev_name,
+            dev=dev,
+            dt=dt,
+            te_device=(cfg.te_device or te_dev_eff),
+            logger=log,
+        )
+        flow_shift_value = _require_flow_shift("single", getattr(cfg.single, "flow_shift", None) if cfg.single else None)
+        scheduler, total_steps, sampler_configured, sampler_effective = make_scheduler(
+            int(getattr(cfg.single, "steps", 0) or 0),
+            metadata_dir=str(cfg.metadata_dir or ""),
+            flow_shift=float(flow_shift_value),
+            sampler=(getattr(cfg.single, "sampler", None) if cfg.single else None),
+            scheduler=(getattr(cfg.single, "scheduler", None) if cfg.single else None),
+            return_effective_sampler=True,
+        )
+        log.info(
+            "[wan22.gguf] SINGLE: steps=%s sampler_effective=%s sampler_configured=%s scheduler=%s cfg_scale=%s seed=%s",
+            total_steps,
+            sampler_effective,
+            sampler_configured,
+            getattr(cfg.single, "scheduler", None),
+            (getattr(cfg.single, "cfg_scale", None) if cfg.single else cfg.guidance_scale),
+            cfg.seed,
+        )
+
+        memory_management.manager.load_model(single_mm)
+        progress_adapter = _WanUnifiedBlockProgressAdapter(stage_name="single")
+        try:
+            transformer_options = progress_adapter.transformer_options()
+            progress_adapter.assert_wired(branch="run_txt2vid.single")
+            latents = sample_stage_latents(
+                model=single_model,
+                geom=geom,
+                steps=total_steps,
+                cfg_scale=(getattr(cfg.single, "cfg_scale", None) if cfg.single else cfg.guidance_scale),
+                prompt_embeds=prompt_embeds,
+                negative_embeds=negative_embeds,
+                device=dev,
+                dtype=dt,
+                logger=log,
+                sampler_name=sampler_effective,
+                scheduler_name=(getattr(cfg.single, "scheduler", None) if cfg.single else None),
+                metadata_dir=cfg.metadata_dir,
+                scheduler_obj=scheduler,
+                timestep_start=0,
+                timestep_end=total_steps,
+                seed=cfg.seed,
+                state_init=None,
+                on_progress=(lambda **p: on_progress(stage="single", **p)) if on_progress else None,
+                log_mem_interval=getattr(cfg, "log_mem_interval", None),
+                flow_shift=flow_shift_value,
+                flow_multiplier=flow_multiplier,
+                stage_name="single",
+                transformer_options=transformer_options,
+            )
+            progress_adapter.assert_emitted(branch="run_txt2vid.single")
+        finally:
+            progress_adapter.close()
+        del prompt_embeds
+        del negative_embeds
+    finally:
+        single_mm, single_model = _teardown_stage(
+            stage="single",
+            mm=single_mm,
+            model=single_model,
+            offload_level=lvl,
+            logger=log,
+        )
+
+    _stage_transition_barrier(logger=log, label="txt2vid:single->decode", offload_level=lvl, force_clear=True)
+    latents_backup = _backup_decode_latents(latents=latents, logger=log, source="run_txt2vid_single")
+    del latents
+    frames = decode_latents_to_frames(
+        latents=latents_backup,
+        model_dir=os.path.dirname(single_path),
+        cfg=cfg,
+        logger=log,
+        expected_frames=t_out,
+    )
+    del latents_backup
+    if not frames:
+        raise RuntimeError("WAN22 GGUF: single stage produced no frames")
+    return frames
+
+
+@_with_sram_attention_runtime_metrics
+def stream_txt2vid_single(cfg: RunConfig, *, logger: Any = None):
+    log = get_logger(logger)
+    single_path = pick_stage_gguf(getattr(cfg.single, "model_dir", None) if cfg.single else None, stage="single")
+    if not single_path:
+        raise RuntimeError("WAN22 GGUF (txt2vid single-stage) requires a .gguf single stage")
+
+    set_sdpa_settings(
+        getattr(cfg, "sdpa_policy", None),
+        getattr(cfg, "attn_chunk_size", None),
+        getattr(cfg, "attention_mode", None),
+    )
+    dev_name = resolve_device_name(getattr(cfg, "device", None))
+    dev = torch.device(dev_name)
+    dt = as_torch_dtype(cfg.dtype)
+    flow_multiplier = resolve_wan_flow_multiplier(str(cfg.metadata_dir or ""))
+    variant = _resolve_single_stage_variant(
+        single_path,
+        mode="txt2vid",
+        requested_variant=getattr(cfg, "wan_engine_variant", None),
+    )
+    if variant != "5b":
+        raise RuntimeError(f"WAN22 GGUF (txt2vid) single-stage runtime is only implemented for 5B, got {variant!r}.")
+    model_key = f"wan_t2v_{variant}"
+    lvl = _resolve_offload_level(cfg)
+
+    single_model: torch.nn.Module | None = None
+    single_mm: _MemoryManagedModule | None = None
+    try:
+        single_model = mount_stage_model_from_gguf(
+            single_path,
+            stage="single",
+            dtype=dt,
+            loras=(getattr(cfg.single, "loras", ()) if cfg.single else ()),
+            logger=log,
+        )
+        single_mm = _MemoryManagedModule(single_model, load_device=dev)
+        te_dev_eff = getattr(cfg, "te_device", None) or dev_name
+        t_out, t_lat = _resolve_frame_counts(int(cfg.num_frames), logger=log)
+        h_lat = max(8, int(cfg.height) // 8)
+        w_lat = max(8, int(cfg.width) // 8)
+        t = int(t_lat)
+        geom = infer_patch_geometry(single_model, t=t, h_lat=h_lat, w_lat=w_lat)
+        prompt_embeds, negative_embeds = _resolve_single_stage_text_embeddings(
+            cfg=cfg,
+            model_dir=os.path.dirname(single_path),
+            model_key=model_key,
+            dev_name=dev_name,
+            dev=dev,
+            dt=dt,
+            te_device=(cfg.te_device or te_dev_eff),
+            logger=log,
+        )
+        flow_shift_value = _require_flow_shift("single", getattr(cfg.single, "flow_shift", None) if cfg.single else None)
+        scheduler, total_steps, sampler_configured, sampler_effective = make_scheduler(
+            int(getattr(cfg.single, "steps", 0) or 0),
+            metadata_dir=str(cfg.metadata_dir or ""),
+            flow_shift=float(flow_shift_value),
+            sampler=(getattr(cfg.single, "sampler", None) if cfg.single else None),
+            scheduler=(getattr(cfg.single, "scheduler", None) if cfg.single else None),
+            return_effective_sampler=True,
+        )
+        log.info(
+            "[wan22.gguf] SINGLE: steps=%s sampler_effective=%s sampler_configured=%s scheduler=%s",
+            total_steps,
+            sampler_effective,
+            sampler_configured,
+            getattr(cfg.single, "scheduler", None),
+        )
+
+        memory_management.manager.load_model(single_mm)
+        progress_adapter = _WanUnifiedBlockProgressAdapter(stage_name="single")
+        try:
+            transformer_options = progress_adapter.transformer_options()
+            progress_adapter.assert_wired(branch="stream_txt2vid.single")
+            latents = yield from sample_stage_latents_generator(
+                model=single_model,
+                geom=geom,
+                steps=total_steps,
+                cfg_scale=(getattr(cfg.single, "cfg_scale", None) if cfg.single else cfg.guidance_scale),
+                prompt_embeds=prompt_embeds,
+                negative_embeds=negative_embeds,
+                device=dev,
+                dtype=dt,
+                logger=log,
+                sampler_name=sampler_effective,
+                scheduler_name=(getattr(cfg.single, "scheduler", None) if cfg.single else None),
+                metadata_dir=cfg.metadata_dir,
+                scheduler_obj=scheduler,
+                timestep_start=0,
+                timestep_end=total_steps,
+                seed=cfg.seed,
+                state_init=None,
+                log_mem_interval=getattr(cfg, "log_mem_interval", None),
+                flow_shift=flow_shift_value,
+                flow_multiplier=flow_multiplier,
+                stage_name="single",
+                emit_logs=False,
+                transformer_options=transformer_options,
+            )
+            progress_adapter.assert_emitted(branch="stream_txt2vid.single")
+        finally:
+            progress_adapter.close()
+        del prompt_embeds
+        del negative_embeds
+    finally:
+        single_mm, single_model = _teardown_stage(
+            stage="single",
+            mm=single_mm,
+            model=single_model,
+            offload_level=lvl,
+            logger=log,
+        )
+
+    _stage_transition_barrier(logger=log, label="stream_txt2vid:single->decode", offload_level=lvl, force_clear=True)
+    latents_backup = _backup_decode_latents(latents=latents, logger=log, source="stream_txt2vid_single")
+    del latents
+    yield _coarse_progress_event(
+        stage="decode",
+        step=0,
+        total=1,
+        percent=95.0,
+        reason="vae_decode_no_block_progress",
+    )
+    frames = decode_latents_to_frames(
+        latents=latents_backup,
+        model_dir=os.path.dirname(single_path),
+        cfg=cfg,
+        logger=log,
+        expected_frames=t_out,
+    )
+    del latents_backup
+    if not frames:
+        raise RuntimeError("WAN22 GGUF: single stage produced no frames")
+    yield {"type": "result", "frames": frames}
+
+
+@_with_sram_attention_runtime_metrics
 def run_txt2vid(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) -> list[object]:
     log = get_logger(logger)
     hi_path = pick_stage_gguf(getattr(cfg.high, "model_dir", None) if cfg.high else None, stage="high")
@@ -1263,7 +1751,7 @@ def run_txt2vid(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) 
         flow_shift_lo = getattr(cfg.low, "flow_shift", None) if cfg.low else None
         flow_shift_lo_value = _require_flow_shift("low", flow_shift_lo)
 
-        scheduler, total_steps = _build_shared_scheduler(
+        scheduler, total_steps, sampler_configured, sampler_effective = _build_shared_scheduler(
             cfg,
             steps_hi=steps_hi,
             steps_lo=steps_lo,
@@ -1274,41 +1762,57 @@ def run_txt2vid(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) 
             flow_shift_hi=flow_shift_hi_value,
             flow_shift_lo=flow_shift_lo_value,
         )
-        log.info("[wan22.gguf] schedule: steps_total=%d steps_high=%d steps_low=%d", total_steps, steps_hi, steps_lo)
         log.info(
-            "[wan22.gguf] HIGH: steps=%s sampler=%s scheduler=%s cfg_scale=%s seed=%s",
+            "[wan22.gguf] schedule: steps_total=%d steps_high=%d steps_low=%d sampler_configured=%s sampler_effective=%s",
+            total_steps,
             steps_hi,
-            sampler_hi,
+            steps_lo,
+            sampler_configured,
+            sampler_effective,
+        )
+        log.info(
+            "[wan22.gguf] HIGH: steps=%s sampler_effective=%s sampler_configured=%s scheduler=%s cfg_scale=%s seed=%s",
+            steps_hi,
+            sampler_effective,
+            sampler_configured,
             sched_hi,
             (getattr(cfg.high, "cfg_scale", None) if cfg.high else cfg.guidance_scale),
             cfg.seed,
         )
 
         memory_management.manager.load_model(hi_mm)
-        latents_hi = sample_stage_latents(
-            model=hi_model,
-            geom=geom_hi,
-            steps=steps_hi,
-            cfg_scale=(getattr(cfg.high, "cfg_scale", None) if cfg.high else cfg.guidance_scale),
-            prompt_embeds=high_prompt_embeds,
-            negative_embeds=high_negative_embeds,
-            device=dev,
-            dtype=dt,
-            logger=log,
-            sampler_name=sampler_hi,
-            scheduler_name=sched_hi,
-            metadata_dir=cfg.metadata_dir,
-            scheduler_obj=scheduler,
-            timestep_start=0,
-            timestep_end=steps_hi,
-            seed=cfg.seed,
-            state_init=None,
-            on_progress=(lambda **p: on_progress(stage="high", **p)) if on_progress else None,
-            log_mem_interval=getattr(cfg, "log_mem_interval", None),
-            flow_shift=flow_shift_hi_value,
-            flow_multiplier=flow_multiplier,
-            stage_name="high",
-        )
+        high_progress_adapter = _WanUnifiedBlockProgressAdapter(stage_name="high")
+        try:
+            high_transformer_options = high_progress_adapter.transformer_options()
+            high_progress_adapter.assert_wired(branch="run_txt2vid.high")
+            latents_hi = sample_stage_latents(
+                model=hi_model,
+                geom=geom_hi,
+                steps=steps_hi,
+                cfg_scale=(getattr(cfg.high, "cfg_scale", None) if cfg.high else cfg.guidance_scale),
+                prompt_embeds=high_prompt_embeds,
+                negative_embeds=high_negative_embeds,
+                device=dev,
+                dtype=dt,
+                logger=log,
+                sampler_name=sampler_effective,
+                scheduler_name=sched_hi,
+                metadata_dir=cfg.metadata_dir,
+                scheduler_obj=scheduler,
+                timestep_start=0,
+                timestep_end=steps_hi,
+                seed=cfg.seed,
+                state_init=None,
+                on_progress=(lambda **p: on_progress(stage="high", **p)) if on_progress else None,
+                log_mem_interval=getattr(cfg, "log_mem_interval", None),
+                flow_shift=flow_shift_hi_value,
+                flow_multiplier=flow_multiplier,
+                stage_name="high",
+                transformer_options=high_transformer_options,
+            )
+            high_progress_adapter.assert_emitted(branch="run_txt2vid.high")
+        finally:
+            high_progress_adapter.close()
         del high_prompt_embeds
         del high_negative_embeds
     finally:
@@ -1354,9 +1858,10 @@ def run_txt2vid(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) 
                 f"high={tuple(latents_hi.shape)} low_init={tuple(seed_latents.shape)}"
             )
         log.info(
-            "[wan22.gguf] LOW: steps=%s sampler=%s scheduler=%s cfg_scale=%s",
+            "[wan22.gguf] LOW: steps=%s sampler_effective=%s sampler_configured=%s scheduler=%s cfg_scale=%s",
             steps_lo,
-            sampler_lo,
+            sampler_effective,
+            sampler_configured,
             sched_lo,
             (getattr(cfg.low, "cfg_scale", None) if cfg.low else cfg.guidance_scale),
         )
@@ -1364,30 +1869,38 @@ def run_txt2vid(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) 
         low_negative_embeds = low_negative_embeds.to(device=dev, dtype=dt)
 
         memory_management.manager.load_model(lo_mm)
-        latents_lo = sample_stage_latents(
-            model=lo_model,
-            geom=geom_lo,
-            steps=steps_lo,
-            cfg_scale=(getattr(cfg.low, "cfg_scale", None) if cfg.low else cfg.guidance_scale),
-            prompt_embeds=low_prompt_embeds,
-            negative_embeds=low_negative_embeds,
-            device=dev,
-            dtype=dt,
-            logger=log,
-            sampler_name=sampler_lo,
-            scheduler_name=sched_lo,
-            metadata_dir=cfg.metadata_dir,
-            scheduler_obj=scheduler,
-            timestep_start=steps_hi,
-            timestep_end=total_steps,
-            seed=None,
-            state_init=seed_latents,
-            on_progress=(lambda **p: on_progress(stage="low", **p)) if on_progress else None,
-            log_mem_interval=getattr(cfg, "log_mem_interval", None),
-            flow_shift=flow_shift_lo_value,
-            flow_multiplier=flow_multiplier,
-            stage_name="low",
-        )
+        low_progress_adapter = _WanUnifiedBlockProgressAdapter(stage_name="low")
+        try:
+            low_transformer_options = low_progress_adapter.transformer_options()
+            low_progress_adapter.assert_wired(branch="run_txt2vid.low")
+            latents_lo = sample_stage_latents(
+                model=lo_model,
+                geom=geom_lo,
+                steps=steps_lo,
+                cfg_scale=(getattr(cfg.low, "cfg_scale", None) if cfg.low else cfg.guidance_scale),
+                prompt_embeds=low_prompt_embeds,
+                negative_embeds=low_negative_embeds,
+                device=dev,
+                dtype=dt,
+                logger=log,
+                sampler_name=sampler_effective,
+                scheduler_name=sched_lo,
+                metadata_dir=cfg.metadata_dir,
+                scheduler_obj=scheduler,
+                timestep_start=steps_hi,
+                timestep_end=total_steps,
+                seed=None,
+                state_init=seed_latents,
+                on_progress=(lambda **p: on_progress(stage="low", **p)) if on_progress else None,
+                log_mem_interval=getattr(cfg, "log_mem_interval", None),
+                flow_shift=flow_shift_lo_value,
+                flow_multiplier=flow_multiplier,
+                stage_name="low",
+                transformer_options=low_transformer_options,
+            )
+            low_progress_adapter.assert_emitted(branch="run_txt2vid.low")
+        finally:
+            low_progress_adapter.close()
         del seed_latents
         del low_prompt_embeds
         del low_negative_embeds
@@ -1409,6 +1922,11 @@ def run_txt2vid(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) 
     )
     latents_lo_decode = _backup_decode_latents(latents=latents_lo, logger=log, source="run_txt2vid")
     del latents_lo
+    if on_progress:
+        try:
+            on_progress(stage="decode", step=0, total=1, percent=0.95)
+        except Exception:
+            pass
     frames = decode_latents_to_frames(
         latents=latents_lo_decode,
         model_dir=os.path.dirname(lo_path),
@@ -1424,7 +1942,7 @@ def run_txt2vid(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) 
     return frames
 
 
-@_with_wan_fused_runtime_metrics
+@_with_sram_attention_runtime_metrics
 def stream_txt2vid(cfg: RunConfig, *, logger: Any = None):
     log = get_logger(logger)
     hi_path = pick_stage_gguf(getattr(cfg.high, "model_dir", None) if cfg.high else None, stage="high")
@@ -1517,7 +2035,7 @@ def stream_txt2vid(cfg: RunConfig, *, logger: Any = None):
         flow_shift_lo = getattr(cfg.low, "flow_shift", None) if cfg.low else None
         flow_shift_lo_value = _require_flow_shift("low", flow_shift_lo)
 
-        scheduler, total_steps = _build_shared_scheduler(
+        scheduler, total_steps, sampler_configured, sampler_effective = _build_shared_scheduler(
             cfg,
             steps_hi=steps_hi,
             steps_lo=steps_lo,
@@ -1528,33 +2046,48 @@ def stream_txt2vid(cfg: RunConfig, *, logger: Any = None):
             flow_shift_hi=flow_shift_hi_value,
             flow_shift_lo=flow_shift_lo_value,
         )
-        log.info("[wan22.gguf] schedule: steps_total=%d steps_high=%d steps_low=%d", total_steps, steps_hi, steps_lo)
+        log.info(
+            "[wan22.gguf] schedule: steps_total=%d steps_high=%d steps_low=%d sampler_configured=%s sampler_effective=%s",
+            total_steps,
+            steps_hi,
+            steps_lo,
+            sampler_configured,
+            sampler_effective,
+        )
 
         memory_management.manager.load_model(hi_mm)
-        latents_hi = yield from sample_stage_latents_generator(
-            model=hi_model,
-            geom=geom_hi,
-            steps=steps_hi,
-            cfg_scale=(getattr(cfg.high, "cfg_scale", None) if cfg.high else cfg.guidance_scale),
-            prompt_embeds=high_prompt_embeds,
-            negative_embeds=high_negative_embeds,
-            device=dev,
-            dtype=dt,
-            logger=log,
-            sampler_name=sampler_hi,
-            scheduler_name=sched_hi,
-            metadata_dir=cfg.metadata_dir,
-            scheduler_obj=scheduler,
-            timestep_start=0,
-            timestep_end=steps_hi,
-            seed=cfg.seed,
-            state_init=None,
-            log_mem_interval=getattr(cfg, "log_mem_interval", None),
-            flow_shift=flow_shift_hi_value,
-            flow_multiplier=flow_multiplier,
-            stage_name="high",
-            emit_logs=False,
-        )
+        high_progress_adapter = _WanUnifiedBlockProgressAdapter(stage_name="high")
+        try:
+            high_transformer_options = high_progress_adapter.transformer_options()
+            high_progress_adapter.assert_wired(branch="stream_txt2vid.high")
+            latents_hi = yield from sample_stage_latents_generator(
+                model=hi_model,
+                geom=geom_hi,
+                steps=steps_hi,
+                cfg_scale=(getattr(cfg.high, "cfg_scale", None) if cfg.high else cfg.guidance_scale),
+                prompt_embeds=high_prompt_embeds,
+                negative_embeds=high_negative_embeds,
+                device=dev,
+                dtype=dt,
+                logger=log,
+                sampler_name=sampler_effective,
+                scheduler_name=sched_hi,
+                metadata_dir=cfg.metadata_dir,
+                scheduler_obj=scheduler,
+                timestep_start=0,
+                timestep_end=steps_hi,
+                seed=cfg.seed,
+                state_init=None,
+                log_mem_interval=getattr(cfg, "log_mem_interval", None),
+                flow_shift=flow_shift_hi_value,
+                flow_multiplier=flow_multiplier,
+                stage_name="high",
+                emit_logs=False,
+                transformer_options=high_transformer_options,
+            )
+            high_progress_adapter.assert_emitted(branch="stream_txt2vid.high")
+        finally:
+            high_progress_adapter.close()
         del high_prompt_embeds
         del high_negative_embeds
     finally:
@@ -1596,30 +2129,38 @@ def stream_txt2vid(cfg: RunConfig, *, logger: Any = None):
         low_prompt_embeds = low_prompt_embeds.to(device=dev, dtype=dt)
         low_negative_embeds = low_negative_embeds.to(device=dev, dtype=dt)
         memory_management.manager.load_model(lo_mm)
-        latents_lo = yield from sample_stage_latents_generator(
-            model=lo_model,
-            geom=geom_lo,
-            steps=steps_lo,
-            cfg_scale=(getattr(cfg.low, "cfg_scale", None) if cfg.low else cfg.guidance_scale),
-            prompt_embeds=low_prompt_embeds,
-            negative_embeds=low_negative_embeds,
-            device=dev,
-            dtype=dt,
-            logger=log,
-            sampler_name=sampler_lo,
-            scheduler_name=sched_lo,
-            metadata_dir=cfg.metadata_dir,
-            scheduler_obj=scheduler,
-            timestep_start=steps_hi,
-            timestep_end=total_steps,
-            seed=None,
-            state_init=seed_latents,
-            log_mem_interval=getattr(cfg, "log_mem_interval", None),
-            flow_shift=flow_shift_lo_value,
-            flow_multiplier=flow_multiplier,
-            stage_name="low",
-            emit_logs=False,
-        )
+        low_progress_adapter = _WanUnifiedBlockProgressAdapter(stage_name="low")
+        try:
+            low_transformer_options = low_progress_adapter.transformer_options()
+            low_progress_adapter.assert_wired(branch="stream_txt2vid.low")
+            latents_lo = yield from sample_stage_latents_generator(
+                model=lo_model,
+                geom=geom_lo,
+                steps=steps_lo,
+                cfg_scale=(getattr(cfg.low, "cfg_scale", None) if cfg.low else cfg.guidance_scale),
+                prompt_embeds=low_prompt_embeds,
+                negative_embeds=low_negative_embeds,
+                device=dev,
+                dtype=dt,
+                logger=log,
+                sampler_name=sampler_effective,
+                scheduler_name=sched_lo,
+                metadata_dir=cfg.metadata_dir,
+                scheduler_obj=scheduler,
+                timestep_start=steps_hi,
+                timestep_end=total_steps,
+                seed=None,
+                state_init=seed_latents,
+                log_mem_interval=getattr(cfg, "log_mem_interval", None),
+                flow_shift=flow_shift_lo_value,
+                flow_multiplier=flow_multiplier,
+                stage_name="low",
+                emit_logs=False,
+                transformer_options=low_transformer_options,
+            )
+            low_progress_adapter.assert_emitted(branch="stream_txt2vid.low")
+        finally:
+            low_progress_adapter.close()
         del seed_latents
         del low_prompt_embeds
         del low_negative_embeds
@@ -1650,6 +2191,13 @@ def stream_txt2vid(cfg: RunConfig, *, logger: Any = None):
         source="stream_txt2vid",
     )
     del latents_lo_decode
+    yield _coarse_progress_event(
+        stage="decode",
+        step=0,
+        total=1,
+        percent=95.0,
+        reason="vae_decode_no_block_progress",
+    )
     frames = decode_latents_to_frames(
         latents=latents_lo_decode_backup,
         model_dir=os.path.dirname(lo_path),
@@ -1663,7 +2211,362 @@ def stream_txt2vid(cfg: RunConfig, *, logger: Any = None):
     yield {"type": "result", "frames": frames}
 
 
-@_with_wan_fused_runtime_metrics
+@_with_sram_attention_runtime_metrics
+def run_img2vid_single(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) -> list[object]:
+    log = get_logger(logger)
+    single_path = pick_stage_gguf(getattr(cfg.single, "model_dir", None) if cfg.single else None, stage="single")
+    if not single_path:
+        raise RuntimeError("WAN22 GGUF (img2vid single-stage) requires a .gguf single stage")
+    if cfg.init_image is None:
+        raise RuntimeError("img2vid requires init_image for GGUF path")
+
+    set_sdpa_settings(
+        getattr(cfg, "sdpa_policy", None),
+        getattr(cfg, "attn_chunk_size", None),
+        getattr(cfg, "attention_mode", None),
+    )
+    if on_progress:
+        try:
+            on_progress(stage="prepare", step=0, total=1, percent=0.0)
+        except Exception:
+            pass
+
+    dev_name = resolve_device_name(getattr(cfg, "device", None))
+    dev = torch.device(dev_name)
+    dt = as_torch_dtype(cfg.dtype)
+    flow_multiplier = resolve_wan_flow_multiplier(str(cfg.metadata_dir or ""))
+    lvl = _resolve_offload_level(cfg)
+    variant = _resolve_single_stage_variant(
+        single_path,
+        mode="img2vid",
+        requested_variant=getattr(cfg, "wan_engine_variant", None),
+    )
+    if variant != "5b":
+        raise RuntimeError(f"WAN22 GGUF (img2vid) single-stage runtime is only implemented for 5B, got {variant!r}.")
+    model_key = f"wan_i2v_{variant}"
+
+    t_out, t_lat = _resolve_frame_counts(int(cfg.num_frames), logger=log)
+    h_lat = max(8, int(cfg.height) // 8)
+    w_lat = max(8, int(cfg.width) // 8)
+    t = int(t_lat)
+    latent_condition = vae_encode_video_condition(
+        cfg.init_image,
+        num_frames=t_out,
+        height=int(cfg.height),
+        width=int(cfg.width),
+        device=dev_name,
+        dtype=cfg.dtype,
+        img2vid_image_scale=getattr(cfg, "img2vid_image_scale", None),
+        img2vid_crop_offset_x=float(getattr(cfg, "img2vid_crop_offset_x", 0.5)),
+        img2vid_crop_offset_y=float(getattr(cfg, "img2vid_crop_offset_y", 0.5)),
+        vae_dir=cfg.vae_dir,
+        vae_config_dir=cfg.vae_config_dir,
+        logger=log,
+    )
+    if latent_condition.ndim == 4:
+        latent_condition = latent_condition.unsqueeze(2)
+    latent_condition = resize_latents_hw(latent_condition, height=h_lat, width=w_lat)
+    if int(latent_condition.shape[2]) != int(t):
+        raise RuntimeError(
+            "WAN22 GGUF: unexpected latent_condition temporal size after VAE encode "
+            f"(got_T={int(latent_condition.shape[2])} expected_T_lat={int(t)})"
+        )
+
+    single_model: torch.nn.Module | None = None
+    single_mm: _MemoryManagedModule | None = None
+    try:
+        single_model = mount_stage_model_from_gguf(
+            single_path,
+            stage="single",
+            dtype=dt,
+            loras=(getattr(cfg.single, "loras", ()) if cfg.single else ()),
+            logger=log,
+        )
+        latent_channels = int(getattr(getattr(single_model, "config", None), "latent_channels", 0) or 0)
+        if latent_channels <= 0:
+            raise RuntimeError(
+                "WAN22 GGUF: single-stage model is missing a valid latent_channels config for I2V decode "
+                f"(got {latent_channels})."
+            )
+        single_mm = _MemoryManagedModule(single_model, load_device=dev)
+        geom = infer_patch_geometry(single_model, t=t, h_lat=h_lat, w_lat=w_lat)
+        te_dev_eff = getattr(cfg, "te_device", None) or dev_name
+        prompt_embeds, negative_embeds = _resolve_single_stage_text_embeddings(
+            cfg=cfg,
+            model_dir=os.path.dirname(single_path),
+            model_key=model_key,
+            dev_name=dev_name,
+            dev=dev,
+            dt=dt,
+            te_device=(cfg.te_device or te_dev_eff),
+            logger=log,
+        )
+        flow_shift_value = _require_flow_shift("single", getattr(cfg.single, "flow_shift", None) if cfg.single else None)
+        scheduler, total_steps, sampler_configured, sampler_effective = make_scheduler(
+            int(getattr(cfg.single, "steps", 0) or 0),
+            metadata_dir=str(cfg.metadata_dir or ""),
+            flow_shift=float(flow_shift_value),
+            sampler=(getattr(cfg.single, "sampler", None) if cfg.single else None),
+            scheduler=(getattr(cfg.single, "scheduler", None) if cfg.single else None),
+            return_effective_sampler=True,
+        )
+        seed_state = _build_i2v_seed_state(
+            cfg=cfg,
+            scheduler=scheduler,
+            geom_hi=geom,
+            latent_condition=latent_condition,
+            num_frames=t_out,
+            latent_frames=t,
+            h_lat=h_lat,
+            w_lat=w_lat,
+            flow_multiplier=flow_multiplier,
+            device=dev,
+            dtype=dt,
+            logger=log,
+        )
+        del latent_condition
+
+        memory_management.manager.load_model(single_mm)
+        progress_adapter = _WanUnifiedBlockProgressAdapter(stage_name="single")
+        try:
+            transformer_options = progress_adapter.transformer_options()
+            progress_adapter.assert_wired(branch="run_img2vid.single")
+            latents = sample_stage_latents(
+                model=single_model,
+                geom=geom,
+                steps=total_steps,
+                cfg_scale=(getattr(cfg.single, "cfg_scale", None) if cfg.single else cfg.guidance_scale),
+                prompt_embeds=prompt_embeds,
+                negative_embeds=negative_embeds,
+                device=dev,
+                dtype=dt,
+                logger=log,
+                sampler_name=sampler_effective,
+                scheduler_name=(getattr(cfg.single, "scheduler", None) if cfg.single else None),
+                metadata_dir=cfg.metadata_dir,
+                scheduler_obj=scheduler,
+                timestep_start=0,
+                timestep_end=total_steps,
+                seed=None,
+                state_init=seed_state,
+                on_progress=(lambda **p: on_progress(stage="single", **p)) if on_progress else None,
+                log_mem_interval=getattr(cfg, "log_mem_interval", None),
+                flow_shift=flow_shift_value,
+                flow_multiplier=flow_multiplier,
+                stage_name="single",
+                transformer_options=transformer_options,
+            )
+            progress_adapter.assert_emitted(branch="run_img2vid.single")
+        finally:
+            progress_adapter.close()
+        del prompt_embeds
+        del negative_embeds
+    finally:
+        single_mm, single_model = _teardown_stage(
+            stage="single",
+            mm=single_mm,
+            model=single_model,
+            offload_level=lvl,
+            logger=log,
+        )
+
+    latents_decode = _extract_i2v_decode_latents(state=latents, latent_channels=latent_channels, logger=log)
+    del latents
+    _stage_transition_barrier(logger=log, label="img2vid:single->decode", offload_level=lvl, force_clear=True)
+    latents_backup = _backup_decode_latents(latents=latents_decode, logger=log, source="run_img2vid_single")
+    del latents_decode
+    frames = decode_latents_to_frames(
+        latents=latents_backup,
+        model_dir=os.path.dirname(single_path),
+        cfg=cfg,
+        logger=log,
+        expected_frames=t_out,
+    )
+    del latents_backup
+    if not frames:
+        raise RuntimeError("WAN22 GGUF: single stage produced no frames")
+    return frames
+
+
+@_with_sram_attention_runtime_metrics
+def stream_img2vid_single(cfg: RunConfig, *, logger: Any = None):
+    log = get_logger(logger)
+    single_path = pick_stage_gguf(getattr(cfg.single, "model_dir", None) if cfg.single else None, stage="single")
+    if not single_path:
+        raise RuntimeError("WAN22 GGUF (img2vid single-stage) requires a .gguf single stage")
+    if cfg.init_image is None:
+        raise RuntimeError("img2vid requires init_image for GGUF path")
+
+    set_sdpa_settings(
+        getattr(cfg, "sdpa_policy", None),
+        getattr(cfg, "attn_chunk_size", None),
+        getattr(cfg, "attention_mode", None),
+    )
+    dev_name = resolve_device_name(getattr(cfg, "device", None))
+    dev = torch.device(dev_name)
+    dt = as_torch_dtype(cfg.dtype)
+    flow_multiplier = resolve_wan_flow_multiplier(str(cfg.metadata_dir or ""))
+    lvl = _resolve_offload_level(cfg)
+    variant = _resolve_single_stage_variant(
+        single_path,
+        mode="img2vid",
+        requested_variant=getattr(cfg, "wan_engine_variant", None),
+    )
+    if variant != "5b":
+        raise RuntimeError(f"WAN22 GGUF (img2vid) single-stage runtime is only implemented for 5B, got {variant!r}.")
+    model_key = f"wan_i2v_{variant}"
+
+    t_out, t_lat = _resolve_frame_counts(int(cfg.num_frames), logger=log)
+    h_lat = max(8, int(cfg.height) // 8)
+    w_lat = max(8, int(cfg.width) // 8)
+    t = int(t_lat)
+    latent_condition = vae_encode_video_condition(
+        cfg.init_image,
+        num_frames=t_out,
+        height=int(cfg.height),
+        width=int(cfg.width),
+        device=dev_name,
+        dtype=cfg.dtype,
+        img2vid_image_scale=getattr(cfg, "img2vid_image_scale", None),
+        img2vid_crop_offset_x=float(getattr(cfg, "img2vid_crop_offset_x", 0.5)),
+        img2vid_crop_offset_y=float(getattr(cfg, "img2vid_crop_offset_y", 0.5)),
+        vae_dir=cfg.vae_dir,
+        vae_config_dir=cfg.vae_config_dir,
+        logger=log,
+    )
+    if latent_condition.ndim == 4:
+        latent_condition = latent_condition.unsqueeze(2)
+    latent_condition = resize_latents_hw(latent_condition, height=h_lat, width=w_lat)
+    if int(latent_condition.shape[2]) != int(t):
+        raise RuntimeError(
+            "WAN22 GGUF: unexpected latent_condition temporal size after VAE encode "
+            f"(got_T={int(latent_condition.shape[2])} expected_T_lat={int(t)})"
+        )
+
+    single_model: torch.nn.Module | None = None
+    single_mm: _MemoryManagedModule | None = None
+    try:
+        single_model = mount_stage_model_from_gguf(
+            single_path,
+            stage="single",
+            dtype=dt,
+            loras=(getattr(cfg.single, "loras", ()) if cfg.single else ()),
+            logger=log,
+        )
+        latent_channels = int(getattr(getattr(single_model, "config", None), "latent_channels", 0) or 0)
+        if latent_channels <= 0:
+            raise RuntimeError(
+                "WAN22 GGUF: single-stage model is missing a valid latent_channels config for I2V decode "
+                f"(got {latent_channels})."
+            )
+        single_mm = _MemoryManagedModule(single_model, load_device=dev)
+        geom = infer_patch_geometry(single_model, t=t, h_lat=h_lat, w_lat=w_lat)
+        te_dev_eff = getattr(cfg, "te_device", None) or dev_name
+        prompt_embeds, negative_embeds = _resolve_single_stage_text_embeddings(
+            cfg=cfg,
+            model_dir=os.path.dirname(single_path),
+            model_key=model_key,
+            dev_name=dev_name,
+            dev=dev,
+            dt=dt,
+            te_device=(cfg.te_device or te_dev_eff),
+            logger=log,
+        )
+        flow_shift_value = _require_flow_shift("single", getattr(cfg.single, "flow_shift", None) if cfg.single else None)
+        scheduler, total_steps, sampler_configured, sampler_effective = make_scheduler(
+            int(getattr(cfg.single, "steps", 0) or 0),
+            metadata_dir=str(cfg.metadata_dir or ""),
+            flow_shift=float(flow_shift_value),
+            sampler=(getattr(cfg.single, "sampler", None) if cfg.single else None),
+            scheduler=(getattr(cfg.single, "scheduler", None) if cfg.single else None),
+            return_effective_sampler=True,
+        )
+        seed_state = _build_i2v_seed_state(
+            cfg=cfg,
+            scheduler=scheduler,
+            geom_hi=geom,
+            latent_condition=latent_condition,
+            num_frames=t_out,
+            latent_frames=t,
+            h_lat=h_lat,
+            w_lat=w_lat,
+            flow_multiplier=flow_multiplier,
+            device=dev,
+            dtype=dt,
+            logger=log,
+        )
+        del latent_condition
+
+        memory_management.manager.load_model(single_mm)
+        progress_adapter = _WanUnifiedBlockProgressAdapter(stage_name="single")
+        try:
+            transformer_options = progress_adapter.transformer_options()
+            progress_adapter.assert_wired(branch="stream_img2vid.single")
+            latents = yield from sample_stage_latents_generator(
+                model=single_model,
+                geom=geom,
+                steps=total_steps,
+                cfg_scale=(getattr(cfg.single, "cfg_scale", None) if cfg.single else cfg.guidance_scale),
+                prompt_embeds=prompt_embeds,
+                negative_embeds=negative_embeds,
+                device=dev,
+                dtype=dt,
+                logger=log,
+                sampler_name=sampler_effective,
+                scheduler_name=(getattr(cfg.single, "scheduler", None) if cfg.single else None),
+                metadata_dir=cfg.metadata_dir,
+                scheduler_obj=scheduler,
+                timestep_start=0,
+                timestep_end=total_steps,
+                seed=None,
+                state_init=seed_state,
+                log_mem_interval=getattr(cfg, "log_mem_interval", None),
+                flow_shift=flow_shift_value,
+                flow_multiplier=flow_multiplier,
+                stage_name="single",
+                emit_logs=False,
+                transformer_options=transformer_options,
+            )
+            progress_adapter.assert_emitted(branch="stream_img2vid.single")
+        finally:
+            progress_adapter.close()
+        del prompt_embeds
+        del negative_embeds
+    finally:
+        single_mm, single_model = _teardown_stage(
+            stage="single",
+            mm=single_mm,
+            model=single_model,
+            offload_level=lvl,
+            logger=log,
+        )
+
+    latents_decode = _extract_i2v_decode_latents(state=latents, latent_channels=latent_channels, logger=log)
+    del latents
+    _stage_transition_barrier(logger=log, label="stream_img2vid:single->decode", offload_level=lvl, force_clear=True)
+    latents_backup = _backup_decode_latents(latents=latents_decode, logger=log, source="stream_img2vid_single")
+    del latents_decode
+    yield _coarse_progress_event(
+        stage="decode",
+        step=0,
+        total=1,
+        percent=95.0,
+        reason="vae_decode_no_block_progress",
+    )
+    frames = decode_latents_to_frames(
+        latents=latents_backup,
+        model_dir=os.path.dirname(single_path),
+        cfg=cfg,
+        logger=log,
+        expected_frames=t_out,
+    )
+    del latents_backup
+    if not frames:
+        raise RuntimeError("WAN22 GGUF: single stage produced no frames")
+    yield {"type": "result", "frames": frames}
+
+
+@_with_sram_attention_runtime_metrics
 def run_img2vid(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) -> list[object]:
     log = get_logger(logger)
     hi_path = pick_stage_gguf(getattr(cfg.high, "model_dir", None) if cfg.high else None, stage="high")
@@ -1813,7 +2716,7 @@ def run_img2vid(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) 
         flow_shift_lo = getattr(cfg.low, "flow_shift", None) if cfg.low else None
         flow_shift_lo_value = _require_flow_shift("low", flow_shift_lo)
 
-        scheduler, total_steps = _build_shared_scheduler(
+        scheduler, total_steps, sampler_configured, sampler_effective = _build_shared_scheduler(
             cfg,
             steps_hi=steps_hi,
             steps_lo=steps_lo,
@@ -1824,7 +2727,14 @@ def run_img2vid(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) 
             flow_shift_hi=flow_shift_hi_value,
             flow_shift_lo=flow_shift_lo_value,
         )
-        log.info("[wan22.gguf] schedule: steps_total=%d steps_high=%d steps_low=%d", total_steps, steps_hi, steps_lo)
+        log.info(
+            "[wan22.gguf] schedule: steps_total=%d steps_high=%d steps_low=%d sampler_configured=%s sampler_effective=%s",
+            total_steps,
+            steps_hi,
+            steps_lo,
+            sampler_configured,
+            sampler_effective,
+        )
 
         seed_hi = _build_i2v_seed_state(
             cfg=cfg,
@@ -1843,30 +2753,38 @@ def run_img2vid(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) 
         del latent_condition
 
         memory_management.manager.load_model(hi_mm)
-        latents_hi = sample_stage_latents(
-            model=hi_model,
-            geom=geom_hi,
-            steps=steps_hi,
-            cfg_scale=(getattr(cfg.high, "cfg_scale", None) if cfg.high else cfg.guidance_scale),
-            prompt_embeds=high_prompt_embeds,
-            negative_embeds=high_negative_embeds,
-            device=dev,
-            dtype=dt,
-            logger=log,
-            sampler_name=sampler_hi,
-            scheduler_name=sched_hi,
-            metadata_dir=cfg.metadata_dir,
-            scheduler_obj=scheduler,
-            timestep_start=0,
-            timestep_end=steps_hi,
-            seed=None,
-            state_init=seed_hi,
-            on_progress=(lambda **p: on_progress(stage="high", **p)) if on_progress else None,
-            log_mem_interval=getattr(cfg, "log_mem_interval", None),
-            flow_shift=flow_shift_hi_value,
-            flow_multiplier=flow_multiplier,
-            stage_name="high",
-        )
+        high_progress_adapter = _WanUnifiedBlockProgressAdapter(stage_name="high")
+        try:
+            high_transformer_options = high_progress_adapter.transformer_options()
+            high_progress_adapter.assert_wired(branch="run_img2vid.high")
+            latents_hi = sample_stage_latents(
+                model=hi_model,
+                geom=geom_hi,
+                steps=steps_hi,
+                cfg_scale=(getattr(cfg.high, "cfg_scale", None) if cfg.high else cfg.guidance_scale),
+                prompt_embeds=high_prompt_embeds,
+                negative_embeds=high_negative_embeds,
+                device=dev,
+                dtype=dt,
+                logger=log,
+                sampler_name=sampler_effective,
+                scheduler_name=sched_hi,
+                metadata_dir=cfg.metadata_dir,
+                scheduler_obj=scheduler,
+                timestep_start=0,
+                timestep_end=steps_hi,
+                seed=None,
+                state_init=seed_hi,
+                on_progress=(lambda **p: on_progress(stage="high", **p)) if on_progress else None,
+                log_mem_interval=getattr(cfg, "log_mem_interval", None),
+                flow_shift=flow_shift_hi_value,
+                flow_multiplier=flow_multiplier,
+                stage_name="high",
+                transformer_options=high_transformer_options,
+            )
+            high_progress_adapter.assert_emitted(branch="run_img2vid.high")
+        finally:
+            high_progress_adapter.close()
         del seed_hi
         del high_prompt_embeds
         del high_negative_embeds
@@ -1910,30 +2828,38 @@ def run_img2vid(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) 
         low_prompt_embeds = low_prompt_embeds.to(device=dev, dtype=dt)
         low_negative_embeds = low_negative_embeds.to(device=dev, dtype=dt)
         memory_management.manager.load_model(lo_mm)
-        latents_lo = sample_stage_latents(
-            model=lo_model,
-            geom=geom_lo,
-            steps=steps_lo,
-            cfg_scale=(getattr(cfg.low, "cfg_scale", None) if cfg.low else cfg.guidance_scale),
-            prompt_embeds=low_prompt_embeds,
-            negative_embeds=low_negative_embeds,
-            device=dev,
-            dtype=dt,
-            logger=log,
-            sampler_name=sampler_lo,
-            scheduler_name=sched_lo,
-            metadata_dir=cfg.metadata_dir,
-            scheduler_obj=scheduler,
-            timestep_start=steps_hi,
-            timestep_end=total_steps,
-            seed=None,
-            state_init=seed_lo,
-            on_progress=(lambda **p: on_progress(stage="low", **p)) if on_progress else None,
-            log_mem_interval=getattr(cfg, "log_mem_interval", None),
-            flow_shift=flow_shift_lo_value,
-            flow_multiplier=flow_multiplier,
-            stage_name="low",
-        )
+        low_progress_adapter = _WanUnifiedBlockProgressAdapter(stage_name="low")
+        try:
+            low_transformer_options = low_progress_adapter.transformer_options()
+            low_progress_adapter.assert_wired(branch="run_img2vid.low")
+            latents_lo = sample_stage_latents(
+                model=lo_model,
+                geom=geom_lo,
+                steps=steps_lo,
+                cfg_scale=(getattr(cfg.low, "cfg_scale", None) if cfg.low else cfg.guidance_scale),
+                prompt_embeds=low_prompt_embeds,
+                negative_embeds=low_negative_embeds,
+                device=dev,
+                dtype=dt,
+                logger=log,
+                sampler_name=sampler_effective,
+                scheduler_name=sched_lo,
+                metadata_dir=cfg.metadata_dir,
+                scheduler_obj=scheduler,
+                timestep_start=steps_hi,
+                timestep_end=total_steps,
+                seed=None,
+                state_init=seed_lo,
+                on_progress=(lambda **p: on_progress(stage="low", **p)) if on_progress else None,
+                log_mem_interval=getattr(cfg, "log_mem_interval", None),
+                flow_shift=flow_shift_lo_value,
+                flow_multiplier=flow_multiplier,
+                stage_name="low",
+                transformer_options=low_transformer_options,
+            )
+            low_progress_adapter.assert_emitted(branch="run_img2vid.low")
+        finally:
+            low_progress_adapter.close()
         del seed_lo
         del low_prompt_embeds
         del low_negative_embeds
@@ -1964,6 +2890,11 @@ def run_img2vid(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) 
         source="run_img2vid",
     )
     del latents_lo_decode
+    if on_progress:
+        try:
+            on_progress(stage="decode", step=0, total=1, percent=0.95)
+        except Exception:
+            pass
     frames = decode_latents_to_frames(
         latents=latents_lo_decode_backup,
         model_dir=os.path.dirname(lo_path),
@@ -1977,7 +2908,7 @@ def run_img2vid(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) 
     return frames
 
 
-@_with_wan_fused_runtime_metrics
+@_with_sram_attention_runtime_metrics
 def stream_img2vid(cfg: RunConfig, *, logger: Any = None):
     log = get_logger(logger)
     if cfg.init_image is None:
@@ -2104,7 +3035,7 @@ def stream_img2vid(cfg: RunConfig, *, logger: Any = None):
         flow_shift_lo = getattr(cfg.low, "flow_shift", None) if cfg.low else None
         flow_shift_lo_value = _require_flow_shift("low", flow_shift_lo)
 
-        scheduler, total_steps = _build_shared_scheduler(
+        scheduler, total_steps, sampler_configured, sampler_effective = _build_shared_scheduler(
             cfg,
             steps_hi=steps_hi,
             steps_lo=steps_lo,
@@ -2115,7 +3046,14 @@ def stream_img2vid(cfg: RunConfig, *, logger: Any = None):
             flow_shift_hi=flow_shift_hi_value,
             flow_shift_lo=flow_shift_lo_value,
         )
-        log.info("[wan22.gguf] schedule: steps_total=%d steps_high=%d steps_low=%d", total_steps, steps_hi, steps_lo)
+        log.info(
+            "[wan22.gguf] schedule: steps_total=%d steps_high=%d steps_low=%d sampler_configured=%s sampler_effective=%s",
+            total_steps,
+            steps_hi,
+            steps_lo,
+            sampler_configured,
+            sampler_effective,
+        )
 
         seed_hi = _build_i2v_seed_state(
             cfg=cfg,
@@ -2134,30 +3072,38 @@ def stream_img2vid(cfg: RunConfig, *, logger: Any = None):
         del latent_condition
 
         memory_management.manager.load_model(hi_mm)
-        latents_hi = yield from sample_stage_latents_generator(
-            model=hi_model,
-            geom=geom_hi,
-            steps=steps_hi,
-            cfg_scale=(getattr(cfg.high, "cfg_scale", None) if cfg.high else cfg.guidance_scale),
-            prompt_embeds=high_prompt_embeds,
-            negative_embeds=high_negative_embeds,
-            device=dev,
-            dtype=dt,
-            logger=log,
-            sampler_name=sampler_hi,
-            scheduler_name=sched_hi,
-            metadata_dir=cfg.metadata_dir,
-            scheduler_obj=scheduler,
-            timestep_start=0,
-            timestep_end=steps_hi,
-            seed=None,
-            state_init=seed_hi,
-            log_mem_interval=getattr(cfg, "log_mem_interval", None),
-            flow_shift=flow_shift_hi_value,
-            flow_multiplier=flow_multiplier,
-            stage_name="high",
-            emit_logs=False,
-        )
+        high_progress_adapter = _WanUnifiedBlockProgressAdapter(stage_name="high")
+        try:
+            high_transformer_options = high_progress_adapter.transformer_options()
+            high_progress_adapter.assert_wired(branch="stream_img2vid.high")
+            latents_hi = yield from sample_stage_latents_generator(
+                model=hi_model,
+                geom=geom_hi,
+                steps=steps_hi,
+                cfg_scale=(getattr(cfg.high, "cfg_scale", None) if cfg.high else cfg.guidance_scale),
+                prompt_embeds=high_prompt_embeds,
+                negative_embeds=high_negative_embeds,
+                device=dev,
+                dtype=dt,
+                logger=log,
+                sampler_name=sampler_effective,
+                scheduler_name=sched_hi,
+                metadata_dir=cfg.metadata_dir,
+                scheduler_obj=scheduler,
+                timestep_start=0,
+                timestep_end=steps_hi,
+                seed=None,
+                state_init=seed_hi,
+                log_mem_interval=getattr(cfg, "log_mem_interval", None),
+                flow_shift=flow_shift_hi_value,
+                flow_multiplier=flow_multiplier,
+                stage_name="high",
+                emit_logs=False,
+                transformer_options=high_transformer_options,
+            )
+            high_progress_adapter.assert_emitted(branch="stream_img2vid.high")
+        finally:
+            high_progress_adapter.close()
         del seed_hi
         del high_prompt_embeds
         del high_negative_embeds
@@ -2201,30 +3147,38 @@ def stream_img2vid(cfg: RunConfig, *, logger: Any = None):
         low_prompt_embeds = low_prompt_embeds.to(device=dev, dtype=dt)
         low_negative_embeds = low_negative_embeds.to(device=dev, dtype=dt)
         memory_management.manager.load_model(lo_mm)
-        latents_lo = yield from sample_stage_latents_generator(
-            model=lo_model,
-            geom=geom_lo,
-            steps=steps_lo,
-            cfg_scale=(getattr(cfg.low, "cfg_scale", None) if cfg.low else cfg.guidance_scale),
-            prompt_embeds=low_prompt_embeds,
-            negative_embeds=low_negative_embeds,
-            device=dev,
-            dtype=dt,
-            logger=log,
-            sampler_name=sampler_lo,
-            scheduler_name=sched_lo,
-            metadata_dir=cfg.metadata_dir,
-            scheduler_obj=scheduler,
-            timestep_start=steps_hi,
-            timestep_end=total_steps,
-            seed=None,
-            state_init=seed_lo,
-            log_mem_interval=getattr(cfg, "log_mem_interval", None),
-            flow_shift=flow_shift_lo_value,
-            flow_multiplier=flow_multiplier,
-            stage_name="low",
-            emit_logs=False,
-        )
+        low_progress_adapter = _WanUnifiedBlockProgressAdapter(stage_name="low")
+        try:
+            low_transformer_options = low_progress_adapter.transformer_options()
+            low_progress_adapter.assert_wired(branch="stream_img2vid.low")
+            latents_lo = yield from sample_stage_latents_generator(
+                model=lo_model,
+                geom=geom_lo,
+                steps=steps_lo,
+                cfg_scale=(getattr(cfg.low, "cfg_scale", None) if cfg.low else cfg.guidance_scale),
+                prompt_embeds=low_prompt_embeds,
+                negative_embeds=low_negative_embeds,
+                device=dev,
+                dtype=dt,
+                logger=log,
+                sampler_name=sampler_effective,
+                scheduler_name=sched_lo,
+                metadata_dir=cfg.metadata_dir,
+                scheduler_obj=scheduler,
+                timestep_start=steps_hi,
+                timestep_end=total_steps,
+                seed=None,
+                state_init=seed_lo,
+                log_mem_interval=getattr(cfg, "log_mem_interval", None),
+                flow_shift=flow_shift_lo_value,
+                flow_multiplier=flow_multiplier,
+                stage_name="low",
+                emit_logs=False,
+                transformer_options=low_transformer_options,
+            )
+            low_progress_adapter.assert_emitted(branch="stream_img2vid.low")
+        finally:
+            low_progress_adapter.close()
         del seed_lo
         del low_prompt_embeds
         del low_negative_embeds
@@ -2255,6 +3209,13 @@ def stream_img2vid(cfg: RunConfig, *, logger: Any = None):
         source="stream_img2vid",
     )
     del latents_lo_decode
+    yield _coarse_progress_event(
+        stage="decode",
+        step=0,
+        total=1,
+        percent=95.0,
+        reason="vae_decode_no_block_progress",
+    )
     frames = decode_latents_to_frames(
         latents=latents_lo_decode_backup,
         model_dir=os.path.dirname(lo_path),
@@ -2268,7 +3229,7 @@ def stream_img2vid(cfg: RunConfig, *, logger: Any = None):
     yield {"type": "result", "frames": frames}
 
 
-@_with_wan_fused_runtime_metrics
+@_with_sram_attention_runtime_metrics
 def stream_img2vid_chunked(
     cfg: RunConfig,
     *,
@@ -2409,7 +3370,13 @@ def stream_img2vid_chunked(
         str(continuity_profile_value),
         bool(reset_anchor_to_base),
     )
-    yield {"type": "progress", "stage": "chunk.prepare", "step": 0, "total": int(len(chunk_starts)), "percent": 0.0}
+    yield _coarse_progress_event(
+        stage="chunk.prepare",
+        step=0,
+        total=int(len(chunk_starts)),
+        percent=0.0,
+        reason="chunk_plan_setup_no_block_progress",
+    )
 
     latent_condition_base = vae_encode_video_condition(
         cfg.init_image,
@@ -2502,7 +3469,15 @@ def stream_img2vid_chunked(
         flow_shift_lo=flow_shift_lo_value,
     )
     total_steps = int(shared_scheduler_spec.total_steps)
-    log.info("[wan22.gguf] schedule: steps_total=%d steps_high=%d steps_low=%d", total_steps, steps_hi, steps_lo)
+    _, _, sampler_configured, sampler_effective = _build_shared_scheduler_from_spec(cfg, spec=shared_scheduler_spec)
+    log.info(
+        "[wan22.gguf] schedule: steps_total=%d steps_high=%d steps_low=%d sampler_configured=%s sampler_effective=%s",
+        total_steps,
+        steps_hi,
+        steps_lo,
+        sampler_configured,
+        sampler_effective,
+    )
 
     def _resolve_hybrid_mode(*, estimated_total_mb: float) -> str:
         if chunk_buffer_mode_value == "hybrid":
@@ -2639,7 +3614,7 @@ def stream_img2vid_chunked(
                     chunk_condition = chunk_condition_buffer
 
             chunk_seed = _resolve_chunk_seed(getattr(cfg, "seed", None), chunk_index=chunk_index, mode=chunk_seed_mode)
-            chunk_scheduler, _ = _build_shared_scheduler_from_spec(cfg, spec=shared_scheduler_spec)
+            chunk_scheduler, _, _, _ = _build_shared_scheduler_from_spec(cfg, spec=shared_scheduler_spec)
 
             chunk_pct_span = float(chunk_sampling_span_pct) / float(len(chunk_starts))
             chunk_pct_start = 5.0 + (chunk_pct_span * float(chunk_index))
@@ -2690,7 +3665,7 @@ def stream_img2vid_chunked(
                     device=dev,
                     dtype=dt,
                     logger=log,
-                    sampler_name=sampler_hi,
+                    sampler_name=sampler_effective,
                     scheduler_name=sched_hi,
                     metadata_dir=cfg.metadata_dir,
                     scheduler_obj=chunk_scheduler,
@@ -2776,7 +3751,7 @@ def stream_img2vid_chunked(
                     device=dev,
                     dtype=dt,
                     logger=log,
-                    sampler_name=sampler_lo,
+                    sampler_name=sampler_effective,
                     scheduler_name=sched_lo,
                     metadata_dir=cfg.metadata_dir,
                     scheduler_obj=chunk_scheduler,
@@ -2989,13 +3964,13 @@ def stream_img2vid_chunked(
                     else:
                         stitched.append(frames_chunk[frame_index])
 
-                yield {
-                    "type": "progress",
-                    "stage": "chunk.phase_decode",
-                    "step": int(chunk_index + 1),
-                    "total": int(len(chunk_starts)),
-                    "percent": 90.0 + (10.0 * (float(chunk_index + 1) / float(len(chunk_starts)))),
-                }
+                yield _coarse_progress_event(
+                    stage="chunk.phase_decode",
+                    step=int(chunk_index + 1),
+                    total=int(len(chunk_starts)),
+                    percent=90.0 + (10.0 * (float(chunk_index + 1) / float(len(chunk_starts)))),
+                    reason="chunk_vae_decode_no_block_progress",
+                )
                 if low_store_mode == "ram":
                     low_decode_ram[chunk_index] = torch.empty((0,), dtype=dt, device="cpu")
                 else:
@@ -3052,7 +4027,7 @@ def _validate_windowed_temporal_contract(
         )
 
 
-@_with_wan_fused_runtime_metrics
+@_with_sram_attention_runtime_metrics
 def stream_img2vid_sliding_window(
     cfg: RunConfig,
     *,
@@ -3096,7 +4071,7 @@ def stream_img2vid_sliding_window(
     )
 
 
-@_with_wan_fused_runtime_metrics
+@_with_sram_attention_runtime_metrics
 def stream_img2vid_svi2(
     cfg: RunConfig,
     *,
@@ -3139,7 +4114,7 @@ def stream_img2vid_svi2(
     )
 
 
-@_with_wan_fused_runtime_metrics
+@_with_sram_attention_runtime_metrics
 def stream_img2vid_svi2_pro(
     cfg: RunConfig,
     *,

@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: WanVAE-style (3D conv) VAE used by Anima (`qwen_image_vae.safetensors`).
-Implements the WAN 2.1 VAE architecture used by ComfyUI for image inference, with strict keymap normalization from `runtime/state_dict/keymap_wan21_vae.py`, explicit Wan21 latent stats exposure, and strict loader diagnostics.
+Implements the WAN 2.1 VAE architecture used by ComfyUI for image inference, with strict keymap normalization from `runtime/state_dict/keymap_wan21_vae.py`, explicit Wan21 latent stats exposure, strict loader diagnostics, and owner-device birth/load semantics for the external VAE asset.
 This implementation is scoped to **images**: inputs are treated as `T=1` (no video caching or temporal chunking).
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -15,10 +15,11 @@ Symbols (top-level; keep in sync; no ghosts):
 - `WanVAE` (class): WAN-style VAE module with `encode`/`decode` supporting 4D tensors (image mode; `T=1`).
 - `detect_wan_vae_variant_from_header` (function): Detect WAN VAE variant (`2.1`/`2.2`) from safetensors header keys.
 - `infer_wan_vae_config_from_safetensors_header` (function): Infer WAN VAE config values from header-only metadata.
-- `load_wan_vae_from_safetensors` (function): Strict loader for WAN VAE weights (fail-loud missing/unexpected keys).
+- `load_wan_vae_from_safetensors` (function): Strict owner-device loader for WAN VAE weights (fail-loud missing/unexpected keys).
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 import os
@@ -34,11 +35,13 @@ from apps.backend.runtime.attention import attention_function_single_head_spatia
 from apps.backend.runtime.checkpoint.io import load_torch_file
 from apps.backend.runtime.checkpoint.safetensors_header import read_safetensors_header
 from apps.backend.runtime.families.wan22.wan_latent_norms import WAN21_LATENTS_MEAN, WAN21_LATENTS_STD
+from apps.backend.runtime.memory import memory_management
+from apps.backend.runtime.memory.config import DeviceRole
 from apps.backend.runtime.models.state_dict import safe_load_state_dict
 from apps.backend.runtime.ops.operations import using_codex_operations
-from apps.backend.runtime.state_dict.keymap_wan21_vae import remap_wan21_vae_state_dict
+from apps.backend.runtime.state_dict.keymap_wan21_vae import resolve_wan21_vae_keyspace
 
-logger = logging.getLogger("backend.runtime.anima.wan_vae")
+logger = get_backend_logger("backend.runtime.anima.wan_vae")
 WAN_VAE_BASE_MARKER_KEY = "decoder.middle.0.residual.0.gamma"
 WAN_VAE_22_MARKER_KEY = "decoder.upsamples.0.upsamples.0.residual.2.weight"
 WanVaeVariant = Literal["2.1", "2.2"]
@@ -484,6 +487,7 @@ def load_wan_vae_from_safetensors(
     vae_path: str,
     *,
     torch_dtype: torch.dtype,
+    device: torch.device | str,
 ) -> WanVAE:
     raw = str(vae_path or "").strip()
     if not raw:
@@ -493,6 +497,8 @@ def load_wan_vae_from_safetensors(
         p = p.resolve()
     except Exception:
         p = p.absolute()
+    if device is None:
+        raise ValueError("Anima VAE loader requires an explicit owner device.")
     if not p.exists() or not p.is_file():
         raise RuntimeError(f"Anima VAE path not found: {p}")
     if p.suffix.lower() not in {".safetensor", ".safetensors"}:
@@ -512,13 +518,20 @@ def load_wan_vae_from_safetensors(
     sd = load_torch_file(str(p), device="cpu")
     if not isinstance(sd, Mapping):
         raise RuntimeError(f"WAN VAE checkpoint loader returned non-mapping state_dict: {type(sd).__name__}")
-    sd = {str(k): v for k, v in sd.items()}
+    non_string_keys = [repr(key) for key in sd.keys() if not isinstance(key, str)]
+    if non_string_keys:
+        raise RuntimeError(
+            "WAN VAE state_dict keys must be strings. "
+            f"non_string_keys_sample={non_string_keys[:10]}"
+        )
     try:
-        _, sd = remap_wan21_vae_state_dict(sd)
+        sd = resolve_wan21_vae_keyspace(sd).view
     except Exception as exc:  # noqa: BLE001 - surfaced as a load-time error with context
-        raise RuntimeError(f"WAN VAE key remap failed: {exc}") from exc
+        raise RuntimeError(f"WAN VAE keyspace resolution failed: {exc}") from exc
 
-    with using_codex_operations(device=None, dtype=torch_dtype, manual_cast_enabled=True):
+    load_device = torch.device(device)
+    to_args = dict(device=load_device, dtype=torch_dtype)
+    with using_codex_operations(**to_args, manual_cast_enabled=True):
         model = WanVAE(
             dim=int(cfg.dim),
             z_dim=int(cfg.latent_channels),
@@ -528,7 +541,7 @@ def load_wan_vae_from_safetensors(
             temperal_downsample=(False, True, True),
             image_channels=int(cfg.image_channels),
             dropout=0.0,
-        )
+        ).to(**to_args)
     missing, unexpected = safe_load_state_dict(model, sd, log_name="anima.wanvae")
     if missing or unexpected:
         raise RuntimeError(
@@ -537,7 +550,6 @@ def load_wan_vae_from_safetensors(
             f"missing_sample={missing[:10]} unexpected_sample={unexpected[:10]}"
         )
     model.eval()
-    model.to(dtype=torch_dtype)
     return model
 
 

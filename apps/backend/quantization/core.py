@@ -19,6 +19,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from dataclasses import dataclass
@@ -29,7 +30,7 @@ import torch
 from .gguf.constants import GGMLQuantizationType as QuantType
 from .gguf.constants import GGML_QUANT_SIZES as BLOCK_SIZES
 
-logger = logging.getLogger(__name__)
+logger = get_backend_logger(__name__)
 
 __all__ = [
     "QuantType",

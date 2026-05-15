@@ -7,81 +7,74 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Textual Inversion picker + insertion modal.
-Fetches embeddings via the backend API, filters by search query, and emits TI tokens (optionally weighted) for prompt insertion.
+Wraps the shared `PromptAssetInsertModal.vue` shell, fetches embeddings via the backend API, and emits TI tokens (optionally weighted)
+for prompt insertion.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `TextualInversionModal` (component): Modal for selecting embeddings and emitting insertion tokens.
-- `filtered` (const): Filtered embedding name list based on the current search query.
+- `loadItems` (function): Loads embedding inventory for the modal list.
 - `insert` (function): Formats and emits an embedding token for insertion into a prompt.
 -->
 
 <template>
-  <Modal v-model="open" title="Textual Inversion">
-    <div class="form-grid">
-      <div>
-        <label class="label-muted">Search</label>
-        <input class="ui-input" v-model="q" placeholder="type to filter..." />
-      </div>
-      <div>
-        <label class="label-muted">Weight</label>
-        <input class="ui-input" type="number" step="0.1" min="0" v-model.number="weight" />
-      </div>
-    </div>
-    <div class="panel-section modal-list-section">
+  <PromptAssetInsertModal
+    :model-value="modelValue"
+    title="Textual Inversion"
+    panel-class="prompt-asset-modal-panel"
+    count-label="Embeddings"
+    :items="names"
+    :loading="loading"
+    :loaded="loaded"
+    :error-message="loadError"
+    @update:modelValue="emit('update:modelValue', $event)"
+    @ensure-loaded="loadItems"
+  >
+    <template #items="{ filteredItems, weight }">
       <ul class="list" role="listbox">
-        <li v-for="name in filtered" :key="name" class="list-item clickable" @click="insert(name)">
+        <li v-for="name in asEmbeddingNames(filteredItems)" :key="name" class="cdx-list-item clickable" @click="insert(name, weight)">
           {{ name }}
         </li>
       </ul>
-    </div>
-    <template #footer>
-      <button class="btn btn-md btn-outline" type="button" @click="open=false">Close</button>
     </template>
-  </Modal>
+  </PromptAssetInsertModal>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import Modal from '../ui/Modal.vue'
+import { ref } from 'vue'
 import { fetchEmbeddings } from '../../api/client'
+import PromptAssetInsertModal from './PromptAssetInsertModal.vue'
 
 const props = defineProps<{ modelValue: boolean }>()
 const emit = defineEmits<{ (e: 'update:modelValue', value: boolean): void; (e:'insert', token: string): void }>()
-const open = computed({ get: () => props.modelValue, set: (v: boolean) => emit('update:modelValue', v) })
 
 const names = ref<string[]>([])
-const q = ref('')
-const weight = ref(1.0)
 const loading = ref(false)
 const loaded = ref(false)
+const loadError = ref('')
 
-const filtered = computed(() => {
-  const query = q.value.toLowerCase().trim()
-  return names.value.filter(n => n.toLowerCase().includes(query))
-})
+async function loadItems(): Promise<void> {
+  if (loaded.value || loading.value) return
+  loading.value = true
+  loadError.value = ''
+  try {
+    const response = await fetchEmbeddings()
+    names.value = Object.keys(response.loaded || {}).sort((left, right) => left.localeCompare(right))
+    loaded.value = true
+  } catch (error) {
+    names.value = []
+    loaded.value = false
+    loadError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    loading.value = false
+  }
+}
 
-watch(
-  open,
-  async (isOpen) => {
-    if (!isOpen) return
-    if (loaded.value || loading.value) return
-    loading.value = true
-    try {
-      const res = await fetchEmbeddings()
-      names.value = Object.keys(res.loaded || {}).sort((a, b) => a.localeCompare(b))
-      loaded.value = true
-    } catch {
-      names.value = []
-      loaded.value = true
-    } finally {
-      loading.value = false
-    }
-  },
-  { immediate: true },
-)
+function insert(name: string, weight: number): void {
+  const token = weight && weight !== 1.0 ? `(${name}:${weight.toFixed(2)})` : name
+  emit('insert', token)
+}
 
-function insert(name: string): void {
-  const t = weight.value && weight.value !== 1.0 ? `(${name}:${weight.value.toFixed(2)})` : name
-  emit('insert', t)
+function asEmbeddingNames(items: readonly unknown[]): string[] {
+  return items.filter((item): item is string => typeof item === 'string')
 }
 </script>

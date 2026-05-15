@@ -6,11 +6,12 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: WAN22-specific quicksettings selectors.
-Renders WAN model-mode selection (t2v/i2v + size), LightX2V toggle with a shared model-browse action, stage model dirs (high/low), text encoder, and VAE selectors.
+Purpose: WAN 2.2 14B quicksettings selectors.
+Renders the exact 14B header surface: the shared `TXT2VID|IMG2VID` input-mode toggle, optional LightX2V toggle, high/low GGUF selectors,
+text encoder, and VAE selectors for the dedicated `wan22_14b` tab family.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `QuickSettingsWan` (component): WAN quicksettings row used by the main quicksettings bar.
+- `QuickSettingsWan` (component): WAN 2.2 14B quicksettings row used by the main quicksettings bar.
 - `dirLabel` (function): Produces compact directory/file labels from absolute paths.
 - `encoderLabel` (function): Produces compact `family/basename` labels for WAN text encoder values.
 -->
@@ -19,12 +20,26 @@ Symbols (top-level; keep in sync; no ghosts):
   <div class="quicksettings-group qs-group-wan-mode">
     <label class="label-muted">Mode</label>
     <div class="qs-row">
-      <select id="qs-wan-mode" class="select-md" :value="mode" @change="$emit('update:mode', ($event.target as HTMLSelectElement).value)">
-        <option value="i2v_14b">I2V 14B</option>
-        <option value="t2v_14b">T2V 14B</option>
-        <option value="i2v_5b">I2V 5B</option>
-        <option value="t2v_5b">T2V 5B</option>
-      </select>
+      <div class="qs-toggle-group" role="group" aria-label="WAN 2.2 14B mode">
+        <button
+          type="button"
+          class="btn qs-toggle-btn"
+          :class="mode === 'txt2vid' ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off'"
+          :aria-pressed="mode === 'txt2vid'"
+          @click="$emit('update:mode', 'txt2vid')"
+        >
+          TXT2VID
+        </button>
+        <button
+          type="button"
+          class="btn qs-toggle-btn"
+          :class="mode === 'img2vid' ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off'"
+          :aria-pressed="mode === 'img2vid'"
+          @click="$emit('update:mode', 'img2vid')"
+        >
+          IMG2VID
+        </button>
+      </div>
     </div>
   </div>
 
@@ -151,7 +166,7 @@ Symbols (top-level; keep in sync; no ghosts):
 
 <script setup lang="ts">
 defineProps<{
-  mode: string
+  mode: 'txt2vid' | 'img2vid'
   lightx2v: boolean
   highModel: string
   highChoices: string[]
@@ -164,7 +179,7 @@ defineProps<{
 }>()
 
 defineEmits<{
-  (e: 'update:mode', value: string): void
+  (e: 'update:mode', value: 'txt2vid' | 'img2vid'): void
   (e: 'update:lightx2v', value: boolean): void
   (e: 'update:highModel', value: string): void
   (e: 'update:lowModel', value: string): void

@@ -14,7 +14,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `log_numerics_enabled` (function): Enables/disables numeric debug logs (NaN/Inf checks + stats) via env toggles.
 - `summarize_tensor` (function): Debug helper summarizing tensor-ish objects (shape/dtype/range sample).
 - `summarize_numerics` (function): Debug helper summarizing tensor numerics (finite counts + min/max/mean/std).
-- `get_logger` (function): Normalizes an optional logger argument into a `logging.Logger`.
+- `get_logger` (function): Resolves an optional `BackendLoggerProxy` to the canonical WAN22 diagnostics logger.
 - `cuda_empty_cache` (function): Best-effort CUDA cache emptying with optional logging.
 - `log_cuda_mem` (function): Logs CUDA memory stats for debugging long video runs.
 - `log_t_mapping` (function): Logs a coarse mapping of scheduler index → normalized timestep for parity debugging.
@@ -22,10 +22,9 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import BackendLoggerProxy, get_backend_logger
 
-import logging
 import math
-from typing import Any
 
 import torch
 
@@ -42,7 +41,7 @@ def log_numerics_enabled() -> bool:
     return env_flag("CODEX_WAN22_DEBUG_NUMERICS", default=False)
 
 
-def warn_fallback(logger: Any, *, component: str, detail: str, reason: str) -> None:
+def warn_fallback(logger: BackendLoggerProxy | None, *, component: str, detail: str, reason: str) -> None:
     log = get_logger(logger)
     mark_fallback_used()
     # Intentionally loud: fallbacks must be visible in logs.
@@ -100,11 +99,11 @@ def summarize_tensor(t: object, *, window: int = 6) -> str:
         return "<unavailable>"
 
 
-def get_logger(logger: Any) -> logging.Logger:
-    return logger or logging.getLogger("backend.runtime.wan22.gguf")
+def get_logger(logger: BackendLoggerProxy | None) -> BackendLoggerProxy:
+    return logger or get_backend_logger("backend.runtime.wan22.gguf")
 
 
-def cuda_empty_cache(logger: Any, *, label: str) -> None:
+def cuda_empty_cache(logger: BackendLoggerProxy | None, *, label: str) -> None:
     if not (getattr(torch, "cuda", None) and torch.cuda.is_available()):
         return
     manager = getattr(memory_management, "manager", None)
@@ -130,7 +129,7 @@ def cuda_empty_cache(logger: Any, *, label: str) -> None:
         return
 
 
-def log_cuda_mem(logger: Any, *, label: str) -> None:
+def log_cuda_mem(logger: BackendLoggerProxy | None, *, label: str) -> None:
     log = get_logger(logger)
     if not (getattr(torch, "cuda", None) and torch.cuda.is_available()):
         return
@@ -149,7 +148,13 @@ def log_cuda_mem(logger: Any, *, label: str) -> None:
         log.debug("[wan22.gguf] failed to read cuda memory stats", exc_info=True)
 
 
-def log_t_mapping(scheduler: Any, timesteps: Any, *, label: str, logger: Any) -> None:
+def log_t_mapping(
+    scheduler: object,
+    timesteps: object,
+    *,
+    label: str,
+    logger: BackendLoggerProxy | None,
+) -> None:
     log = get_logger(logger)
     try:
         n = len(timesteps)

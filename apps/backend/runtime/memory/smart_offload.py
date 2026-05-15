@@ -19,6 +19,8 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_read_memory_snapshot` (function): Best-effort runtime memory snapshot reader used to enrich smart-offload events.
 - `_memory_fields_from_snapshot` (function): Build structured memory fields from a snapshot using the requested prefix.
 - `log_smart_offload_action` (function): Emits canonical smart-offload INFO events via the global event emitter.
+- `_emit_smart_cache_counter_failure` (function): Emit classified smart-cache counter failures with request/task context.
+- `_normalize_smart_cache_bucket_name` (function): Enforce strict smart-cache bucket key contract (non-empty string).
 - `record_smart_cache_hit` (function): Increment Smart Cache hit counter for a named bucket.
 - `record_smart_cache_miss` (function): Increment Smart Cache miss counter for a named bucket.
 - `get_smart_cache_stats` (function): Return hit/miss counters for all Smart Cache buckets.
@@ -28,6 +30,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from enum import Enum
+import logging
 import math
 import threading
 from typing import Dict, Iterator, Mapping
@@ -224,6 +227,48 @@ def log_smart_offload_action(action: SmartOffloadAction, /, **fields: object) ->
 
 
 _SMART_CACHE_COUNTERS: Dict[str, Dict[str, int]] = {}
+_SMART_CACHE_COUNTERS_LOCK = threading.Lock()
+
+
+def _emit_smart_cache_counter_failure(
+    *,
+    category: str,
+    operation: str,
+    bucket: object,
+    error: BaseException,
+    transient: bool,
+) -> None:
+    emit_backend_event(
+        "smart_cache.counter_failure",
+        logger="smart_offload",
+        level=(logging.WARNING if transient else logging.ERROR),
+        category=str(category),
+        operation=str(operation),
+        bucket=(str(bucket) if bucket is not None else None),
+        task_context="smart_cache",
+        request_context=threading.current_thread().name,
+        error_type=type(error).__name__,
+        error=str(error),
+    )
+
+
+def _normalize_smart_cache_bucket_name(name: object, *, operation: str) -> str:
+    if not isinstance(name, str):
+        raise RuntimeError(
+            f"Smart Cache bucket name contract violation in {operation}: "
+            f"expected non-empty str, got {type(name).__name__}."
+        )
+    if not name:
+        raise RuntimeError(
+            f"Smart Cache bucket name contract violation in {operation}: "
+            "expected non-empty str, got empty value."
+        )
+    if name.strip() != name:
+        raise RuntimeError(
+            f"Smart Cache bucket name contract violation in {operation}: "
+            "leading/trailing whitespace is not allowed."
+        )
+    return name
 
 
 def _bucket(name: str) -> Dict[str, int]:
@@ -236,27 +281,80 @@ def _bucket(name: str) -> Dict[str, int]:
 
 def record_smart_cache_hit(name: str) -> None:
     """Increment Smart Cache hit counter for the given bucket name."""
+    operation = "record_hit"
     try:
-        bucket = _bucket(name)
-        bucket["hits"] += 1
-    except Exception:
-        # Metrics must never interfere with runtime behaviour.
-        pass
+        bucket_name = _normalize_smart_cache_bucket_name(name, operation=operation)
+    except RuntimeError as exc:
+        _emit_smart_cache_counter_failure(
+            category="contract",
+            operation=operation,
+            bucket=name,
+            error=exc,
+            transient=False,
+        )
+        raise
+    try:
+        with _SMART_CACHE_COUNTERS_LOCK:
+            bucket = _bucket(bucket_name)
+            bucket["hits"] += 1
+    except Exception as exc:  # noqa: BLE001 - explicit transient classification/logging
+        _emit_smart_cache_counter_failure(
+            category="transient",
+            operation=operation,
+            bucket=bucket_name,
+            error=exc,
+            transient=True,
+        )
+        raise RuntimeError(
+            f"Smart Cache counter update failed during {operation} (bucket={bucket_name!r})."
+        ) from exc
 
 
 def record_smart_cache_miss(name: str) -> None:
     """Increment Smart Cache miss counter for the given bucket name."""
+    operation = "record_miss"
     try:
-        bucket = _bucket(name)
-        bucket["misses"] += 1
-    except Exception:
-        # Metrics must never interfere with runtime behaviour.
-        pass
+        bucket_name = _normalize_smart_cache_bucket_name(name, operation=operation)
+    except RuntimeError as exc:
+        _emit_smart_cache_counter_failure(
+            category="contract",
+            operation=operation,
+            bucket=name,
+            error=exc,
+            transient=False,
+        )
+        raise
+    try:
+        with _SMART_CACHE_COUNTERS_LOCK:
+            bucket = _bucket(bucket_name)
+            bucket["misses"] += 1
+    except Exception as exc:  # noqa: BLE001 - explicit transient classification/logging
+        _emit_smart_cache_counter_failure(
+            category="transient",
+            operation=operation,
+            bucket=bucket_name,
+            error=exc,
+            transient=True,
+        )
+        raise RuntimeError(
+            f"Smart Cache counter update failed during {operation} (bucket={bucket_name!r})."
+        ) from exc
 
 
 def get_smart_cache_stats() -> Dict[str, Dict[str, int]]:
     """Return a shallow copy of Smart Cache hit/miss counters."""
-    return {name: dict(counts) for name, counts in _SMART_CACHE_COUNTERS.items()}
+    try:
+        with _SMART_CACHE_COUNTERS_LOCK:
+            return {name: dict(counts) for name, counts in _SMART_CACHE_COUNTERS.items()}
+    except Exception as exc:  # noqa: BLE001 - explicit transient classification/logging
+        _emit_smart_cache_counter_failure(
+            category="transient",
+            operation="snapshot",
+            bucket=None,
+            error=exc,
+            transient=True,
+        )
+        raise RuntimeError("Smart Cache counter snapshot failed (transient runtime failure).") from exc
 
 
 __all__ = [

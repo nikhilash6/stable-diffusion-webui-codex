@@ -6,14 +6,15 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Video generation settings (frames + FPS).
-Renders sliders for video frame count and FPS and derives an approximate duration label.
+Purpose: Shared video generation settings card (frames + FPS).
+Renders video frame-count and FPS controls plus an approximate duration label while leaving frame-alignment ownership to the calling family/workspace.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `VideoSettingsCard` (component): Video settings card for video generation parameters.
 - `durationLabel` (const): Computed duration label derived from frames/fps.
-- `normalizeFrames` (function): Clamps/snap-normalizes frame count into the `4n+1` domain.
-- `onFramesUpdate` (function): Emits normalized frame values for slider/input updates.
+- `frameHintText` (const): Computed frame-contract hint text shown below the frame control.
+- `coerceFrameInput` (function): Clamps/truncates frame-count input within the configured bounds without applying family-specific alignment rules.
+- `onFramesUpdate` (function): Emits sanitized frame values for slider/input updates.
 -->
 
 <template>
@@ -24,9 +25,9 @@ Symbols (top-level; keep in sync; no ghosts):
         :modelValue="frames"
         :min="minFrames"
         :max="maxFrames"
-        :step="4"
-        :inputStep="1"
-        :nudgeStep="4"
+        :step="frameStep"
+        :inputStep="frameInputStep"
+        :nudgeStep="frameNudgeStep"
         inputClass="cdx-input-w-sm"
         @update:modelValue="onFramesUpdate"
       >
@@ -35,14 +36,14 @@ Symbols (top-level; keep in sync; no ghosts):
             :modelValue="frames"
             :min="minFrames"
             :max="maxFrames"
-            :step="1"
-            :nudgeStep="4"
+            :step="frameInputStep"
+            :nudgeStep="frameNudgeStep"
             :inputClass="'cdx-input-w-sm'"
             @update:modelValue="onFramesUpdate"
           />
         </template>
         <template #below>
-          <span class="caption">4n+1 · min {{ minFrames }} · max {{ maxFrames }}</span>
+          <span class="caption">{{ frameHintText }}</span>
         </template>
       </SliderField>
       <SliderField
@@ -75,12 +76,20 @@ const props = withDefaults(defineProps<{
   embedded?: boolean
   minFrames?: number
   maxFrames?: number
+  frameStep?: number
+  frameInputStep?: number
+  frameNudgeStep?: number
+  frameRuleLabel?: string
   minFps?: number
   maxFps?: number
 }>(), {
   embedded: false,
-  minFrames: 9,
-  maxFrames: 401,
+  minFrames: 1,
+  maxFrames: 1000,
+  frameStep: 1,
+  frameInputStep: 1,
+  frameNudgeStep: 1,
+  frameRuleLabel: '',
   minFps: 8,
   maxFps: 60,
 })
@@ -99,33 +108,26 @@ const durationLabel = computed(() => {
 
 const minFrames = computed(() => props.minFrames)
 const maxFrames = computed(() => props.maxFrames)
+const frameStep = computed(() => Math.max(1, Math.trunc(Number(props.frameStep) || 1)))
+const frameInputStep = computed(() => Math.max(1, Math.trunc(Number(props.frameInputStep) || 1)))
+const frameNudgeStep = computed(() => Math.max(1, Math.trunc(Number(props.frameNudgeStep) || frameStep.value)))
+const frameHintText = computed(() => {
+  const rule = String(props.frameRuleLabel || '').trim()
+  if (!rule) return `min ${minFrames.value} · max ${maxFrames.value}`
+  return `${rule} · min ${minFrames.value} · max ${maxFrames.value}`
+})
 const minFps = computed(() => props.minFps)
 const maxFps = computed(() => props.maxFps)
 
-function normalizeFrames(rawValue: number): number {
+function coerceFrameInput(rawValue: number): number {
   const min = Number(minFrames.value) || 1
   const max = Number(maxFrames.value) || min
   const numeric = Number.isFinite(rawValue) ? Math.trunc(rawValue) : min
-  const clamped = Math.min(max, Math.max(min, numeric))
-
-  if ((clamped - 1) % 4 === 0) return clamped
-
-  const down = clamped - (((clamped - 1) % 4 + 4) % 4)
-  const up = down + 4
-  const downInRange = down >= min
-  const upInRange = up <= max
-  if (downInRange && upInRange) {
-    const downDistance = Math.abs(clamped - down)
-    const upDistance = Math.abs(up - clamped)
-    return downDistance <= upDistance ? down : up
-  }
-  if (downInRange) return down
-  if (upInRange) return up
-  return min
+  return Math.min(max, Math.max(min, numeric))
 }
 
 function onFramesUpdate(value: number): void {
-  emit('update:frames', normalizeFrames(value))
+  emit('update:frames', coerceFrameInput(value))
 }
 </script>
 

@@ -10,6 +10,7 @@ Purpose: Backend CLI argument parsing and runtime memory config bootstrap.
 Builds the argparse schema for runtime flags (devices/dtypes/attention/swap/smart offload) and turns argv/env into a `RuntimeMemoryConfig`.
 Supports separate storage vs compute dtype overrides for core/text encoder/VAE (e.g., `--core-dtype` vs `--core-compute-dtype`) for stability and tuning.
 Also parses diagnostics bootstrap toggles (`--trace-contract`, `--trace-profiler`) for runtime trace/profiler activation.
+LoRA apply-mode bootstrap resolves unset config to `online` while preserving explicit `merge` overrides.
 Also parses strict LoRA loader policy toggles (`--lora-merge-mode`, `--lora-refresh-signature`) for merge/signature behavior.
 Main-device invariant support enforces a single runtime device authority: `--main-device` (launcher-provided) governs
 core/TE/VAE and falls back to CUDA when available (else CPU) when omitted.
@@ -48,6 +49,7 @@ import logging
 import os
 import sys
 from typing import Mapping, MutableMapping, Sequence
+from apps.backend.runtime.logging import get_backend_logger
 
 from .lora_apply_mode import DEFAULT_LORA_APPLY_MODE, ENV_LORA_APPLY_MODE, LoraApplyMode, parse_lora_apply_mode
 from .lora_online_math import (
@@ -82,7 +84,7 @@ from apps.backend.runtime.memory.config import (
     SwapPolicy,
 )
 
-_LOG = logging.getLogger("backend.infra.config.args")
+_LOG = get_backend_logger("backend.infra.config.args")
 TRACE_DEBUG_DEFAULT = 10
 _DEVICE_CHOICES: tuple[str, ...] = ("auto", "cuda", "cpu", "mps", "xpu", "directml")
 _DEVICE_CHOICE_TO_BACKEND: dict[str, DeviceBackend] = {
@@ -215,8 +217,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Global LoRA application mode: "
-            "'merge' rewrites weights (default), "
-            "'online' applies patches on-the-fly during forward. "
+            "'online' applies patches on-the-fly during forward (default), "
+            "'merge' rewrites weights once at apply-time. "
             "Changing this requires restarting the backend process."
         ),
     )

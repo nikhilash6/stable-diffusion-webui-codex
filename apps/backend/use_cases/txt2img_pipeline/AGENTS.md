@@ -1,7 +1,7 @@
 # apps/backend/use_cases/txt2img_pipeline Overview
 <!-- tags: backend, use-case, txt2img, pipeline, refiner -->
 Date: 2025-10-31
-Last Review: 2026-03-02
+Last Review: 2026-03-28
 Status: Active
 
 ## Purpose
@@ -11,7 +11,8 @@ Status: Active
 ## Notes
 - When extending txt2img behaviour (e.g., new stages, telemetry), add dedicated methods or dataclasses here instead of enlarging `txt2img.py`.
 - Stage helpers must log meaningful events and raise explicit errors; no silent fallbacks or global state mutations.
-- Refiner stages are modelled as `RefinerStage` implementations (`GlobalRefinerStage`, `HiresRefinerStage`) under `refiner.py`; runner composes them explicitly after base/hires sampling.
+- `refiner.py` now owns two distinct stage families: SDXL-native refiner stages (`GlobalRefinerStage`, `HiresRefinerStage`) and the generic first-pass `swap_model` stage (`GlobalSwapModelStage`). Runner composes the first-pass swap between base sampling and hires, and hires must consume post-swap outputs rather than pre-swap base results.
+- Stage-local engine reloads must forward the full selector truth for the owning seam. Example: Z-Image `zimage_variant` must travel through first-pass `swap_model` and hires `swap_model` load options, while SDXL refiner seams stay native-only.
 - SDXL refiner config now travels via typed `RefinerConfig` on `CodexProcessingTxt2Img` (global) and `CodexHiresConfig.refiner` (hires-coupled). Missing `model` or invalid `switch_at_step` pointers raise at stage execution instead of silently skipping.
 - 2025-12-05: `_run_hires_pass` evita decodificar VAEs em hires latente para modelos não-inpaint (usa `txt2img_conditioning` em vez de `img2img_conditioning`), e `_compute_conditioning` mantém um cache por-execução de (cond, uncond) indexado por prompts/dimensões para não recalcular CLIP quando prompts e dimensões permanecem idênticos entre estágios; o uso de cache agora respeita `processing.smart_cache` por job (com fallback para a flag global). O runner também preenche `extra_generation_params["Timings (ms)"]` com tempos aproximados de prepare/base/hires/refiner/total da pipeline para análise de performance no backend.
 - 2025-12-12: `_log_conditioning` agora lida com vetores curtos (ex.: Z Image placeholder `vector` de 768) sem produzir `NaN`, e inclui `guidance` quando presente para depurar modelos flow/distilled.
@@ -26,5 +27,9 @@ Status: Active
 - 2026-02-20: `_run_hires_pass(...)` now logs explicit transition checkpoints for the 1st->2nd pass handoff (`[hires] transition base_to_hires` and `[hires] upscale_ready`) with upscaler, target size, sampler/scheduler, latent/image-conditioning shapes, and computed `start_at_step`.
 - 2026-02-20: `_log_conditioning(...)` now emits cond/uncond diagnostics via `emit_backend_event(...)` (`conditioning.cond` / `conditioning.uncond`) with normalized shape tokens (`BxSxC`) so high-field conditioning logs use the same structured multiline formatting as other backend telemetry (no hardcoded family label in event name).
 - 2026-02-23: `runner.py::Txt2ImgPipelineRunner.run(...)` no longer enforces hard CUDA-only guards (`torch.cuda.is_available()` / `model_device.type == "cuda"`); device authority remains canonicalized at API/memory-manager boundaries.
+- 2026-03-28: top-level `swap_model` now uses exact same-latent pointer semantics: base sampling captures `SamplingOutput.boundary_state` at `switch_at_step`, `GlobalSwapModelStage` resumes only from that boundary state, and the seam fails loud when first-pass sampling was bypassed or when the resumed engine is not same-family compatible.
+- 2026-03-28 follow-up: `GlobalSwapModelStage` now proves same-family compatibility from the boundary-state engine id via primary-family authority only (no live `processing.sd_model` fallback), inherits base RNG continuity for exact resume, and rejects explicit top-level `swap_model.seed` overrides because the resumed trajectory comes from the captured boundary state rather than a new stage seed/noise draw.
 - 2026-03-02: `_run_hires_pass(...)` now consumes typed hires-prep outputs (`latents`, optional `image_conditioning`, `continuation_mode`) and supports Flux Kontext hires continuation by injecting `image_latents` into dict conditioning, running sampling with `init_latent=None` and `start_at_step=0` (denoise schedule ignored for this mode with explicit warning log).
 - 2026-03-02: `_run_hires_pass(...)` now disables `execute_sampling` txt2img conditioning fallback specifically for `continuation_mode='image_latents'`, preventing implicit `c_concat` injection when `image_conditioning` is intentionally unset in Kontext-style continuation.
+- 2026-03-09: `_run_hires_pass(...)` records the effective hires sampler/scheduler/steps/denoise/size payload on the processing object for final response metadata; hires sampler/scheduler/size stay request-owned overrides and prompt parsing is LoRA-only.
+- 2026-03-26: `_run_hires_pass(...)` must inherit base/request LoRAs from the prepared `PromptContext` when the hires prompt omits LoRA tags; prompt-local hires tags only override same-path weights and do not clear inherited LoRAs by omission.

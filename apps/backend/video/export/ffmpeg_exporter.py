@@ -15,8 +15,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_which` (function): Resolves ffmpeg executable paths via shared resolver precedence (env override → deterministic runtime path → downloader/PATH).
 - `_output_root` (function): Resolves the repo-local output root (`CODEX_ROOT/output`).
 - `_sanitize_filename_prefix` (function): Sanitizes a user/task-provided filename prefix for safe output paths.
-- `_normalize_video_options` (function): Normalizes legacy `video_*` option keys into exporter option keys.
-- `_format_to_container` (function): Maps a format token to an output container + codec kind.
+- `resolve_video_export_container` (function): Maps a format token to an output container + codec kind.
 - `_audio_codec_for` (function): Chooses an audio codec for a given output container.
 - `VideoExportResult` (dataclass): Export result container (saved flag + path/rel_path/mime + metadata).
 - `export_video` (function): Main entrypoint; writes frames and runs ffmpeg to produce the final video file.
@@ -71,27 +70,7 @@ def _sanitize_filename_prefix(prefix: str) -> str:
     return cleaned
 
 
-def _normalize_video_options(options: Mapping[str, Any] | None) -> dict[str, Any]:
-    raw: dict[str, Any] = dict(options or {})
-    # Accept legacy API keys (video_*); normalize to VideoExportOptions-style keys.
-    aliases = {
-        "video_filename_prefix": "filename_prefix",
-        "video_format": "format",
-        "video_pix_fmt": "pix_fmt",
-        "video_crf": "crf",
-        "video_loop_count": "loop_count",
-        "video_pingpong": "pingpong",
-        "video_save_metadata": "save_metadata",
-        "video_save_output": "save_output",
-        "video_trim_to_audio": "trim_to_audio",
-    }
-    for src, dst in aliases.items():
-        if src in raw and dst not in raw:
-            raw[dst] = raw.get(src)
-    return raw
-
-
-def _format_to_container(fmt: str) -> tuple[str, str]:
+def resolve_video_export_container(fmt: str) -> tuple[str, str]:
     v = (fmt or "").strip().lower()
     if v in {"video/h264-mp4", "h264", "mp4", "video/mp4"}:
         return "mp4", "h264"
@@ -101,8 +80,9 @@ def _format_to_container(fmt: str) -> tuple[str, str]:
         return "webm", "vp9"
     if v in {"video/gif", "image/gif", "gif"}:
         return "gif", "gif"
-    # Default to mp4/h264 for unknown values so the exporter behaves predictably.
-    return "mp4", "h264"
+    raise VideoExportError(
+        f"Unsupported video format '{fmt}'. Supported values: video/h264-mp4, video/h265-mp4, video/webm, video/gif."
+    )
 
 
 def _audio_codec_for(container: str) -> str | None:
@@ -122,6 +102,7 @@ class VideoExportResult:
     reason: str | None = None
     fps: int | None = None
     frame_count: int | None = None
+    has_audio: bool = False
 
 
 def export_video(
@@ -133,7 +114,7 @@ def export_video(
     audio_source_path: str | None = None,
     extra_metadata: Mapping[str, Any] | None = None,
 ) -> VideoExportResult | None:
-    opts = _normalize_video_options(options)
+    opts = dict(options or {})
     try:
         save_output = parse_bool_value(opts.get("save_output"), field="video_options.save_output", default=False)
     except RuntimeError as exc:
@@ -148,7 +129,18 @@ def export_video(
         return VideoExportResult(saved=False, reason="no-frames")
 
     fps_i = int(fps) if int(fps) > 0 else 24
-    ext, codec_kind = _format_to_container(str(opts.get("format") or "video/h264-mp4"))
+    ext, codec_kind = resolve_video_export_container(str(opts.get("format") or "video/h264-mp4"))
+    normalized_audio_source = (
+        str(audio_source_path).strip()
+        if isinstance(audio_source_path, str) and audio_source_path.strip()
+        else None
+    )
+    if normalized_audio_source and ext not in {"mp4", "webm"}:
+        raise VideoExportError(
+            f"Audio mux requires mp4 or webm output; got '{ext}'."
+        )
+    if normalized_audio_source and not os.path.isfile(normalized_audio_source):
+        raise VideoExportError(f"audio_source_path '{normalized_audio_source}' does not exist.")
 
     prefix = _sanitize_filename_prefix(str(opts.get("filename_prefix") or task or "video"))
     date_dir = datetime.now().strftime("%Y-%m-%d")
@@ -201,9 +193,9 @@ def export_video(
     # Base encode command.
     cmd: list[str] = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-framerate", str(fps_i), "-i", str(frames_dir / "frame_%06d.png")]
 
-    include_audio = bool(audio_source_path) and (ext in {"mp4", "webm"})
+    include_audio = bool(normalized_audio_source)
     if include_audio:
-        cmd += ["-i", str(audio_source_path)]
+        cmd += ["-i", normalized_audio_source]
 
     if ext == "gif":
         # High-quality GIF using palettegen/paletteuse.
@@ -312,4 +304,5 @@ def export_video(
         mime=mime,
         fps=fps_i,
         frame_count=len(frames_list),
+        has_audio=include_audio,
     )

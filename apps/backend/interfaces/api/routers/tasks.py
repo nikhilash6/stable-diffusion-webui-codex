@@ -28,7 +28,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
-from apps.backend.interfaces.api.public_errors import public_task_error_message
+from apps.backend.interfaces.api.public_errors import PublicTaskError
 from apps.backend.interfaces.api.task_registry import (
     TaskCancelMode,
     TaskEventType,
@@ -56,6 +56,25 @@ DEFAULT_TASK_CANCEL_MODE = _default_task_cancel_mode()
 def build_router(*, codex_root: Path, backend_state: Any) -> APIRouter:
     router = APIRouter()
 
+    def _snapshot_error_payload(error: PublicTaskError) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "error": error.message,
+            "error_code": error.code.value,
+        }
+        if error.error_id is not None:
+            payload["error_id"] = error.error_id
+        return payload
+
+    def _event_error_payload(error: PublicTaskError) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "type": TaskEventType.ERROR.value,
+            "message": error.message,
+            "code": error.code.value,
+        }
+        if error.error_id is not None:
+            payload["error_id"] = error.error_id
+        return payload
+
     @router.get("/api/output/{rel_path:path}")
     async def get_output_file(rel_path: str) -> FileResponse:
         root = (codex_root / "output").resolve()
@@ -77,11 +96,12 @@ def build_router(*, codex_root: Path, backend_state: Any) -> APIRouter:
         if entry.done.done():
             if entry.error:
                 entry.schedule_cleanup(task_id)
-                return {
+                payload: Dict[str, Any] = {
                     "status": "error",
-                    "error": public_task_error_message(entry.error),
                     "last_event_id": entry.last_event_id(),
                 }
+                payload.update(_snapshot_error_payload(entry.error))
+                return payload
             entry.schedule_cleanup(task_id)
             out = entry.result
             if not isinstance(out, dict):
@@ -150,10 +170,7 @@ def build_router(*, codex_root: Path, backend_state: Any) -> APIRouter:
                     primary_id, end_id = terminal_ids
                     if int(last_id) < int(primary_id):
                         if entry.error:
-                            err_payload = {
-                                "type": TaskEventType.ERROR.value,
-                                "message": public_task_error_message(entry.error),
-                            }
+                            err_payload = _event_error_payload(entry.error)
                             yield _sse(event_id=int(primary_id), json_payload=json.dumps(err_payload))
                         else:
                             if not isinstance(entry.result, dict):
@@ -191,6 +208,7 @@ def build_router(*, codex_root: Path, backend_state: Any) -> APIRouter:
             raise HTTPException(status_code=404, detail="Task not found")
         previous_cancel_requested = bool(entry.cancel_requested)
         previous_cancel_mode = entry.cancel_mode
+        task_has_started = entry.snapshot_running().get("started_at_ms") is not None and not entry.done.done()
 
         stop_generating = None
         if mode is TaskCancelMode.IMMEDIATE:
@@ -202,7 +220,7 @@ def build_router(*, codex_root: Path, backend_state: Any) -> APIRouter:
         if not ok:
             raise HTTPException(status_code=404, detail="Task not found")
 
-        if mode is TaskCancelMode.IMMEDIATE:
+        if mode is TaskCancelMode.IMMEDIATE and task_has_started:
             try:
                 stop_generating()
             except Exception:

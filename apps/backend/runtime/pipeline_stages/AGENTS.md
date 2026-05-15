@@ -1,6 +1,6 @@
 # apps/backend/runtime/pipeline_stages Overview
 Date: 2025-10-30
-Last Review: 2026-03-02
+Last Review: 2026-04-30
 Status: Active
 
 ## Purpose
@@ -8,34 +8,38 @@ Status: Active
 - Centralize stage logic (prompt normalization, sampler planning, init-image prep, video metadata) to keep use cases lightweight and consistent.
 
 ## Key Files
-- `prompt_context.py` — Prompt parsing + prompt-derived controls (clip_skip, width/height overrides).
+- `prompt_context.py` — Prompt parsing + request-owned clip-skip handoff.
 - `sampling_plan.py` — Scheduler normalization, noise settings, plan building, sampler/RNG preparation.
 - `sampling_execute.py` — Sampler execution + live preview callback + latent dump diagnostics.
-- `scripts.py` — Script hooks + extra network (LoRA) activation helpers.
+- `scripts.py` — Script hooks, prompt-local LoRA selection merging, and shared job metadata helpers.
 - `image_io.py` — PIL/tensor conversions + optional hires decode helper.
 - `hires_fix.py` — Hires-fix helpers (denoise→start_at_step mapping + init latents/conditioning prep via global upscalers).
-- `tiling.py` — VAE tiling apply/restore toggles.
 - `image_init.py` — Utilities for encoding img2img/img2vid init images into tensor+latent bundles.
+- `ip_adapter.py` — Thin sampling-stage wrapper for the request-scoped IP-Adapter apply/restore context manager.
 - `masked_img2img.py` — Masked img2img (“inpaint”) helpers: mask normalize/invert/blur + full-res crop plan + latent mask enforcement inputs.
-- `video.py` — Video plan builder, LoRA/sampler configuration, shared interpolation stage helpers, and metadata assembly.
+- `video.py` — Video plan builder, native LoRA/sampler configuration, shared WAN Diffusers stage-LoRA preflight/apply owner, interpolation helpers, metadata assembly, strict `build_ltx2_video_plan(...)`, and execution-only `build_ltx2_two_stage_geometry(...)` for the explicit LTX `two_stage` profile.
 - `__init__.py` — Package marker (intentionally no re-export facade; callers import modules directly).
 
 ## Notes
+- 2026-03-22: `image_init.py` and `masked_img2img.py` now both forward the first PyTorch-compatible resolved processing seed into shared VAE encode helpers, so img2img init-latent posterior sampling is deterministic without inventing a second masked-only encode contract.
+- 2026-03-21: `image_init.py` now owns truthful pixel-space img2img resize semantics (`just_resize`, `crop_and_resize`, `resize_and_fill`) only for unmasked img2img before VAE encode instead of forcing every init image through one direct-resize path; unknown runtime resize-mode overrides fail loud.
+- 2026-03-20: `masked_img2img.py` remains the owner of request-driven masking/inpaint prep; shared stages must not infer “inpaint model” behavior from checkpoint metadata or family guesses, and masked ZImage runs rely only on normalized target geometry (no separate resize-mode contract).
 - Modules in this directory must stay dependency-light and only import from `apps.*` namespaces.
 - Prefer adding new pipeline stages here rather than duplicating logic inside `apps/backend/use_cases/`.
 - Helper functions should raise explicit errors; avoid silent fallbacks or catching broad exceptions.
+- Internal LTX two-stage asset paths (`ltx_two_stage_distilled_lora_path`, `ltx_two_stage_spatial_upsampler_path`) are request/runtime-owner details only; `video.py` must strip them before `VideoPlan.extras` is handed to shared stage helpers.
 - 2025-12-14: `build_video_plan()` reads `steps` + `guidance_scale` directly from the request; LoRA application uses a lazy import to keep the module dependency-light for non-LoRA users.
 - 2025-12-14: Video plan defaults `steps` to 30 when an ad-hoc caller omits it (matching `/api/{txt2vid,img2vid}` defaults) to avoid drifting configs.
-- 2026-01-01: `clip_skip` is now treated as a prompt control applied in `apply_prompt_context(...)` (before conditioning is computed); request-level `clip_skip` is merged into `PromptContext.controls` when no `<clip_skip:…>` tag is present.
+- 2026-01-01: `apply_prompt_context(...)` remains the owner for applying request-owned `clip_skip` before conditioning is computed.
 - 2026-01-01: The live preview callback in `common.py` uses `runtime/live_preview.py` (method enum + decode helper) and records the sampling step in `backend_state` when emitting preview images.
 - 2026-01-01: Preview-factor fitting/logging (least-squares latent→RGB `factors`/`bias`) lives in `runtime/live_preview.py` and can be enabled via `CODEX_DEBUG_PREVIEW_FACTORS=1` (used to derive `Approx cheap` mappings for new latent formats).
-- 2026-01-02: Removed token merging application from `common.py`; `<merge:...>` / `<tm:...>` tags are stripped but have no effect.
+- 2026-01-02: Removed token merging application from `common.py`; there is no prompt-tag runtime seam for token merge in Codex.
 - 2026-01-02: Added standardized file header docstrings to pipeline stage helper modules (doc-only change; part of rollout).
 - 2026-01-03: Split the former `common.py` golema into focused modules and removed the stage re-export facade (`__init__.py` is now intentionally empty).
 - 2026-01-06: `sampling_plan.py` scheduler normalization is strict (no alias/case normalization) and invalid schedulers now raise instead of falling back.
 - 2026-01-08: `sampling_execute.py` passes `width/height` into `build_sampling_context(...)` so flow-match models with dynamic shifting (Flux) can resolve `flow_shift` from scheduler_config (fail-fast when missing).
 - 2026-01-24: Live preview interval/method are applied per task via thread-local overrides (no process-global `os.environ` mutation); env vars remain as fallbacks only.
-- 2026-01-25: `clip_skip=0` is now supported as an explicit “use default” sentinel (merged from request metadata or `<clip_skip:0>` prompt tags) and is passed through `apply_prompt_context(...)` to reset clip skip per job.
+- 2026-01-25: `clip_skip=0` is supported as an explicit “use default” sentinel and is passed through `apply_prompt_context(...)` from request-owned metadata to reset clip skip per job.
 - 2026-01-27: `video.py:export_video(...)` now passes a task label into engine export so outputs land under `output/{txt2vid,img2vid}-videos/<date>/...` (stable dirs; UI serves via `/api/output/{rel_path}`).
 - 2026-02-12: `video.py` now owns shared parsing/execution of `extras.video_interpolation` for all WAN video use-cases (txt2vid/img2vid/vid2vid) to keep Option A mode pipelines aligned.
 - 2026-02-13: `video.py` now computes effective output FPS after interpolation (`resolve_video_output_fps`) and enforces fail-loud export semantics when `save_output=true` but the engine export does not return a saved artifact.
@@ -45,14 +49,34 @@ Status: Active
 - 2026-03-01: `video.py` now exposes `prepare_base_snapshot_video_options(...)` so WAN video use-cases can persist a pre-post-process base video (`*_base` filename prefix) whenever `save_output=true` and upscaling/interpolation is enabled.
 - 2026-02-01: Added `hires_fix.py` to centralize hires pass prep and fix `denoise` semantics (no more inverted `start_at_step` mapping).
 - 2026-02-08: Sampling stages now carry typed ER-SDE options (`SamplingPlan.er_sde`) from plan build to execution; `execute_sampling(...)` forwards options into `CodexSampler.sample(...)` and latent diagnostics include effective ER-SDE metadata when sampler is `er sde`.
+- 2026-04-08: `sampling_execute.py` now also consumes request-owned `_codex_exact_inpaint_sampling_session_factory` after canonical `codex_objects_after_applying_lora` activation and before the shared IP-Adapter stage, so exact SDXL inpaint sessions patch the real live sampling denoiser instead of the pre-LoRA active snapshot.
 - 2026-02-09: `sampling_execute` now gates LoRA apply/reset on `codex_objects_after_applying_lora` capability and fails loud only when LoRA selections are present without engine support, while still resetting stale LoRA state for no-selection runs.
 - 2026-02-25: `sampling_execute.py` now forwards denoiser-adjacent hook callbacks (`pre_denoiser_hook`, `post_denoiser_hook`) into `CodexSampler.sample(...)`; `masked_img2img.py::LatentMaskEnforcer` now exposes Forge-style pre/post denoiser blend hooks (noisy outside-mask preblend + init-latent outside-mask postblend), while retaining post-sample clamp behavior.
-- 2026-02-25: `masked_img2img.py::LatentMaskEnforcer` now materializes masks/latents per runtime batch size (fail-loud on shape mismatch) and uses deterministic seed-derived base noise (no global RNG sampling inside denoiser hooks), fixing masked `per_step_clamp` multi-batch stability and seed reproducibility.
+- 2026-04-06: `masked_img2img.py` is generic-only for masked runtime enforcement. It owns `per_step_blend` and `post_sample_blend` plus shared mask/crop/paste-back prep, while SDXL-specific branches like Fooocus must stay in `img2img.py` + `runtime/families/sd/**` instead of widening this shared stage.
+- 2026-03-25: `masked_img2img.py::LatentMaskEnforcer` now owns both subordinate per-step clamp scalars: `per_step_blend_strength` and `per_step_blend_steps`. Exact pre/post-denoiser blend-total hooks stay reserved for the explicit default contract (`strength=1.0`, `steps=0`); any positive window or sub-unit strength uses `post_step_hook`, and `0` remains the runtime-owned `all accepted outer steps` sentinel.
+- 2026-03-26: `masked_img2img.py` now exposes `resolve_mask_enforcer_hooks(...)` as the single hook-selection owner for classic and FLUX.2 masked paths, and the masked pre-denoiser hook re-noises deterministically per invocation instead of reusing one cached base-noise tensor across all calls.
+- 2026-03-26: `prompt_context.py` now parses positive and negative prompt strings under a lora-only contract, carries request-owned `clip_skip` on `PromptContext.clip_skip`, and removes prompt-derived runtime control seams entirely. `sampling_execute.execute_sampling(...)` still carries the internal-only `img2img_fix_steps` flag used by hires continuations.
+- 2026-03-28: `sampling_execute.py` now exposes `execute_sampling_result(...)` for exact top-level swap-model boundary capture/resume. When a boundary capture is requested, the helper returns the sampler-owned `boundary_state` without running post-sample hooks or latent dumps so the swap seam resumes from the exact captured state.
+- 2026-03-28: exact top-level swap-model resume must not mint fresh initial noise. `sampling_execute.py` now rejects explicit noise overrides / `processing.modified_noise` / in-place noise mutation during exact resume, and `sampling_plan.py::ensure_sampler(...)` is the sampler-only helper for exact-resume lanes that must rebuild the active sampler without replacing `processing.rng`.
+- 2026-03-26: `build_hires_prompt_context(...)` now owns second-pass LoRA inheritance. Hires prompt parsing stays LoRA-only, but cleaned base/request LoRAs from `PromptContext.loras` must carry into hires unless prompt-local hires tags replace the same path with new weights.
 - 2026-02-25: `run_before_sampling_hooks(...)` no longer auto-applies extra-network LoRAs; sampling-path LoRA ownership is now single-source in `sampling_execute.execute_sampling(...)` to prevent duplicate apply in one sampling pass.
 - 2026-02-18: `prompt_context.py` now merges request override `lora_path` entries into `PromptContext.loras` (dedup by path, prompt-tag LoRAs keep precedence/weight) so API-resolved LoRA SHA selections can flow into sampling without exposing SHA tokens in prompt/UI.
 - 2026-02-18: `image_io.py::maybe_decode_for_hr(...)` now gates base decode by hires upscaler id (`latent:*` skips decode; pixel-space upscalers decode), replacing the stale `latent_scale_mode` sentinel that forced redundant decode in latent hires paths.
 - 2026-02-18: `image_io.py::maybe_decode_for_hr(...)` no longer hardcasts decoded tensors to fp32; decode dtype now follows the engine VAE output so runtime compute/storage policy remains authoritative.
 - 2026-02-21: `image_init.py::prepare_init_bundle(...)` now resizes non-masked img2img init images to `processing.width/height` (when provided) before VAE encode, preventing oversized source images from forcing full-resolution encode memory usage when output dims are smaller.
 - 2026-02-21: `masked_img2img.py::prepare_masked_img2img_bundle(...)` now normalizes init-image + mask dimensions to `processing.width/height` before latent encode, so inpaint/full-res paths no longer require pre-matched source dimensions and avoid oversized encode memory spikes.
-- 2026-03-02: `hires_fix.py` now dispatches hires prep by `sd_model.engine_id` (`sd*` via SD backend; `flux1`/`flux1_fill`/`flux1_chroma`/`zimage`/`anima` via flow-style latent prep; `flux1_kontext` via flow-style prep with `image_latents` continuation mode) and returns typed `HiresPreparation { latents, image_conditioning?, continuation_mode }`; unknown engines fail loud (no SD fallback).
+- 2026-03-06: `hires_fix.py` now dispatches hires prep by `sd_model.engine_id` (`sd*` via SD backend; `flux1`/`flux1_fill`/`flux1_chroma`/`zimage`/`anima` via flow-style latent prep; `flux1_kontext` via flow-style prep with `image_latents` continuation mode; `flux2` via the same upscale/crop prep, still returning `image_latents` continuation data for the dedicated FLUX.2 second pass). `HiresPreparation` keeps the typed shared contract (`latents`, optional `image_conditioning`, `continuation_mode`); unknown engines fail loud (no SD fallback).
 - 2026-03-02: `sampling_execute.execute_sampling(...)` now exposes explicit `allow_txt2img_conditioning_fallback` control (default `True`), so callers that intentionally clear `image_conditioning` (Kontext/image-latents continuation) can disable implicit txt2img `c_concat` injection without changing default behavior for legacy callsites.
+- 2026-03-08: `sampling_plan.py::resolve_sampler_scheduler_override(...)` rejects legacy `use same*` sentinel strings (`use same sampler`, `use same scheduler`, `use same`); inheritance is represented only by omission or empty overrides.
+- 2026-04-29: `sampling_plan.py::resolve_sampler_scheduler_override(...)` must not synthesize executable schedulers from sampler registry `default_scheduler` metadata. Hires sampler overrides require an explicit scheduler override; scheduler-only overrides still validate against the base sampler.
+- 2026-03-08: `video.py::configure_sampler(...)` now fails loud for `sampler='uni-pc bh2'` before bridge application, so video scheduler configuration reports unsupported bridge capabilities explicitly.
+- 2026-03-08: `sampling_execute.py` preview/post-step callback contracts now allow `total=None` so native samplers with open-ended progress (for example `dpm adaptive`) can report truthful unknown-total progress without fake callback totals.
+- 2026-03-11: `video.py` now owns the shared pre-export audio handoff contract via `AudioExportAsset`, replaces snapshot `audio_input` with `audio_source_kind` (`none|input|generated`), and records truthful `has_audio` export state in normalized video metadata instead of assuming audio is input-only.
+- 2026-03-16: `video.py::apply_engine_loras(...)` now gates video LoRA handling by semantic capability metadata (`supports_lora`) instead of probing `codex_objects_after_applying_lora` with `hasattr(...)`; unsupported video engines fail loud only when LoRA selections are present, and no-selection LTX2 runs no longer enter the patcher path.
+- 2026-03-16: `video.py` now exposes `resolve_generated_audio_export_policy(...)` for generated-audio video lanes, failing before heavy generation work when `save_output=true` targets a non-audio container and skipping temp-audio materialization when no saved output is requested.
+- 2026-03-31: `video.py::apply_wan_stage_loras(...)` is now the single shared owner for WAN Diffusers stage-LoRA preflight/apply across `txt2vid`, `img2vid`, and `vid2vid`. It picks the truthful transformer owner (`transformer` vs `transformer_2`), runs the cheap SafeTensors header fast path when possible, then materialized structural preflight before any upstream `load_lora_weights(...)` mutation.
+- 2026-03-31: `hires_fix.py` now fails loud when zimage hires targets are not multiples of the exact-family pixel multiple (`latent_scale_factor * patch_size`, currently 16). Do not treat generic flow `%8` validity as sufficient for zimage hires.
+- 2026-03-24: `masked_img2img.py::LatentMaskEnforcer` now owns `per_step_blend_strength`. Exact `1.0` preserves the blend-total `pre_denoiser` + `post_denoiser` + `post_sample` path, while `0.0 <= strength < 1.0` uses partial pull-back only through the true once-per-outer-step `post_step_hook`; never partialize the re-entrant denoiser hooks.
+- 2026-04-05: `image_init.py`, `masked_img2img.py`, and `hires_fix.py` now consume only `processing.mask` / `processing.mask_round` for img2img mask ownership. Do not reintroduce `processing.image_mask` or `processing.round_image_mask` fallback reads in shared stages.
+- 2026-04-05: `SamplingPlan` is now the single post-normalization owner of sampler/scheduler truth for image sampling. After `build_sampling_plan(...)`, shared execution helpers must read `plan.sampler_name` / `plan.scheduler_name` directly instead of falling back to `processing.sampler_name`.
+- 2026-04-06: `masked_img2img.py::_fill_masked_regions(...)` is now exact Forge/A1111 `masking.fill(...)` parity again (`256/64/16x2/4x4/2x2/0` blur schedule). Treat it as blur-smear parity only, not as a context-aware erase/remove algorithm.

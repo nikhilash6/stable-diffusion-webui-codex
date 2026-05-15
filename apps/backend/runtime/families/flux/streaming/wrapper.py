@@ -16,6 +16,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import emit_backend_message, get_backend_logger
 
 import logging
 from typing import Optional, TYPE_CHECKING
@@ -31,7 +32,7 @@ from .controller import CoreController
 if TYPE_CHECKING:
     from apps.backend.runtime.families.flux.model import FluxTransformer2DModel
 
-logger = logging.getLogger("backend.runtime.flux.streaming.wrapper")
+logger = get_backend_logger("backend.runtime.flux.streaming.wrapper")
 
 
 class StreamedFluxCore(nn.Module):
@@ -71,10 +72,11 @@ class StreamedFluxCore(nn.Module):
         self._double_segments = [s for s in execution_plan if s.block_type == BlockType.DOUBLE]
         self._single_segments = [s for s in execution_plan if s.block_type == BlockType.SINGLE]
 
-        logger.info(
-            "StreamedFluxCore initialized: %d double segments, %d single segments",
-            len(self._double_segments),
-            len(self._single_segments),
+        emit_backend_message(
+            "StreamedFluxCore initialized",
+            logger=logger.name,
+            double_segments=len(self._double_segments),
+            single_segments=len(self._single_segments),
         )
 
     @property
@@ -110,12 +112,14 @@ class StreamedFluxCore(nn.Module):
 
         batch, _, height, width = x.shape
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "StreamedFluxCore forward: batch=%d, latent=%dx%d, segments=%d",
-                batch,
-                height,
-                width,
-                len(self._plan),
+            emit_backend_message(
+                "StreamedFluxCore forward",
+                logger=logger.name,
+                level=logging.DEBUG,
+                batch=batch,
+                latent_height=height,
+                latent_width=width,
+                segments=len(self._plan),
             )
 
         # === Pre-block operations (always on GPU, small footprint) ===
@@ -253,10 +257,10 @@ class StreamedFluxCore(nn.Module):
         for segment in self._plan:
             segment.to_device(self._controller.storage_device)
         self._controller.evict_all()
-        logger.info("All segments moved to storage device")
+        emit_backend_message("All segments moved to storage device", logger=logger.name)
 
     def move_all_to_compute(self) -> None:
         """Move all segments to compute device (disable streaming)."""
         for segment in self._plan:
             segment.to_device(self._controller.compute_device)
-        logger.info("All segments moved to compute device (streaming disabled)")
+        emit_backend_message("All segments moved to compute device (streaming disabled)", logger=logger.name)

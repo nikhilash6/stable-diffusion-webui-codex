@@ -6,25 +6,25 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: SUPIR asset resolution helpers (Phase 2).
-Centralizes the “resolve + validate” logic for SUPIR inputs:
-- resolve SDXL base checkpoint by name/sha,
-- reject SDXL Refiner (fail loud),
-- resolve SUPIR variant ckpt from `supir_models` roots.
+Purpose: SUPIR asset resolution helpers for canonical img2img/inpaint ownership.
+Centralizes the validated asset resolution for SUPIR mode:
+- consume the already-selected SDXL checkpoint record,
+- reject unsupported checkpoint layouts (non-checkpoint/core-only/GGUF/refiner/non-SDXL),
+- resolve SUPIR variant weights from `supir_models` roots.
 
-This module does **not** instantiate the SUPIR model yet; it only resolves validated paths so the API/router can enforce
-HTTP-400 semantics for missing/invalid inputs before creating a task.
+This module does not instantiate runtime modules; it only resolves validated file paths so routers and runtime owners can fail loud
+before sampling starts.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `SupirResolvedAssets` (dataclass): Validated file paths required for a SUPIR enhance run.
-- `resolve_supir_assets` (function): Resolve + validate base checkpoint + SUPIR variant ckpt.
+- `SupirResolvedAssets` (dataclass): Validated file paths required for a SUPIR mode run.
+- `resolve_supir_assets` (function): Resolve + validate base checkpoint + SUPIR variant weights from canonical img2img selection.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from apps.backend.runtime.models.types import CheckpointFormat
 
@@ -39,30 +39,40 @@ class SupirResolvedAssets:
     variant_ckpt: Path
 
 
-def resolve_supir_assets(*, base_model: str, variant: SupirVariant, supir_models_roots: Sequence[Path]) -> SupirResolvedAssets:
-    """Resolve and validate required assets for SUPIR enhance."""
+def _checkpoint_format_value(record: Any) -> str | None:
+    raw = getattr(record, "format", None)
+    if isinstance(raw, CheckpointFormat):
+        return raw.value
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip().lower()
+    value = getattr(raw, "value", None)
+    if isinstance(value, str) and value.strip():
+        return value.strip().lower()
+    return None
 
-    from apps.backend.runtime.models import api as model_api
 
-    base_ref = str(base_model or "").strip()
-    if not base_ref:
-        raise SupirBaseModelError("Missing 'supir_base_model'")
+def resolve_supir_assets(*, checkpoint_record: Any, variant: SupirVariant, supir_models_roots: Sequence[Path]) -> SupirResolvedAssets:
+    if checkpoint_record is None:
+        raise SupirBaseModelError("SUPIR mode requires a resolved SDXL checkpoint record")
 
-    record = model_api.find_checkpoint_by_sha(base_ref) or model_api.find_checkpoint(base_ref)
-    if record is None:
-        raise SupirBaseModelError(f"Unknown SUPIR base model: {base_ref!r}")
+    filename = str(getattr(checkpoint_record, "filename", "") or "").strip()
+    if not filename:
+        raise SupirBaseModelError("Selected checkpoint record is missing filename metadata")
+    base_path = Path(filename)
 
-    base_path = Path(record.filename)
-    if record.format is not CheckpointFormat.CHECKPOINT:
+    checkpoint_format = _checkpoint_format_value(checkpoint_record)
+    if checkpoint_format != CheckpointFormat.CHECKPOINT.value:
         raise SupirBaseModelError(
-            "SUPIR base must be a full SDXL checkpoint file (.safetensors/.ckpt); "
-            f"got format={record.format.value!r} for {record.title!r}"
+            "SUPIR mode requires a full SDXL checkpoint file (.safetensors/.ckpt); "
+            f"got format={checkpoint_format!r}"
         )
-    if record.core_only or base_path.suffix.lower() == ".gguf":
-        raise SupirBaseModelError("SUPIR base must be a full SDXL checkpoint (.safetensors/.ckpt), not a core-only GGUF.")
+
+    if bool(getattr(checkpoint_record, "core_only", False)) or base_path.suffix.lower() == ".gguf":
+        raise SupirBaseModelError(
+            "SUPIR mode requires a full SDXL checkpoint (.safetensors/.ckpt), not a core-only or GGUF checkpoint"
+        )
 
     require_sdxl_base_checkpoint(base_path)
-
     weights = resolve_supir_weights(roots=list(supir_models_roots), variant=variant)
     return SupirResolvedAssets(base_checkpoint=base_path, variant_ckpt=weights.ckpt_path)
 

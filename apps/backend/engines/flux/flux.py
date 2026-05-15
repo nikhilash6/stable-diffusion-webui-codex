@@ -16,6 +16,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from typing import Any, Iterable, List, Mapping, Optional
@@ -41,7 +42,7 @@ from apps.backend.runtime.memory.config import DeviceRole
 from apps.backend.runtime.models.loader import DiffusionModelBundle
 from apps.backend.runtime.model_registry.specs import ModelFamily
 
-logger = logging.getLogger("backend.engines.flux")
+logger = get_backend_logger("backend.engines.flux")
 
 _FLUX_FACTORY = CodexFluxFamilyFactory(spec=FLUX_SPEC)
 

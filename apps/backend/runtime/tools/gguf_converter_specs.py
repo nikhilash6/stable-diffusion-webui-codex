@@ -6,20 +6,19 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Typed “profile + policy” specs for the GGUF converter (layouts, planners, and per-model tensor dtype rules).
+Purpose: Typed “profile + policy” specs for the GGUF converter.
+Defines converter profile ids, metadata normalizers, key mappings, and per-model tensor dtype rules for the source/native tooling surface.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `GGUFArch` (enum): High-level GGUF architecture buckets used by conversion profiles.
-- `GGUFKeyLayout` (enum): Target key layout kind (native keys vs. Comfy/Codex runtime keys vs. Llama HF→GGUF mapping).
 - `TensorNameTarget` (enum): Whether a tensor-type rule matches source names, destination names, or both.
-- `ConverterProfileId` (enum): Stable identifiers for converter profiles (model-kind + layout).
+- `ConverterProfileId` (enum): Stable identifiers for converter profiles (one truthful id per supported component family).
 - `QuantizationCondition` (dataclass): Declarative condition for when a rule applies (include/exclude quantization selectors).
 - `TensorTypeRule` (dataclass): Declarative per-tensor dtype rule (regex + target + condition + reason).
 - `CompiledTensorTypeRule` (dataclass): Compiled rule used during planning (compiled regex + target + dtype + reason).
 - `QuantizationPolicySpec` (dataclass): Bundle of built-in dtype rules; compiles them with optional user overrides.
 - `KeyMappingSpec` (dataclass): Typed wrapper around “key mapping builders” (e.g. Llama HF→GGUF mapping).
-- `PlannerSpec` (dataclass): Typed wrapper around planner implementations (Flux/ZImage planners).
-- `ConverterProfileSpec` (dataclass): Full conversion profile (detection + layout + planner + policies).
+- `ConverterProfileSpec` (dataclass): Full conversion profile (detection + key mapping + metadata normalization + policies).
 """
 
 from __future__ import annotations
@@ -45,12 +44,6 @@ class GGUFArch(str, Enum):
     LTX2 = "ltx2"
 
 
-class GGUFKeyLayout(str, Enum):
-    NATIVE_KEYS = "native_keys"
-    LLAMA_GGUF = "llama_gguf"
-    COMFY_CODEX = "comfy_codex"
-
-
 class TensorNameTarget(str, Enum):
     SRC = "src"
     DST = "dst"
@@ -68,18 +61,12 @@ class TensorNameTarget(str, Enum):
 
 
 class ConverterProfileId(str, Enum):
-    FLUX_TRANSFORMER_COMFY = "flux_transformer_comfy"
-    FLUX_TRANSFORMER_NATIVE = "flux_transformer_native"
-    ZIMAGE_TRANSFORMER_COMFY = "zimage_transformer_comfy"
-    ZIMAGE_TRANSFORMER_NATIVE = "zimage_transformer_native"
-    WAN22_TRANSFORMER_COMFY = "wan22_transformer_comfy"
-    WAN22_TRANSFORMER_NATIVE = "wan22_transformer_native"
-    LTX2_TRANSFORMER_COMFY = "ltx2_transformer_comfy"
-    LTX2_TRANSFORMER_NATIVE = "ltx2_transformer_native"
-    GEMMA3_TENC_COMFY = "gemma3_tenc_comfy"
-    GEMMA3_TENC_NATIVE = "gemma3_tenc_native"
+    FLUX_TRANSFORMER = "flux_transformer"
+    ZIMAGE_TRANSFORMER = "zimage_transformer"
+    WAN22_TRANSFORMER = "wan22_transformer"
+    LTX2_TRANSFORMER = "ltx2_transformer"
+    GEMMA3_TENC = "gemma3_tenc"
     LLAMA_HF_TO_GGUF = "llama_hf_to_gguf"
-    GENERIC_NATIVE = "generic_native"
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,21 +182,13 @@ class KeyMappingSpec:
 
 
 @dataclass(frozen=True, slots=True)
-class PlannerSpec:
-    id: str
-    plan: Callable[..., tuple[list[Any], dict[str, str]]]
-    normalize_metadata: Callable[[Mapping[str, Any]], dict[str, Any]]
-
-
-@dataclass(frozen=True, slots=True)
 class ConverterProfileSpec:
     id: ConverterProfileId
     arch: GGUFArch
-    layout: GGUFKeyLayout
     detect: Callable[[Mapping[str, Any]], bool]
     quant_policy: QuantizationPolicySpec
     key_mapping: KeyMappingSpec | None = None
-    planner: PlannerSpec | None = None
+    metadata_normalizer: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None
 
 
 __all__ = [
@@ -217,9 +196,7 @@ __all__ = [
     "ConverterProfileId",
     "ConverterProfileSpec",
     "GGUFArch",
-    "GGUFKeyLayout",
     "KeyMappingSpec",
-    "PlannerSpec",
     "QuantizationCondition",
     "QuantizationPolicySpec",
     "TensorNameTarget",

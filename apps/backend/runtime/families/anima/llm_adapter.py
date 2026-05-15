@@ -24,8 +24,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from apps.backend.runtime.attention import attention_function_pre_shaped
-from apps.backend.runtime.memory.config import AttentionBackend
 from .config import LLMAdapterConfig
 from .nn import RMSNorm
 
@@ -155,13 +153,18 @@ class Attention(nn.Module):
             cos_ctx, sin_ctx = position_embeddings_context
             k = _apply_rotary(k, cos_ctx, sin_ctx, unsqueeze_dim=1)
 
-        out = attention_function_pre_shaped(
+        if attn_mask is not None:
+            attn_mask = attn_mask.to(torch.bool)
+            if attn_mask.ndim == 2:
+                attn_mask = attn_mask.unsqueeze(1).unsqueeze(1)
+
+        out = F.scaled_dot_product_attention(
             q,
             k,
             v,
-            mask=attn_mask,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
             is_causal=False,
-            backend=AttentionBackend.PYTORCH,
         )
         out = out.transpose(1, 2).reshape(b, s_q, self.num_heads * self.head_dim).contiguous()
         return self.o_proj(out)
@@ -331,10 +334,7 @@ class LLMAdapter(nn.Module):
                 return None
             if mask.ndim != 2:
                 raise ValueError(f"attention_mask must be 2D (B,S); got shape={tuple(mask.shape)}")
-            allowed = mask.to(torch.bool)
-            # PyTorch SDPA boolean masks use True to mean “masked out”.
-            sdpa_mask = (~allowed).unsqueeze(1).unsqueeze(1)
-            return sdpa_mask
+            return mask.to(torch.bool).unsqueeze(1).unsqueeze(1)
 
         target_mask = _prep_mask(target_attention_mask)
         source_mask = _prep_mask(source_attention_mask)

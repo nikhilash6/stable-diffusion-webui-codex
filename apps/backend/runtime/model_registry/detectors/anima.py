@@ -88,7 +88,7 @@ class AnimaDetector(ModelDetector):
         depth = count_blocks(bundle.keys, "net.blocks.{}.")
 
         extras = {
-            # ComfyUI reference: ModelSamplingAuraFlow(shift=3.0) => discrete flow with multiplier=1.0.
+            # Fixed Anima flow defaults for the supported image slice.
             "flow_shift": 3.0,
             "flow_multiplier": 1.0,
             # Dual tokenization: Qwen embeddings + T5XXL tokenizer ids/weights forwarded to the adapter (no T5 text encoder).

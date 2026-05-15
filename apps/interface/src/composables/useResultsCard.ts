@@ -11,6 +11,7 @@ Provides clipboard copy helpers, a short-lived notice/toast state, and JSON form
 
 Symbols (top-level; keep in sync; no ghosts):
 - `formatJson` (function): Formats a value as pretty JSON (fallback to string).
+- `copyToClipboard` (function): Copies text via the Clipboard API, with a class-based textarea fallback when the secure API is unavailable.
 - `useResultsCard` (function): Returns notice state and helpers for results UI (toast/clipboard).
 */
 
@@ -32,12 +33,20 @@ async function copyToClipboard(text: string): Promise<void> {
 
   const textarea = document.createElement('textarea')
   textarea.value = text
-  textarea.style.position = 'fixed'
-  textarea.style.opacity = '0'
+  textarea.className = 'cdx-clipboard-fallback'
+  textarea.setAttribute('readonly', '')
+  textarea.setAttribute('aria-hidden', 'true')
+  textarea.tabIndex = -1
+
   document.body.appendChild(textarea)
-  textarea.select()
-  document.execCommand('copy')
-  textarea.remove()
+  try {
+    textarea.focus()
+    textarea.select()
+    textarea.setSelectionRange(0, textarea.value.length)
+    if (!document.execCommand('copy')) throw new Error('Clipboard copy failed.')
+  } finally {
+    textarea.remove()
+  }
 }
 
 export function useResultsCard(options: { noticeDurationMs?: number } = {}) {

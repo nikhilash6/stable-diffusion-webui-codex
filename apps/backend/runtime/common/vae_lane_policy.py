@@ -7,14 +7,14 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Shared VAE layout/lane policy helpers for loader and engine VAE paths.
-Provides prefix-stripping, robust layout detection (`ldm` vs `diffusers`), and strict lane resolution from global policy
+Provides fail-loud VAE key-name validation, robust layout detection (`ldm` vs `diffusers`), and strict lane resolution from global policy
 (`CODEX_VAE_LAYOUT_LANE=auto|ldm_native|diffusers_native`) with family-aware fail-loud checks.
 WAN22 variant families (`WAN22_5B`/`WAN22_14B`/`WAN22_ANIMATE`) are always constrained to native LDM VAE lane.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `LDM_NATIVE_VAE_FAMILIES` (constant): Families that support native LDM VAE lane.
 - `_WAN22_FAMILIES` (constant): WAN22 variant families that are hard-pinned to native LDM VAE lane.
-- `strip_known_vae_prefixes` (function): Returns a lazy key-remapped view with known wrapper prefixes stripped.
+- `validate_vae_key_names` (function): Fails loud when a VAE checkpoint would require wrapper/prefix rewriting before load.
 - `detect_vae_layout` (function): Detects VAE keyspace layout (`ldm` or `diffusers`) with ambiguity checks.
 - `resolve_vae_layout_lane` (function): Resolves effective lane (`ldm_native`/`diffusers_native`) from global policy + family + layout.
 - `uses_ldm_native_lane` (function): True when effective lane is native LDM.
@@ -27,7 +27,7 @@ from typing import Any, Mapping, Optional
 
 from apps.backend.infra.config.vae_layout_lane import VaeLayoutLane, read_vae_layout_lane
 from apps.backend.runtime.model_registry.specs import ModelFamily
-from apps.backend.runtime.state_dict.views import RemapKeysView
+from apps.backend.runtime.state_dict.key_mapping import KeyMappingError
 
 LDM_NATIVE_VAE_FAMILIES = {
     ModelFamily.FLUX,
@@ -47,8 +47,8 @@ _WAN22_FAMILIES = {
 }
 
 
-def strip_known_vae_prefixes(state_dict: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Return a lazy view with known checkpoint wrapper prefixes stripped."""
+def validate_vae_key_names(state_dict: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Fail loud if a VAE checkpoint would require wrapper-prefix rewriting."""
     prefixes = (
         "first_stage_model.",
         "vae.",
@@ -56,23 +56,24 @@ def strip_known_vae_prefixes(state_dict: Mapping[str, Any]) -> Mapping[str, Any]
         "module.",
     )
 
-    mapping: dict[str, str] = {}
     for raw_key in state_dict.keys():
-        key = str(raw_key)
-        new_key = key
+        source_key = str(raw_key)
+        candidate_key = source_key
         changed = True
         while changed:
             changed = False
             for prefix in prefixes:
-                if new_key.startswith(prefix):
-                    new_key = new_key[len(prefix) :]
+                if candidate_key.startswith(prefix):
+                    candidate_key = candidate_key[len(prefix) :]
                     changed = True
                     break
-        mapping[new_key] = key
-
-    if not mapping:
-        return state_dict
-    return RemapKeysView(state_dict, mapping)
+        if candidate_key != source_key:
+            raise KeyMappingError(
+                "VAE key-name mutation is forbidden in this repository. "
+                "Do not strip wrapper prefixes from stored VAE keys; extend the keyspace understanding explicitly instead. "
+                f"source_key={source_key!r} candidate_key={candidate_key!r}"
+            )
+    return state_dict
 
 
 def detect_vae_layout(state_dict: Mapping[str, Any]) -> str:
@@ -176,6 +177,6 @@ __all__ = [
     "LDM_NATIVE_VAE_FAMILIES",
     "detect_vae_layout",
     "resolve_vae_layout_lane",
-    "strip_known_vae_prefixes",
+    "validate_vae_key_names",
     "uses_ldm_native_lane",
 ]

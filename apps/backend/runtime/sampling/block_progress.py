@@ -8,7 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: Block-level progress callback contract for sampling runtimes.
 Defines the canonical transformer-options key used to propagate per-block progress callbacks from the sampling driver into model block loops.
-Also provides a shared Rich-based console progress controller for block callbacks (optional/no-op when Rich is unavailable).
+Also provides a shared Rich-based console progress controller for block callbacks, lazily materializing the first visible task so output starts with truthful block totals (optional/no-op when Rich is unavailable).
 
 Symbols (top-level; keep in sync; no ghosts):
 - `BlockProgressCallback` (type alias): Callable contract receiving `(block_index, total_blocks)` as 1-based progress.
@@ -81,34 +81,47 @@ class RichBlockProgressController:
             return
         try:
             progress = Progress(
-                TextColumn("{task.percentage:>3.0f}% |"),
+                TextColumn("  {task.percentage:>3.0f}% |"),
                 BarColumn(bar_width=32),
                 TextColumn("|"),
                 TimeElapsedColumn(),
-                TextColumn("| {task.completed:.0f}/{task.total:.0f} self_attn [{task.fields[blocks_per_second]}blocks/s]"),
+                TextColumn("| {task.completed:.0f}/{task.total:.0f} {task.fields[label]} [{task.fields[blocks_per_second]}blocks/s]"),
                 transient=True,
                 auto_refresh=True,
                 refresh_per_second=12,
             )
-            task_id = progress.add_task("", total=1, completed=0, blocks_per_second="0.00")
             progress.start()
         except Exception:
             return
         self._progress = progress
-        self._task_id = task_id
+        self._task_id = None
 
     @property
     def is_active(self) -> bool:
-        return self._progress is not None and self._task_id is not None
+        return self._progress is not None
 
-    def update(self, block_index: int, total_blocks: int) -> None:
+    def update(self, block_index: int, total_blocks: int, *, label: str | None = None) -> None:
         normalized_index, normalized_total = validate_block_progress_payload(block_index, total_blocks)
         if not self.is_active:
             return
         assert self._progress is not None
-        assert self._task_id is not None
 
         now = time.perf_counter()
+        normalized_label = str(label).strip() if isinstance(label, str) and label.strip() else "layer"
+        if self._task_id is None:
+            self._task_id = self._progress.add_task(
+                "",
+                total=normalized_total,
+                completed=normalized_index,
+                blocks_per_second="0.00",
+                label=normalized_label,
+            )
+            self._cycle_started_at = now
+            self._cycle_last_index = normalized_index
+            self._cycle_total = normalized_total
+            return
+
+        assert self._task_id is not None
         if (
             self._cycle_started_at is None
             or normalized_total != self._cycle_total
@@ -126,6 +139,7 @@ class RichBlockProgressController:
             total=normalized_total,
             completed=normalized_index,
             blocks_per_second=f"{blocks_per_second:.2f}",
+            label=normalized_label,
         )
 
     def close(self) -> None:

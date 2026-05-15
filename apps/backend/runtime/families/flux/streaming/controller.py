@@ -19,6 +19,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from typing import Optional
@@ -34,7 +35,7 @@ from apps.backend.runtime.streaming.controller import (
 
 from .specs import Segment
 
-logger = logging.getLogger("backend.runtime.flux.streaming.controller")
+logger = get_backend_logger("backend.runtime.flux.streaming.controller")
 
 
 class CoreController(_StreamingController[Segment]):

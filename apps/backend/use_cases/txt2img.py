@@ -9,7 +9,7 @@ Required Notice: see NOTICE
 Purpose: Txt2img entry point using the staged pipeline runner.
 Delegates latent generation to `Txt2ImgPipelineRunner` and provides a canonical event-emitting wrapper used by engines/orchestrator.
 The wrapper executes sampling + decode + post-cleanup inside the same worker-thread envelope so model residency/offload policies remain single-owner per job.
-Worker-thread smart runtime overrides are propagated through `_image_streaming._run_inference_worker(...)` and cleanup hooks always run in a `finally` block.
+Worker-thread smart runtime overrides are propagated through `_image_streaming._run_inference_worker(...)`, cleanup hooks always run in a `finally` block, and the wrapper seeds a per-run progress-owner token before worker-side VAE/sampling progress begins.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_logger` (constant): Module logger for the txt2img use case.
@@ -19,6 +19,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from typing import Any, Iterator, Sequence
@@ -30,7 +31,7 @@ from apps.backend.runtime.diagnostics.timeline import timeline
 from .txt2img_pipeline.runner import Txt2ImgPipelineRunner
 
 
-_logger = logging.getLogger("backend.use_cases.txt2img")
+_logger = get_backend_logger("backend.use_cases.txt2img")
 _RUNNER = Txt2ImgPipelineRunner()
 
 
@@ -82,7 +83,7 @@ def run_txt2img(*, engine, request) -> Iterator["InferenceEvent"]:
 
     import json
 
-    from apps.backend.core.requests import InferenceEvent, ProgressEvent, ResultEvent, Txt2ImgRequest
+    from apps.backend.core.requests import InferenceEvent, ResultEvent, Txt2ImgRequest
     from apps.backend.engines.util.adapters import build_txt2img_processing
     from apps.backend.runtime.text_processing import (
         clear_last_extra_generation_params,
@@ -92,9 +93,12 @@ def run_txt2img(*, engine, request) -> Iterator["InferenceEvent"]:
     from ._image_streaming import (
         _build_common_info,
         _decode_generation_output,
-        _iter_sampling_progress,
+        _ImageProgressProfile,
+        _iter_image_progress_events,
         _resolve_seed_plan,
+        _resolve_progress_owner_token,
         _run_inference_worker,
+        _seed_progress_owner_token,
     )
 
     if not isinstance(request, Txt2ImgRequest):
@@ -104,6 +108,24 @@ def run_txt2img(*, engine, request) -> Iterator["InferenceEvent"]:
 
     proc = build_txt2img_processing(request)
     proc.sd_model = engine
+    import threading
+
+    task_context = str(threading.current_thread().name or "").strip() or "unknown-thread"
+    setattr(proc, "_codex_pipeline_mode", "txt2img")
+    task_id: str | None = None
+    marker = "-task-"
+    if marker in task_context:
+        candidate = task_context.split(marker, 1)[1].strip()
+        if candidate:
+            task_id = candidate
+    if task_id is not None:
+        setattr(proc, "_codex_task_id", task_id)
+        setattr(proc, "_codex_correlation_id", task_id)
+        setattr(proc, "_codex_hires_correlation_id", task_id)
+        setattr(proc, "_codex_correlation_source", "task_id")
+    progress_owner_token = _resolve_progress_owner_token(task_context=task_context, task_id=task_id)
+    setattr(proc, "_codex_progress_owner_token", progress_owner_token)
+    _seed_progress_owner_token(progress_owner_token=progress_owner_token)
 
     base_seed, seeds, subseeds, subseed_strength = _resolve_seed_plan(
         seed=getattr(request, "seed", None),
@@ -174,11 +196,14 @@ def run_txt2img(*, engine, request) -> Iterator["InferenceEvent"]:
             }
 
             mode_info: dict[str, object] = {}
-            if bool(getattr(proc, "enable_hr", False)):
+            if bool(getattr(getattr(proc, "hires", None), "enabled", False)):
                 try:
                     mode_info["hires"] = getattr(proc, "hires", None).as_dict()
                 except Exception:  # noqa: BLE001
                     pass
+                effective_hires_sampling = getattr(proc, "_codex_effective_hires_sampling", None)
+                if isinstance(effective_hires_sampling, dict) and effective_hires_sampling:
+                    mode_info["effective_hires_sampling"] = dict(effective_hires_sampling)
 
             info = _build_common_info(
                 engine_id=engine.engine_id,
@@ -206,107 +231,17 @@ def run_txt2img(*, engine, request) -> Iterator["InferenceEvent"]:
         runtime_overrides=smart_flags,
     )
 
-    sampling_weight = 90.0
-    decode_weight = 10.0
-    sampling_block_total_hint = 0
-    for (
-        phase,
-        phase_step,
-        phase_total,
-        phase_block_index,
-        phase_block_total,
-        phase_eta,
-        sampling_step,
-        sampling_total,
-        sampling_block_index,
-        sampling_block_total,
-    ) in _iter_sampling_progress(done=done, outcome=outcome):
-        if phase == "encode":
-            continue
-
-        if phase == "sampling":
-            if sampling_block_total > 0:
-                sampling_block_total_hint = int(sampling_block_total)
-            effective_sampling_block_total = (
-                int(sampling_block_total)
-                if sampling_block_total > 0
-                else int(sampling_block_total_hint)
-            )
-            has_block_progress = 0 < sampling_block_index < sampling_block_total
-            completed_units = float(sampling_step)
-            if has_block_progress:
-                completed_units += float(sampling_block_index) / float(sampling_block_total)
-            sampling_ratio = (
-                min(float(sampling_total), completed_units) / float(sampling_total)
-                if sampling_total > 0
-                else 0.0
-            )
-            progress_percent = sampling_ratio * 100.0
-            pct = max(5.0, min(99.0, progress_percent))
-            total_percent = max(0.0, min(99.0, sampling_weight * sampling_ratio))
-            phase_step_blocks = int(phase_step)
-            phase_total_blocks = int(phase_total)
-            if effective_sampling_block_total > 0 and sampling_total > 0:
-                completed_sampling_steps = max(0, min(int(sampling_step), int(sampling_total)))
-                intra_step_blocks = max(0, min(int(sampling_block_index), int(effective_sampling_block_total)))
-                phase_total_blocks = int(sampling_total) * int(effective_sampling_block_total)
-                phase_step_blocks = min(
-                    int(phase_total_blocks),
-                    (int(completed_sampling_steps) * int(effective_sampling_block_total)) + int(intra_step_blocks),
-                )
-            if has_block_progress:
-                message = (
-                    f"Sampling step {min(sampling_step + 1, sampling_total)}/{sampling_total} "
-                    f"(block {sampling_block_index}/{sampling_block_total})"
-                )
-            else:
-                message = f"Sampling step {sampling_step}/{sampling_total}"
-            yield ProgressEvent(
-                stage="sampling",
-                percent=pct,
-                step=sampling_step,
-                total_steps=sampling_total,
-                eta_seconds=phase_eta,
-                message=message,
-                data={
-                    "block_index": int(sampling_block_index),
-                    "block_total": int(sampling_block_total),
-                    "total_phase": "sampling",
-                    "total_percent": float(total_percent),
-                    "phase_step": int(phase_step_blocks),
-                    "phase_total_steps": int(phase_total_blocks),
-                    "phase_eta_seconds": (float(phase_eta) if phase_eta is not None else None),
-                },
-            )
-            continue
-
-        if phase == "decode":
-            decode_ratio = (
-                min(float(phase_step), float(phase_total)) / float(phase_total)
-                if phase_total > 0
-                else 0.0
-            )
-            total_percent = min(100.0, sampling_weight + (decode_weight * decode_ratio))
-            sampling_terminal_step = int(sampling_total) if sampling_total > 0 else None
-            yield ProgressEvent(
-                stage="decoding",
-                percent=100.0 if sampling_terminal_step is not None else None,
-                step=sampling_terminal_step,
-                total_steps=sampling_terminal_step,
-                eta_seconds=phase_eta,
-                message=f"VAE decode block {phase_step}/{phase_total}",
-                data={
-                    "block_index": int(phase_block_index),
-                    "block_total": int(phase_block_total),
-                    "total_phase": "decode",
-                    "total_percent": float(total_percent),
-                    "phase_step": int(phase_step),
-                    "phase_total_steps": int(phase_total),
-                    "phase_eta_seconds": (float(phase_eta) if phase_eta is not None else None),
-                    "sampling_step": int(sampling_step),
-                    "sampling_total_steps": int(sampling_total),
-                },
-            )
+    yield from _iter_image_progress_events(
+        done=done,
+        outcome=outcome,
+        progress_owner_token=progress_owner_token,
+        profile=_ImageProgressProfile(
+            encode_weight=0.0,
+            sampling_weight=90.0,
+            decode_weight=10.0,
+            emit_encode_phase=False,
+        ),
+    )
 
     if outcome.error is not None:
         raise outcome.error

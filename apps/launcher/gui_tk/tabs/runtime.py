@@ -9,8 +9,9 @@ Required Notice: see NOTICE
 Purpose: Runtime settings tab for the Tk launcher.
 Edits bootstrap-critical main-device defaults and global runtime/task knobs that must exist before the API starts (main/mount/offload devices, GGUF/LoRA, task single-flight,
 task cancel default mode, task SSE buffer caps, upscaler safeweights). Offload device defaults to CPU on missing/invalid values to preserve explicit de-residency semantics.
+LoRA apply mode resolves missing launcher values to `online` while preserving explicit `merge` selections.
 Allocator defaults are managed through `PYTORCH_CUDA_ALLOC_CONF` and `CODEX_ENABLE_DEFAULT_PYTORCH_CUDA_ALLOC_CONF`.
-Engine advanced settings also expose the API-only manual env overlay enable toggle (content edited in `Manual Env Vars` tab).
+API-only manual env overlay ownership lives in `Manual Env Vars`, not in runtime selectors.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `RuntimeTab` (class): Runtime settings tab (device defaults + attention mode + LoRA + `PYTORCH_CUDA_ALLOC_CONF`/cuda-malloc toggles).
@@ -94,8 +95,6 @@ class RuntimeTab:
         self._var_pytorch_alloc_conf = tk.StringVar()
         self._var_default_alloc_conf_enabled = tk.BooleanVar()
         self._var_cuda_malloc = tk.BooleanVar()
-        self._var_manual_api_env_enabled = tk.BooleanVar()
-
         self._var_single_flight = tk.BooleanVar()
         self._var_safeweights = tk.BooleanVar()
         self._var_task_cancel_default_mode = tk.StringVar()
@@ -105,20 +104,19 @@ class RuntimeTab:
 
         self._lora_math_combo: ttk.Combobox | None = None
         self._gguf_dequant_cache_combo: ttk.Combobox | None = None
-        self._form_renderers: list[FormRenderer] = []
+        self._form_renderer: FormRenderer | None = None
 
     def build(self, notebook: ttk.Notebook) -> ttk.Frame:
         frame = ttk.Frame(notebook)
         scroll = ScrollableFrame(frame, canvas_bg=self._canvas_bg)
         scroll.pack(fill="both", expand=True, padx=8, pady=8)
         body = scroll.inner
-        body.columnconfigure(0, weight=0)
-        body.columnconfigure(1, weight=1)
+        body.columnconfigure(0, weight=1)
 
         renderer = FormRenderer(body)
         sections = self._sections_for_view()
         renderer.render_sections(0, sections)
-        self._form_renderers = [renderer]
+        self._form_renderer = renderer
 
         gguf_combo = renderer.widget_for("gguf_dequant_cache")
         lora_combo = renderer.widget_for("lora_online_math")
@@ -216,8 +214,8 @@ class RuntimeTab:
                             help_mode=HelpMode.DIALOG,
                             help_title="LoRA apply mode",
                             help_text=(
-                                "merge: rewrites weights once at apply-time (default).\n"
-                                "online: applies LoRA patches on-the-fly during forward."
+                                "online: applies LoRA patches on-the-fly during forward (default).\n"
+                                "merge: rewrites weights once at apply-time."
                             ),
                         ),
                         FormFieldDescriptor(
@@ -309,21 +307,6 @@ class RuntimeTab:
                             help_text=(
                                 f"Env var: {CODEX_CUDA_MALLOC_KEY}\n"
                                 "When enabled, launcher forwards backend flag '--cuda-malloc'."
-                            ),
-                        ),
-                        FormFieldDescriptor(
-                            field_id="manual_env_toggle",
-                            kind=FieldKind.CHECK,
-                            label="Enable Manual Env Vars overlay for API start (requires API restart):",
-                            variable=self._var_manual_api_env_enabled,
-                            on_change=self._on_manual_api_env_toggle_changed,
-                            advanced=True,
-                            help_mode=HelpMode.DIALOG,
-                            help_title="Manual Env Vars overlay",
-                            help_text=(
-                                "When enabled, launcher overlays key/value pairs from the 'Manual Env Vars' tab "
-                                "onto API process environment at start/restart.\n"
-                                "Scope is API-only; UI service env is unchanged."
                             ),
                         ),
                     ],
@@ -462,7 +445,7 @@ class RuntimeTab:
         attention_mode = backend_policy_to_attention_mode(attn_backend, attn_sdpa_policy)
         self._var_attention_mode.set(_ATTENTION_MODE_TO_LABEL.get(attention_mode, "SDPA - Auto"))
 
-        self._var_lora_apply_mode.set(_get("CODEX_LORA_APPLY_MODE", "merge"))
+        self._var_lora_apply_mode.set(_get("CODEX_LORA_APPLY_MODE", "online"))
         self._var_gguf_dequant_cache.set(_get("CODEX_GGUF_DEQUANT_CACHE", "off"))
         self._var_wan_chunk_buffer_mode.set(_get("CODEX_WAN22_IMG2VID_CHUNK_BUFFER_MODE", "hybrid"))
         self._var_lora_online_math.set(_get("CODEX_LORA_ONLINE_MATH", "weight_merge"))
@@ -487,8 +470,6 @@ class RuntimeTab:
             messagebox.showerror("Invalid runtime setting", str(exc))
             runtime_settings_sanitized = True
         self._var_cuda_malloc.set(bool(cuda_malloc_enabled))
-        self._var_manual_api_env_enabled.set(bool(getattr(self._controller.store.meta, "manual_api_env_enabled", False)))
-
         alloc = str(env.get("PYTORCH_CUDA_ALLOC_CONF", "") or "").strip()
         if not alloc and default_alloc_enabled:
             alloc = DEFAULT_PYTORCH_CUDA_ALLOC_CONF
@@ -521,8 +502,8 @@ class RuntimeTab:
         self._apply_advanced_visibility()
 
     def _apply_advanced_visibility(self) -> None:
-        for renderer in self._form_renderers:
-            renderer.set_advanced_visible(self._advanced_visible)
+        if self._form_renderer is not None:
+            self._form_renderer.set_advanced_visible(self._advanced_visible)
 
     def _commit_int_setting(
         self,
@@ -710,10 +691,6 @@ class RuntimeTab:
         ).set(self._controller.store.env, bool(self._var_cuda_malloc.get()))
         self._mark_changed()
 
-    def _on_manual_api_env_toggle_changed(self) -> None:
-        self._controller.store.meta.manual_api_env_enabled = bool(self._var_manual_api_env_enabled.get())
-        self._mark_changed()
-
     def _sync_task_deps(self, *, mark_changed: bool) -> None:
         env = self._controller.store.env
 
@@ -752,7 +729,7 @@ class RuntimeTab:
         env["CODEX_GGUF_DEQUANT_CACHE"] = str(self._var_gguf_dequant_cache.get() or "").strip().lower() or "off"
         env.pop("CODEX_GGUF_DEQUANT_CACHE_RATIO", None)
         env.pop("CODEX_GGUF_DEQUANT_CACHE_LIMIT_MB", None)
-        env["CODEX_LORA_APPLY_MODE"] = str(self._var_lora_apply_mode.get() or "").strip().lower() or "merge"
+        env["CODEX_LORA_APPLY_MODE"] = str(self._var_lora_apply_mode.get() or "").strip().lower() or "online"
         env["CODEX_LORA_ONLINE_MATH"] = str(self._var_lora_online_math.get() or "").strip().lower() or "weight_merge"
         env["CODEX_WAN22_IMG2VID_CHUNK_BUFFER_MODE"] = (
             str(self._var_wan_chunk_buffer_mode.get() or "").strip().lower() or "hybrid"
@@ -764,7 +741,7 @@ class RuntimeTab:
             env["CODEX_GGUF_DEQUANT_CACHE"] = "off"
             env.pop("CODEX_GGUF_DEQUANT_CACHE_RATIO", None)
             env.pop("CODEX_GGUF_DEQUANT_CACHE_LIMIT_MB", None)
-            env["CODEX_LORA_APPLY_MODE"] = "merge"
+            env["CODEX_LORA_APPLY_MODE"] = "online"
             env["CODEX_LORA_ONLINE_MATH"] = "weight_merge"
             env["CODEX_WAN22_IMG2VID_CHUNK_BUFFER_MODE"] = "hybrid"
             gguf_cache, lora_apply, lora_math, chunk_buffer_mode = normalize_gguf_lora_env(env)

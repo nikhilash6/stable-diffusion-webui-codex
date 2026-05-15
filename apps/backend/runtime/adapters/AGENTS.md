@@ -1,6 +1,6 @@
 # apps/backend/runtime/adapters Overview
 Date: 2025-10-28
-Last Review: 2026-01-20
+Last Review: 2026-04-30
 Status: Active
 
 ## Purpose
@@ -10,6 +10,7 @@ Status: Active
 - `base.py` — Common adapter interfaces.
 
 ## Subdirectories
+- `ip_adapter/` — Canonical IP-Adapter runtime seam for validated assets, reference-image conditioning, slot layout, and request-scoped patch apply/restore.
 - `lora/` — Full LoRA pipeline implementation (loader, mapping, ops, type definitions).
 
 ## Notes

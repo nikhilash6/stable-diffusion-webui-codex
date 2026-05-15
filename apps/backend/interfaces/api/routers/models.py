@@ -7,19 +7,20 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Model and asset inventory API routes.
-Exposes checkpoints, inventories (sync + async refresh task start), path scan/add helpers (with file size metadata), samplers/schedulers, embeddings,
-and engine capabilities.
-Capability surfaces include semantic-engine asset contracts (owner-resolved from canonical engine ids) plus backend-owned dependency checks
-so the UI can enforce sha-only external asset selection and readiness gating deterministically. Also provides prompt token-counting
-(`/api/models/prompt-token-count`) using vendored offline tokenizers, including WAN22 animate engine ids and Anima runtime-equivalent prompt preprocessing/max-length checks.
+Exposes checkpoints, inventories (sync + async refresh task start), path scan/add helpers (with file size metadata), executable sampler/scheduler
+surfaces, embeddings, and engine capabilities.
+Inventory payloads include first-class IP-Adapter model and image-encoder lists from the dedicated roots in `apps/paths.json`.
+Capability surfaces include semantic-engine asset contracts (owner-resolved from canonical engine ids), backend-owned exact-engine inpaint-mode maps,
+and backend-owned dependency checks so the UI can enforce sha-only external asset selection and readiness gating deterministically. Also provides prompt token-counting
+(`/api/models/prompt-token-count`) using vendored offline tokenizers for supported prompt-token engine ids, including FLUX.2 Klein 4B, LTX2, exact WAN ids, and
+Anima runtime-equivalent Qwen+T5 prompt tokenization/max-length checks with the same family-owned offline tokenizer rules used by the runtime. Raw `/api/samplers`
+inventory keeps unsupported rows visible with non-executable metadata (`supported=false`, `default_scheduler=null`, `allowed_schedulers=[]`),
+while supported rows must resolve complete executable registry metadata.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `build_router` (function): Build the APIRouter for model/inventory endpoints.
-- `_resolve_anima_qwen_max_length` (function): Parses and validates `CODEX_ANIMA_QWEN_MAX_LENGTH` (>0).
-- `_resolve_anima_t5_max_length` (function): Parses and validates `CODEX_ANIMA_T5_MAX_LENGTH` (>0).
-- `_clean_anima_prompt_text` (function): Applies Anima runtime-equivalent prompt cleanup (`BREAK` -> whitespace).
 - `_count_anima_tokens` (function): Counts Anima prompt tokens with runtime-equivalent preprocessing and fail-loud max-length checks.
-- `_count_prompt_tokens` (function): Returns tokenizer-accurate prompt token counts for supported semantic engines.
+- `_count_prompt_tokens` (function): Returns tokenizer-accurate prompt token counts for supported prompt-token engine ids.
 - `_sanitize_model_path_input` (function): Sanitizes incoming model path strings (quotes/slashes/whitespace normalization).
 - `_normalize_library_kind` (function): Validates `checkpoint|vae|text_encoder` path-library kinds.
 - `_kind_for_library_key` (function): Resolves library kind from a paths.json key suffix (`_ckpt|_vae|_tenc`).
@@ -30,12 +31,10 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_save_paths_config` (function): Persists paths config updates (fail-loud).
 - `_resolve_paths_config_entry_path` (function): Resolves one paths config entry to an absolute filesystem path.
 - `_paths_config_entry_for_file` (function): Converts absolute file paths into paths.json entry semantics.
-- `_file_size_bytes` (function): Reads file size metadata for scan/add payloads (fail-loud).
-- `_resolve_existing_library_paths` (function): Loads/validates one paths.json key and resolves entries to absolute paths.
-- `_is_file_already_in_library` (function): Checks whether a candidate file is already covered by a library key paths config.
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import asyncio
 import logging
@@ -51,6 +50,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Body, HTTPException, Query
 
 from apps.backend.infra.config.paths import get_paths_for
+from apps.backend.interfaces.api.public_errors import build_public_task_error
 from apps.backend.interfaces.api.task_registry import TaskEntry, register_task
 from apps.backend.interfaces.api.json_store import _load_json, _save_json
 from apps.backend.runtime.sampling import SAMPLER_OPTIONS, SCHEDULER_OPTIONS
@@ -65,6 +65,8 @@ _PROMPT_TOKENIZER_DIRS: Dict[str, Path] = {
     "sd15": _HF_ROOT / "runwayml/stable-diffusion-v1-5/tokenizer",
     "sdxl": _HF_ROOT / "stabilityai/stable-diffusion-xl-base-1.0/tokenizer",
     "flux1": _HF_ROOT / "black-forest-labs/FLUX.1-dev/tokenizer_2",
+    "flux2": _HF_ROOT / "black-forest-labs/FLUX.2-klein-4B/tokenizer",
+    "ltx2": _HF_ROOT / "Lightricks/LTX-2/tokenizer",
     "chroma": _HF_ROOT / "Chroma/tokenizer",
     "zimage": _HF_ROOT / "Tongyi-MAI/Z-Image/tokenizer",
     "wan": _HF_ROOT / "Wan-AI/Wan2.2-T2V-A14B-Diffusers/tokenizer",
@@ -78,12 +80,12 @@ _ENGINE_TOKENIZER_KEY: Dict[str, str] = {
     "sdxl": "sdxl",
     "flux1": "flux1",
     "flux1_kontext": "flux1",
+    "flux2": "flux2",
+    "ltx2": "ltx2",
     "chroma": "chroma",
     "flux1_chroma": "chroma",
     "zimage": "zimage",
     "anima": "anima",
-    "wan": "wan",
-    "wan22": "wan",
     "wan22_5b": "wan",
     "wan22_14b": "wan",
     "wan22_14b_animate": "wan",
@@ -113,6 +115,20 @@ def _load_tokenizer(tokenizer_dir: str) -> Any:
     return AutoTokenizer.from_pretrained(tokenizer_dir, local_files_only=True, use_fast=True)
 
 
+@lru_cache(maxsize=4)
+def _load_anima_qwen_tokenizer(tokenizer_dir: str) -> Any:
+    from apps.backend.runtime.families.anima.text_encoder import load_anima_qwen_tokenizer
+
+    return load_anima_qwen_tokenizer(tokenizer_dir)
+
+
+@lru_cache(maxsize=4)
+def _load_anima_t5_tokenizer(tokenizer_dir: str) -> Any:
+    from apps.backend.runtime.families.anima.text_encoder import load_anima_t5_tokenizer
+
+    return load_anima_t5_tokenizer(tokenizer_dir)
+
+
 def _tokenize_len(tokenizer: Any, prompt: str) -> int:
     encoded = tokenizer([prompt], truncation=False, add_special_tokens=False, verbose=False)
     ids = encoded.get("input_ids")
@@ -133,81 +149,30 @@ def _resolve_tokenizer_path(key: str) -> Path:
     return candidate
 
 
-def _resolve_anima_qwen_max_length() -> int:
-    raw = str(os.getenv("CODEX_ANIMA_QWEN_MAX_LENGTH", "512") or "512").strip()
-    try:
-        value = int(raw)
-    except ValueError as exc:
-        raise RuntimeError(f"CODEX_ANIMA_QWEN_MAX_LENGTH must be an integer > 0, got: {raw!r}") from exc
-    if value <= 0:
-        raise RuntimeError(f"CODEX_ANIMA_QWEN_MAX_LENGTH must be > 0, got: {value}")
-    return value
-
-
-def _resolve_anima_t5_max_length() -> int:
-    raw = str(os.getenv("CODEX_ANIMA_T5_MAX_LENGTH", "4096") or "4096").strip()
-    try:
-        value = int(raw)
-    except ValueError as exc:
-        raise RuntimeError(f"CODEX_ANIMA_T5_MAX_LENGTH must be an integer > 0, got: {raw!r}") from exc
-    if value <= 0:
-        raise RuntimeError(f"CODEX_ANIMA_T5_MAX_LENGTH must be > 0, got: {value}")
-    return value
-
-
-def _clean_anima_prompt_text(prompt: str) -> str:
-    from apps.backend.runtime.text_processing.emphasis_parser import parse_prompt_attention
-
-    parsed = parse_prompt_attention(str(prompt or ""), "Original")
-    out: list[str] = []
-    for segment, weight in parsed:
-        if segment == "BREAK" and weight == -1:
-            out.append(" ")
-            continue
-        out.append(str(segment))
-    return "".join(out)
-
-
 def _count_anima_tokens(prompt: str) -> int:
-    from apps.backend.runtime.families.anima.text_encoder import tokenize_t5_with_weights
+    from apps.backend.runtime.families.anima.text_encoder import count_anima_prompt_tokens
 
-    qwen_tok = _load_tokenizer(str(_resolve_tokenizer_path("anima_qwen")))
-    t5_tok = _load_tokenizer(str(_resolve_tokenizer_path("anima_t5")))
-    qwen_max = _resolve_anima_qwen_max_length()
-    t5_max = _resolve_anima_t5_max_length()
-
-    qwen_cleaned = _clean_anima_prompt_text(prompt)
-    qwen_count = _tokenize_len(qwen_tok, qwen_cleaned)
-    if qwen_count > qwen_max:
-        raise RuntimeError(
-            "Anima Qwen tokenizer prompt is too long for max_length=%d (len=%d). "
-            "Reduce prompt length or increase CODEX_ANIMA_QWEN_MAX_LENGTH."
-            % (qwen_max, qwen_count)
-        )
-
-    t5_ids, _weights = tokenize_t5_with_weights(
-        tokenizer=t5_tok,
-        texts=[str(prompt or "")],
-        max_length=t5_max,
+    qwen_tok = _load_anima_qwen_tokenizer(str(_resolve_tokenizer_path("anima_qwen")))
+    t5_tok = _load_anima_t5_tokenizer(str(_resolve_tokenizer_path("anima_t5")))
+    return count_anima_prompt_tokens(
+        str(prompt or ""),
+        qwen_tokenizer=qwen_tok,
+        t5_tokenizer=t5_tok,
     )
-    if t5_ids.ndim != 2:
-        raise RuntimeError(f"Anima T5 tokenizer returned invalid ids tensor rank: ndim={t5_ids.ndim}")
-    t5_count = int(t5_ids.shape[1])
-    return max(qwen_count, t5_count)
 
 
 def _count_prompt_tokens(engine: str, prompt: str) -> int:
     normalized = str(engine or "").strip().lower()
     if not normalized:
         raise RuntimeError("Prompt token count requires a non-empty engine id.")
-    if not prompt:
-        return 0
     tokenizer_key = _ENGINE_TOKENIZER_KEY.get(normalized)
     if tokenizer_key is None:
         raise RuntimeError(
             f"Unsupported engine '{engine}' for prompt token count. "
             f"Supported: {', '.join(sorted(_ENGINE_TOKENIZER_KEY.keys()))}."
         )
+    if not prompt and tokenizer_key != "anima":
+        return 0
 
     if tokenizer_key == "anima":
         return _count_anima_tokens(prompt)
@@ -355,9 +320,14 @@ def build_router(
     model_api: Any,
 ) -> APIRouter:
     router = APIRouter()
-    log = logging.getLogger("backend.api")
-    inventory_log = logging.getLogger("inventory")
+    log = get_backend_logger("backend.api")
+    inventory_log = get_backend_logger("inventory")
     repo_root = _REPO_ROOT.resolve(strict=False)
+    from apps.backend.services.model_catalog import (
+        current_models_revision,
+        invalidate_model_catalog,
+        refresh_model_catalog,
+    )
 
     def _resolve_library_target(payload: Dict[str, Any], *, require_key: bool) -> tuple[str | None, str]:
         key_raw = str(payload.get("key") or "").strip()
@@ -514,11 +484,15 @@ def build_router(
 
     def _log_inventory_refresh_summary(inv: Dict[str, Any]) -> None:
         wan22_count = len(inv.get("wan22", []))
+        ip_adapter_models_count = len(inv.get("ip_adapter_models", []))
+        ip_adapter_image_encoders_count = len(inv.get("ip_adapter_image_encoders", []))
         inventory_log.info(
-            "inventory: refreshed (vaes=%d, text_encoders=%d, loras=%d, wan22.gguf=%d, metadata=%d)",
+            "inventory: refreshed (vaes=%d, text_encoders=%d, loras=%d, ip_adapter_models=%d, ip_adapter_image_encoders=%d, wan22.gguf=%d, metadata=%d)",
             len(inv.get("vaes", [])),
             len(inv.get("text_encoders", [])),
             len(inv.get("loras", [])),
+            ip_adapter_models_count,
+            ip_adapter_image_encoders_count,
             wan22_count,
             len(inv.get("metadata", [])),
         )
@@ -538,30 +512,62 @@ def build_router(
             "vaes": _normalize_inventory_for_api(inv.get("vaes", [])),
             "text_encoders": _normalize_inventory_for_api(inv.get("text_encoders", [])),
             "loras": _normalize_inventory_for_api(inv.get("loras", [])),
+            "ip_adapter_models": _normalize_inventory_for_api(inv.get("ip_adapter_models", [])),
+            "ip_adapter_image_encoders": _normalize_inventory_for_api(inv.get("ip_adapter_image_encoders", [])),
             "wan22": {"gguf": _normalize_inventory_for_api(inv.get("wan22", []))},
             "metadata": _normalize_inventory_for_api(inv.get("metadata", [])),
         }
 
+    def _current_models_revision() -> int:
+        return int(current_models_revision())
+
+    def _refresh_model_catalog_or_raise(*, reason: str, detail_prefix: str) -> tuple[int, Dict[str, list[Dict[str, str]]]]:
+        try:
+            return refresh_model_catalog(reason=reason)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"{detail_prefix}: {exc}") from exc
+
+    def _invalidate_model_catalog_or_raise(*, reason: str, detail_prefix: str) -> int:
+        try:
+            return int(invalidate_model_catalog(reason=reason))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"{detail_prefix}: {exc}") from exc
+
     @router.get("/api/models")
     def list_models(refresh: bool = Query(False, description="If true, re-scan checkpoint roots before returning.")) -> Dict[str, Any]:
-        entries = model_api.list_checkpoints(refresh=bool(refresh))
+        if refresh:
+            _refresh_model_catalog_or_raise(
+                reason="api.models.list(refresh=true)",
+                detail_prefix="model catalog refresh failed",
+            )
+            entries = model_api.list_checkpoints(refresh=False)
+        else:
+            entries = model_api.list_checkpoints(refresh=False)
         models = [_serialize_checkpoint(entry) for entry in entries]
         models_info = [e.as_dict() for e in entries]
         current = models[0]["title"] if models else None
-        return {"models": models, "current": current, "models_info": models_info}
+        return {
+            "models": models,
+            "current": current,
+            "models_info": models_info,
+            "models_revision": _current_models_revision(),
+        }
 
     @router.get("/api/models/inventory")
     def list_models_inventory(refresh: bool = Query(False, description="If true, re-scan the models/ and huggingface/ folders.")) -> Dict[str, Any]:
         from apps.backend.inventory import cache as _inv_cache
         if refresh:
-            try:
-                inv = _inv_cache.refresh()
-                _log_inventory_refresh_summary(inv)
-            except Exception as exc:
-                raise HTTPException(status_code=500, detail=f"inventory refresh failed: {exc}")
+            revision, inv = _refresh_model_catalog_or_raise(
+                reason="api.models.inventory.list(refresh=true)",
+                detail_prefix="inventory refresh failed",
+            )
+            _log_inventory_refresh_summary(inv)
         else:
             inv = _inv_cache.get()
-        return _normalized_inventory_payload(inv)
+            revision = _current_models_revision()
+        payload = _normalized_inventory_payload(inv)
+        payload["models_revision"] = int(revision)
+        return payload
 
     @router.post("/api/models/path-scan")
     def scan_model_path(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
@@ -590,10 +596,18 @@ def build_router(
         key, kind = _resolve_library_target(payload, require_key=True)
         assert key is not None
         item = _add_library_file(key=key, kind=kind, file_path_raw=payload.get("path"))
+        if item.get("added") is True:
+            models_revision = _invalidate_model_catalog_or_raise(
+                reason=f"api.models.path-add:{key}",
+                detail_prefix="path-add updated paths but model catalog invalidation failed",
+            )
+        else:
+            models_revision = _current_models_revision()
         return {
             "key": key,
             "kind": kind,
             "item": item,
+            "models_revision": int(models_revision),
         }
 
     @router.post("/api/models/path-add-all")
@@ -658,6 +672,13 @@ def build_router(
                         "detail": str(exc),
                     }
                 )
+        if added_count > 0:
+            models_revision = _invalidate_model_catalog_or_raise(
+                reason=f"api.models.path-add-all:{key}",
+                detail_prefix="path-add-all updated paths but model catalog invalidation failed",
+            )
+        else:
+            models_revision = _current_models_revision()
         return {
             "key": key,
             "kind": kind,
@@ -666,6 +687,7 @@ def build_router(
             "added_count": added_count,
             "error_count": error_count,
             "results": results,
+            "models_revision": int(models_revision),
         }
 
     @router.get("/api/models/file-metadata")
@@ -691,7 +713,7 @@ def build_router(
         if record is None:
             raise HTTPException(status_code=404, detail="checkpoint not found")
 
-        raw_path = str(getattr(record, "filename", "") or getattr(record, "path", "") or "").strip()
+        raw_path = str(getattr(record, "filename", "") or "").strip()
         if not raw_path:
             raise HTTPException(status_code=500, detail="checkpoint record missing filename")
 
@@ -712,7 +734,7 @@ def build_router(
             raise HTTPException(status_code=500, detail=str(exc))
 
         size_bytes = int(resolved.stat().st_size)
-        short_hash = getattr(record, "short_hash", None) or getattr(record, "shorthash", None)
+        short_hash = getattr(record, "short_hash", None)
         return {
             "hash": short_hash,
             "file.name": resolved.stem,
@@ -731,6 +753,8 @@ def build_router(
         prompt = str(payload.get("prompt") or "")
         try:
             count = _count_prompt_tokens(engine=engine, prompt=prompt)
+        except (NotImplementedError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         except RuntimeError as exc:
             message = str(exc)
             if "Unsupported engine" in message:
@@ -746,18 +770,17 @@ def build_router(
 
     @router.post("/api/models/inventory/refresh")
     def refresh_models_inventory() -> Dict[str, Any]:
-        from apps.backend.inventory import cache as _inv_cache
-        try:
-            inv = _inv_cache.refresh()
-            _log_inventory_refresh_summary(inv)
-            return _normalized_inventory_payload(inv)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"inventory refresh failed: {exc}")
+        revision, inv = _refresh_model_catalog_or_raise(
+            reason="api.models.inventory.refresh(sync)",
+            detail_prefix="inventory refresh failed",
+        )
+        _log_inventory_refresh_summary(inv)
+        payload = _normalized_inventory_payload(inv)
+        payload["models_revision"] = int(revision)
+        return payload
 
     @router.post("/api/models/inventory/refresh/async")
     async def refresh_models_inventory_async() -> Dict[str, Any]:
-        from apps.backend.inventory import cache as _inv_cache
-
         loop = asyncio.get_running_loop()
         entry = TaskEntry(loop)
         task_id = f"task(api-models-inventory-refresh-{uuid4().hex})"
@@ -779,22 +802,26 @@ def build_router(
                     }
                 )
                 inventory_log.info("inventory refresh task started (task_id=%s)", task_id)
-                inv = _inv_cache.refresh()
+                revision, inv = refresh_model_catalog(reason="api.models.inventory.refresh(async)")
                 _log_inventory_refresh_summary(inv)
                 payload = _normalized_inventory_payload(inv)
-                entry.result = {"result": {"inventory": payload}}
+                payload["models_revision"] = int(revision)
+                entry.result = {"result": {"inventory": payload, "models_revision": int(revision)}}
                 entry.mark_finished(success=True)
                 inventory_log.info(
-                    "inventory refresh task completed (task_id=%s vaes=%d text_encoders=%d loras=%d wan22.gguf=%d metadata=%d)",
+                    "inventory refresh task completed (task_id=%s revision=%d vaes=%d text_encoders=%d loras=%d ip_adapter_models=%d ip_adapter_image_encoders=%d wan22.gguf=%d metadata=%d)",
                     task_id,
+                    revision,
                     len(inv.get("vaes", [])),
                     len(inv.get("text_encoders", [])),
                     len(inv.get("loras", [])),
+                    len(inv.get("ip_adapter_models", [])),
+                    len(inv.get("ip_adapter_image_encoders", [])),
                     len(inv.get("wan22", [])),
                     len(inv.get("metadata", [])),
                 )
             except Exception as exc:
-                entry.error = f"inventory refresh failed: {exc}"
+                entry.error = build_public_task_error(exc)
                 entry.mark_finished(success=False)
                 inventory_log.error("inventory refresh task failed (task_id=%s): %s", task_id, exc)
 
@@ -822,8 +849,10 @@ def build_router(
         try:
             from apps.backend.runtime.model_registry.capabilities import (
                 ENGINE_ID_TO_SEMANTIC_ENGINE,
+                serialize_exact_engine_inpaint_modes,
                 serialize_engine_capabilities,
                 serialize_family_capabilities,
+                serialize_parked_exact_engines,
             )
             from apps.backend.core.contracts.asset_requirements import (
                 contract_for_core_only,
@@ -859,6 +888,8 @@ def build_router(
                 "smart_cache": cache_stats,
                 "asset_contracts": asset_contracts,
                 "engine_id_to_semantic_engine": engine_id_to_semantic_engine,
+                "exact_engine_inpaint_modes": serialize_exact_engine_inpaint_modes(),
+                "parked_exact_engines": serialize_parked_exact_engines(),
                 "dependency_checks": dependency_checks,
             }
         except Exception as exc:
@@ -870,19 +901,22 @@ def build_router(
 
         samplers = []
         for entry in SAMPLER_OPTIONS:
-            if not entry.get("supported", True):
-                continue
+            supported = bool(entry.get("supported", True))
             spec = None
-            try:
-                spec = get_sampler_spec(entry["name"])
-            except Exception:
-                pass
+            if supported:
+                try:
+                    spec = get_sampler_spec(str(entry["name"]))
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"/api/samplers metadata drift for supported sampler {entry['name']!r}: {exc}",
+                    ) from exc
             samplers.append(
                 {
                     "name": entry["name"],
-                    "supported": bool(entry.get("supported", True)),
-                    "default_scheduler": spec.default_scheduler if spec else None,
-                    "allowed_schedulers": sorted(spec.allowed_schedulers) if spec else [],
+                    "supported": supported,
+                    "default_scheduler": spec.default_scheduler if spec is not None else None,
+                    "allowed_schedulers": sorted(spec.allowed_schedulers) if spec is not None else [],
                 }
             )
         return {"samplers": samplers}

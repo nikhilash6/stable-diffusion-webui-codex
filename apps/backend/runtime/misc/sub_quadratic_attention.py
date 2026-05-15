@@ -39,12 +39,13 @@ import torch
 from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 import math
+from apps.backend.runtime.logging import get_backend_logger
 
 from typing import List
 
 from apps.backend.runtime.memory import memory_management
 
-_log = logging.getLogger("backend.runtime.misc.sub_quadratic_attention")
+_log = get_backend_logger("backend.runtime.misc.sub_quadratic_attention")
 
 
 try:

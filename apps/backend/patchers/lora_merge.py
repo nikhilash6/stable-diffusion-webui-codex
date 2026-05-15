@@ -15,6 +15,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from typing import Callable, Optional, Sequence
@@ -34,7 +35,7 @@ from apps.backend.runtime.adapters.lora.types import (
 from .lora_registry import extra_weight_calculators
 from .lora_types import LoraPatchEntry, LoraPatchSegment, LoraVariant, OffsetSpec
 
-logger = logging.getLogger("backend.patchers.lora")
+logger = get_backend_logger("backend.patchers.lora")
 
 
 def _to_offset(offset: Optional[Sequence[int]]) -> Optional[OffsetSpec]:

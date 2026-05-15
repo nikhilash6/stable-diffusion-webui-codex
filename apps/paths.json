@@ -23,6 +23,12 @@
   "sdxl_loras": [
     "models/sdxl-loras"
   ],
+  "sdxl_fooocus_inpaint": [
+    "models/fooocus-inpaint-sdxl"
+  ],
+  "sdxl_brushnet": [
+    "models/tencentarc-brushnet-sdxl"
+  ],
   "flux1_ckpt": [
     "models/flux"
   ],
@@ -34,6 +40,18 @@
   ],
   "flux1_loras": [
     "models/flux-loras"
+  ],
+  "flux2_ckpt": [
+    "models/flux2"
+  ],
+  "flux2_tenc": [
+    "models/flux2-tenc"
+  ],
+  "flux2_vae": [
+    "models/flux2-vae"
+  ],
+  "flux2_loras": [
+    "models/flux2-loras"
   ],
   "anima_ckpt": [
     "models/anima"
@@ -59,6 +77,25 @@
   "wan22_loras": [
     "models/wan22-loras"
   ],
+  "ltx2_ckpt": [
+    "models/ltx2"
+  ],
+  "ltx2_tenc": [
+    "models/ltx2-tenc"
+  ],
+  "ltx2_vae": [
+    "models/ltx2-vae"
+  ],
+  "ltx2_connectors": [
+    "models/ltx2-connectors"
+  ],
+  "ltx2_loras": [
+    "models/ltx2-loras"
+  ],
+  "netflix_void_ckpt": [
+    "/mnt/c/Users/lucas/OneDrive/Documentos/stable-diffusion-webui-codex/models/netflix-void"
+  ],
+  "netflix_void_base": [],
   "zimage_ckpt": [
     "models/zimage"
   ],
@@ -70,6 +107,13 @@
   ],
   "zimage_loras": [
     "models/zimage-loras"
+  ],
+  "ip_adapter_models": [
+    "models/ip_adapter/models/sd15",
+    "models/ip_adapter/models/sdxl"
+  ],
+  "ip_adapter_image_encoders": [
+    "models/ip_adapter/image_encoders"
   ],
   "supir_models": [
     "models/supir_models"

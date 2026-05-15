@@ -24,7 +24,6 @@ Symbols (top-level; keep in sync; no ghosts):
 
 from __future__ import annotations
 
-import logging
 import os
 import sys
 import threading
@@ -32,8 +31,9 @@ from types import FrameType
 from typing import Any, Callable, Optional, Tuple
 
 from apps.backend.infra.config.env_flags import env_flag
+from apps.backend.runtime.logging import configure_backend_root_for_call_trace, get_backend_logger
 
-_logger = logging.getLogger("backend.calltrace")
+_logger = get_backend_logger("backend.calltrace")
 
 _enabled: bool = False
 _local = threading.local()
@@ -176,10 +176,7 @@ def enable(*, max_calls_per_func: Optional[int] = None) -> None:
     # Avoid tracing our own tracing/logging internals by bumping this logger level
     # if the root level is very low. We still emit debug from this logger.
     try:
-        # Some frameworks attach handlers to root only; ensure propagation is disabled
-        _root = logging.getLogger("backend")
-        _root.setLevel(min(_root.level, logging.DEBUG))
-        _root.propagate = False
+        configure_backend_root_for_call_trace()
     except Exception:
         pass
 

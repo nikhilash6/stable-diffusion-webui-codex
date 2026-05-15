@@ -7,12 +7,12 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Payload validation key set definitions.
-Defines frozen key groups for SHA selection, txt2img, and extras payloads (including ER-SDE/guidance option envelopes and generation `settings_revision` contract key) and exposes singleton instances used by request validators.
+Defines frozen key groups for SHA selection, txt2img, and extras payloads (including ER-SDE/guidance/IP-Adapter option envelopes and the generation `settings_revision` contract key) and exposes singleton instances used by request validators.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `ShaKeys` (dataclass): Frozen key groups for SHA256-based asset selection payload fields.
 - `Txt2ImgKeys` (dataclass): Frozen key groups for txt2img payload fields (CORE/DIFFUSION/FLOW/HIRES, SMART flags, and `settings_revision` contract key).
-- `ExtrasKeys` (dataclass): Frozen key groups for `payload.extras` fields (includes Z-Image Turbo/Base `zimage_variant` and optional `er_sde`/`guidance` options).
+- `ExtrasKeys` (dataclass): Frozen key groups for `payload.extras` fields (includes Z-Image Turbo/Base `zimage_variant` plus optional shared `er_sde`/`guidance`/`ip_adapter` options).
 - `SHA_KEYS` (constant): Singleton instance of `ShaKeys`.
 - `TXT2IMG_KEYS` (constant): Singleton instance of `Txt2ImgKeys`.
 - `EXTRAS_KEYS` (constant): Singleton instance of `ExtrasKeys`.
@@ -29,7 +29,7 @@ from typing import FrozenSet
 class ShaKeys:
     """SHA256 keys for asset selection."""
     MODEL: FrozenSet[str] = frozenset({"model_sha"})
-    TENC: FrozenSet[str] = frozenset({"tenc_sha"})
+    TENC: FrozenSet[str] = frozenset({"tenc_sha", "tenc1_sha", "tenc2_sha"})
     VAE: FrozenSet[str] = frozenset({"vae_sha"})
     LORA: FrozenSet[str] = frozenset({"lora_sha"})
     
@@ -42,7 +42,7 @@ class ShaKeys:
 class Txt2ImgKeys:
     """Keys for txt2img payload."""
     
-    # Generation params (all models) - reused by HIRES
+    # Generation params (all models)
     CORE: FrozenSet[str] = frozenset({
         "prompt",
         "width",
@@ -67,17 +67,22 @@ class Txt2ImgKeys:
         "distilled_cfg",
     })
     
-    # Hires-only (CORE is shared)
+    # Nested extras.hires request keys
     HIRES: FrozenSet[str] = frozenset({
         "enable",
         "denoise",
         "scale",
         "resize_x",
         "resize_y",
+        "steps",
         "upscaler",
         "tile",
-        "checkpoint",
-        "modules",
+        "swap_model",
+        "sampler",
+        "scheduler",
+        "prompt",
+        "negative_prompt",
+        "cfg",
         "refiner",
         "distilled_cfg",
     })
@@ -95,11 +100,6 @@ class Txt2ImgKeys:
     def ALL(self) -> FrozenSet[str]:
         return self.CORE | self.DIFFUSION | self.FLOW | self.DEVICE | self.MODEL | self.SMART | self.REVISION | self.EXTRAS
     
-    @property
-    def HIRES_ALL(self) -> FrozenSet[str]:
-        """Hires uses CORE + DIFFUSION + HIRES-specific."""
-        return self.CORE | self.DIFFUSION | self.HIRES
-
 
 @dataclass(frozen=True)
 class ExtrasKeys:
@@ -107,11 +107,12 @@ class ExtrasKeys:
     
     COMMON: FrozenSet[str] = frozenset({
         "hires",
+        "swap_model",
         "refiner",
+        "ip_adapter",
         "text_encoder_override",
         "batch_size",
         "batch_count",
-        "randn_source",
         "eta_noise_seed_delta",
         "zimage_variant",
         "er_sde",

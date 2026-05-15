@@ -6,33 +6,30 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: WAN22 transformer key-style detection + remapping (Diffusers/WAN-export/Codex).
-Normalizes multiple upstream key layouts into the canonical Codex WAN22 runtime layout and fails loud on unknown/ambiguous inputs.
-Also owns WAN22 request-key allowlists used by generation routers, including img2vid temporal mode/window controls, no-stretch guide controls (`img2vid_image_scale` + crop offsets), optional `video_upscaling`, and canonical sampler keys (`*_sampler`, no legacy `*_sampling` aliases).
+Purpose: WAN22 transformer key-style detection + keyspace resolution (Diffusers/WAN-export/Codex) plus explicit WAN LoRA logical-key mapping.
+Resolves multiple upstream key layouts into the canonical Codex WAN22 runtime keyspace via lookup views, models supported WAN LoRA source-key families explicitly, and fails loud on unknown/ambiguous transformer inputs or unsupported wrapper/prefix rewrite attempts.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `Wan22RequestKeys` (dataclass): Canonical WAN22 request-key allowlists for txt2vid/img2vid and WAN stage controls (including stage prompt/negative fields and optional `video_upscaling` key).
-- `WAN22_REQUEST_KEYS` (constant): Singleton request-key map used by WAN22 request validators.
-- `remap_wan22_lora_logical_key` (function): Maps WAN22 LoRA logical keys to canonical WAN22 transformer weight keys.
-- `remap_wan22_transformer_state_dict` (function): Returns (detected_style, remapped_view) for WAN22 transformer keys.
+- `resolve_wan22_lora_logical_key` (function): Maps WAN22 LoRA logical keys to canonical WAN22 transformer target keys.
+- `resolve_wan22_transformer_keyspace` (function): Resolves WAN22 transformer keys into canonical keyspace (`ResolvedKeyspace`).
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from collections.abc import MutableMapping, Sequence
-from typing import FrozenSet, TypeVar
+from collections.abc import Mapping, MutableMapping, Sequence
+from typing import TypeVar
 
 from apps.backend.runtime.state_dict.key_mapping import (
+    fail_on_key_name_rewrite,
     KeyMappingError,
     KeySentinel,
     KeyStyle,
     KeyStyleDetector,
     KeyStyleSpec,
+    ResolvedKeyspace,
     SentinelKind,
-    remap_state_dict_view,
-    strip_repeated_prefixes,
+    resolve_state_dict_keyspace,
 )
 
 _T = TypeVar("_T")
@@ -42,6 +39,14 @@ _PREFIXES = (
     "model.diffusion_model.",
     "diffusion_model.",
     "model.",
+)
+
+_EXPORT_TO_CODEX_PREFIX_ALIASES = (
+    ("patch_embedding.", "patch_embed."),
+    ("time_embedding.", "time_embed."),
+    ("time_projection.", "time_proj."),
+    ("text_embedding.", "text_embed."),
+    ("head.head.", "head."),
 )
 
 _RX_BLOCK_ATTN = re.compile(
@@ -63,10 +68,20 @@ _RX_LORA_CANONICAL_ATTN_DOT = re.compile(
     r"^blocks\.(?P<idx>\d+)\.(?P<which>self_attn|cross_attn)\.(?P<proj>q|k|v|o)$"
 )
 _RX_LORA_CANONICAL_FFN_DOT = re.compile(r"^blocks\.(?P<idx>\d+)\.ffn\.(?P<which>0|2)$")
+_RX_LORA_CANONICAL_ATTN_NORM_DOT = re.compile(
+    r"^blocks\.(?P<idx>\d+)\.(?P<which>self_attn|cross_attn)\.norm_(?P<norm>q|k)$"
+)
+_RX_LORA_CANONICAL_NORM3_DOT = re.compile(r"^blocks\.(?P<idx>\d+)\.norm3$")
+_RX_LORA_CANONICAL_MODULATION_DOT = re.compile(r"^blocks\.(?P<idx>\d+)\.modulation$")
 _RX_LORA_CANONICAL_ATTN_UNDERSCORE = re.compile(
     r"^blocks_(?P<idx>\d+)_(?P<which>self_attn|cross_attn)_(?P<proj>q|k|v|o)$"
 )
 _RX_LORA_CANONICAL_FFN_UNDERSCORE = re.compile(r"^blocks_(?P<idx>\d+)_ffn_(?P<which>0|2)$")
+_RX_LORA_CANONICAL_ATTN_NORM_UNDERSCORE = re.compile(
+    r"^blocks_(?P<idx>\d+)_(?P<which>self_attn|cross_attn)_norm_(?P<norm>q|k)$"
+)
+_RX_LORA_CANONICAL_NORM3_UNDERSCORE = re.compile(r"^blocks_(?P<idx>\d+)_norm3$")
+_RX_LORA_CANONICAL_MODULATION_UNDERSCORE = re.compile(r"^blocks_(?P<idx>\d+)_modulation$")
 _RX_LORA_DIFFUSERS_ATTN_DOT = re.compile(
     r"^blocks\.(?P<idx>\d+)\.(?P<which>attn1|attn2)\.to_(?P<proj>q|k|v)$"
 )
@@ -77,7 +92,33 @@ _RX_LORA_DIFFUSERS_OUT_DOT = re.compile(r"^blocks\.(?P<idx>\d+)\.(?P<which>attn1
 _RX_LORA_DIFFUSERS_OUT_UNDERSCORE = re.compile(r"^blocks_(?P<idx>\d+)_(?P<which>attn1|attn2)_to_out_0$")
 _RX_LORA_DIFFUSERS_FFN_DOT = re.compile(r"^blocks\.(?P<idx>\d+)\.ffn\.net\.(?P<which>0\.proj|2)$")
 _RX_LORA_DIFFUSERS_FFN_UNDERSCORE = re.compile(r"^blocks_(?P<idx>\d+)_ffn_net_(?P<which>0_proj|2)$")
-_LORA_LOGICAL_PREFIXES = ("lora_unet_", "lycoris_")
+_LEGACY_LORA_LOGICAL_WRAPPER_PREFIXES = ("lora_unet_", "lycoris_")
+_LORA_SOURCE_PREFIXES = (
+    "model.model.diffusion_model.",
+    "model.diffusion_model.",
+    "diffusion_model.",
+    "transformer_2.",
+    "transformer.",
+    "model.",
+)
+_LORA_TOP_LEVEL_TARGETS = {
+    "patch_embedding": "patch_embed.weight",
+    "patch_embed": "patch_embed.weight",
+    "time_embedding.0": "time_embed.0.weight",
+    "time_embed.0": "time_embed.0.weight",
+    "time_embedding.2": "time_embed.2.weight",
+    "time_embed.2": "time_embed.2.weight",
+    "time_projection.1": "time_proj.1.weight",
+    "time_proj.1": "time_proj.1.weight",
+    "text_embedding.0": "text_embed.0.weight",
+    "text_embed.0": "text_embed.0.weight",
+    "text_embedding.2": "text_embed.2.weight",
+    "text_embed.2": "text_embed.2.weight",
+    "head.head": "head.weight",
+    "head": "head.weight",
+    "head.modulation": "head_modulation",
+    "head_modulation": "head_modulation",
+}
 
 _DETECTOR = KeyStyleDetector(
     name="wan22_transformer_key_style",
@@ -126,163 +167,50 @@ _DETECTOR = KeyStyleDetector(
 )
 
 
-@dataclass(frozen=True)
-class Wan22RequestKeys:
-    """Canonical WAN22 request-key allowlists used by generation routers."""
-
-    DEVICE: FrozenSet[str] = frozenset({"codex_device", "device", "codex_diffusion_device"})
-    REVISION: FrozenSet[str] = frozenset({"settings_revision"})
-    VIDEO_EXPORT: FrozenSet[str] = frozenset(
-        {
-            "video_return_frames",
-            "video_filename_prefix",
-            "video_format",
-            "video_pix_fmt",
-            "video_crf",
-            "video_loop_count",
-            "video_pingpong",
-            "video_save_metadata",
-            "video_save_output",
-            "video_trim_to_audio",
-        }
-    )
-    VIDEO_INTERPOLATION: FrozenSet[str] = frozenset({"video_interpolation"})
-    VIDEO_UPSCALING: FrozenSet[str] = frozenset({"video_upscaling"})
-    WAN_STAGE_CONTAINERS: FrozenSet[str] = frozenset({"wan_high", "wan_low"})
-    WAN_STAGE_ALLOWED: FrozenSet[str] = frozenset(
-        {
-            "model_sha",
-            "model_dir",
-            "prompt",
-            "negative_prompt",
-            "sampler",
-            "scheduler",
-            "steps",
-            "cfg_scale",
-            "seed",
-            "lightning",
-            "loras",
-            "lora_sha",
-            "lora_path",
-            "lora_weight",
-            "flow_shift",
-        }
-    )
-    WAN_ASSETS: FrozenSet[str] = frozenset(
-        {
-            "wan_format",
-            "wan_metadata_repo",
-            "wan_metadata_dir",
-            "wan_tokenizer_dir",
-            "wan_vae_sha",
-            "wan_tenc_sha",
-            "wan_vae_path",
-            "wan_text_encoder_path",
-            "wan_text_encoder_dir",
-        }
-    )
-    GGUF_RUNTIME: FrozenSet[str] = frozenset(
-        {
-            "gguf_offload",
-            "gguf_offload_level",
-            "gguf_sdpa_policy",
-            "gguf_attention_mode",
-            "gguf_attn_chunk",
-            "gguf_cache_policy",
-            "gguf_cache_limit_mb",
-            "gguf_log_mem_interval",
-            "gguf_te_device",
-        }
-    )
-    TXT2VID: FrozenSet[str] = frozenset(
-        {
-            "txt2vid_prompt",
-            "txt2vid_neg_prompt",
-            "txt2vid_width",
-            "txt2vid_height",
-            "txt2vid_steps",
-            "txt2vid_fps",
-            "txt2vid_num_frames",
-            "txt2vid_sampler",
-            "txt2vid_scheduler",
-            "txt2vid_seed",
-            "txt2vid_cfg_scale",
-            "txt2vid_styles",
-        }
-    )
-    IMG2VID: FrozenSet[str] = frozenset(
-        {
-            "img2vid_prompt",
-            "img2vid_neg_prompt",
-            "img2vid_width",
-            "img2vid_height",
-            "img2vid_steps",
-            "img2vid_fps",
-            "img2vid_num_frames",
-            "img2vid_sampler",
-            "img2vid_scheduler",
-            "img2vid_seed",
-            "img2vid_cfg_scale",
-            "img2vid_styles",
-            "img2vid_init_image",
-            "img2vid_chunk_frames",
-            "img2vid_overlap_frames",
-            "img2vid_anchor_alpha",
-            "img2vid_reset_anchor_to_base",
-            "img2vid_chunk_seed_mode",
-            "img2vid_chunk_buffer_mode",
-            "img2vid_mode",
-            "img2vid_window_frames",
-            "img2vid_window_stride",
-            "img2vid_window_commit_frames",
-            "img2vid_image_scale",
-            "img2vid_crop_offset_x",
-            "img2vid_crop_offset_y",
-        }
-    )
-
-    @property
-    def COMMON(self) -> FrozenSet[str]:
-        return (
-            self.DEVICE
-            | self.REVISION
-            | self.VIDEO_EXPORT
-            | self.VIDEO_INTERPOLATION
-            | self.VIDEO_UPSCALING
-            | self.WAN_STAGE_CONTAINERS
-            | self.WAN_ASSETS
-            | self.GGUF_RUNTIME
-        )
-
-    @property
-    def TXT2VID_ALL(self) -> FrozenSet[str]:
-        return self.COMMON | self.TXT2VID
-
-    @property
-    def IMG2VID_ALL(self) -> FrozenSet[str]:
-        return self.COMMON | self.IMG2VID
-
-
-WAN22_REQUEST_KEYS = Wan22RequestKeys()
-
-
-def remap_wan22_lora_logical_key(logical_key: str) -> str | None:
-    """Map a WAN22 LoRA logical key to a canonical WAN22 transformer `.weight` key.
+def resolve_wan22_lora_logical_key(logical_key: str) -> str | None:
+    """Map a WAN22 LoRA logical key to a canonical WAN22 transformer target key.
 
     Supported logical-key families:
     - Canonical Codex style (`blocks.N.self_attn.q`, `blocks_N_self_attn_q`, `blocks.N.ffn.0`, `blocks_N_ffn_0`)
+    - Canonical norm families (`blocks.N.self_attn.norm_q`, `blocks_N_self_attn_norm_q`, `blocks.N.norm3`, `blocks_N_norm3`)
+    - Canonical modulation families (`blocks.N.modulation`, `blocks_N_modulation`, `head.modulation`, `head_modulation`)
+    - Top-level export/native aliases (`patch_embedding`, `patch_embed`, `time_embedding.0`, `time_embed.0`,
+      `time_projection.1`, `time_proj.1`, `text_embedding.0`, `text_embed.0`, `head.head`, `head`)
     - Diffusers style (`blocks.N.attn1.to_q`, `blocks_N_attn1_to_q`, `blocks.N.attn1.to_out.0`, `blocks_N_attn1_to_out_0`,
       `blocks.N.ffn.net.0.proj`, `blocks_N_ffn_net_0_proj`)
-    - Optional LoRA wrappers (`lora_unet_`, `lycoris_`)
+    - Explicit wrapper source families (`diffusion_model.`, `model.diffusion_model.`, `model.model.diffusion_model.`,
+      `transformer.`, `transformer_2.`, `model.`)
+    - Legacy trainer wrapper tags (`lora_unet_`, `lycoris_`); these are source-key wrappers, not WAN architecture owners
     """
 
-    key = strip_repeated_prefixes(str(logical_key), _PREFIXES)
+    key = str(logical_key)
     if key.endswith(".weight"):
         key = key[: -len(".weight")]
-    for prefix in _LORA_LOGICAL_PREFIXES:
+    for prefix in _LEGACY_LORA_LOGICAL_WRAPPER_PREFIXES:
         if key.startswith(prefix):
             key = key[len(prefix) :]
             break
+
+    target = _resolve_wan22_lora_core_key(key)
+    if target is not None:
+        return target
+
+    for source_prefix in _LORA_SOURCE_PREFIXES:
+        if not key.startswith(source_prefix):
+            continue
+        inner_key = key[len(source_prefix) :]
+        target = _resolve_wan22_lora_core_key(inner_key)
+        if target is not None:
+            return target
+        break
+
+    return None
+
+
+def _resolve_wan22_lora_core_key(key: str) -> str | None:
+    target = _LORA_TOP_LEVEL_TARGETS.get(key)
+    if target is not None:
+        return target
 
     m = _RX_LORA_CANONICAL_ATTN_DOT.match(key)
     if m:
@@ -299,6 +227,30 @@ def remap_wan22_lora_logical_key(logical_key: str) -> str | None:
     m = _RX_LORA_CANONICAL_FFN_UNDERSCORE.match(key)
     if m:
         return f"blocks.{m.group('idx')}.ffn.{m.group('which')}.weight"
+
+    m = _RX_LORA_CANONICAL_ATTN_NORM_DOT.match(key)
+    if m:
+        return f"blocks.{m.group('idx')}.{m.group('which')}.norm_{m.group('norm')}.weight"
+
+    m = _RX_LORA_CANONICAL_NORM3_DOT.match(key)
+    if m:
+        return f"blocks.{m.group('idx')}.norm3.weight"
+
+    m = _RX_LORA_CANONICAL_MODULATION_DOT.match(key)
+    if m:
+        return f"blocks.{m.group('idx')}.modulation"
+
+    m = _RX_LORA_CANONICAL_ATTN_NORM_UNDERSCORE.match(key)
+    if m:
+        return f"blocks.{m.group('idx')}.{m.group('which')}.norm_{m.group('norm')}.weight"
+
+    m = _RX_LORA_CANONICAL_NORM3_UNDERSCORE.match(key)
+    if m:
+        return f"blocks.{m.group('idx')}.norm3.weight"
+
+    m = _RX_LORA_CANONICAL_MODULATION_UNDERSCORE.match(key)
+    if m:
+        return f"blocks.{m.group('idx')}.modulation"
 
     m = _RX_LORA_DIFFUSERS_ATTN_DOT.match(key)
     if m:
@@ -333,21 +285,11 @@ def remap_wan22_lora_logical_key(logical_key: str) -> str | None:
     return None
 
 
-def remap_wan22_transformer_state_dict(state_dict: MutableMapping[str, _T]) -> tuple[KeyStyle, MutableMapping[str, _T]]:
-    def _normalize(key: str) -> str:
-        return strip_repeated_prefixes(str(key), _PREFIXES)
-
+def resolve_wan22_transformer_keyspace(state_dict: MutableMapping[str, _T]) -> ResolvedKeyspace[_T]:
     def _export_to_codex(key: str) -> str:
-        if key.startswith("patch_embedding."):
-            return "patch_embed." + key[len("patch_embedding.") :]
-        if key.startswith("time_embedding."):
-            return "time_embed." + key[len("time_embedding.") :]
-        if key.startswith("time_projection."):
-            return "time_proj." + key[len("time_projection.") :]
-        if key.startswith("text_embedding."):
-            return "text_embed." + key[len("text_embedding.") :]
-        if key.startswith("head.head."):
-            return "head." + key[len("head.head.") :]
+        for export_prefix, codex_prefix in _EXPORT_TO_CODEX_PREFIX_ALIASES:
+            if key.startswith(export_prefix):
+                return codex_prefix + key[len(export_prefix) :]
         if key == "head.modulation":
             return "head_modulation"
         return key
@@ -446,15 +388,15 @@ def remap_wan22_transformer_state_dict(state_dict: MutableMapping[str, _T]) -> t
         if offenders:
             sample = sorted(offenders)[:10]
             raise KeyMappingError(
-                "WAN22 key remap produced non-canonical keys (mapping incomplete). "
+                "WAN22 keyspace resolver produced non-canonical keys (mapping incomplete). "
                 f"offenders_sample={sample}"
             )
 
-        # When loading a full model state dict, patch_embed is required (LoRA-key remaps may not include it).
+        # When loading a full model state dict, patch_embed is required (LoRA keyspace resolution may not include it).
         if len(keys) > 64 and not any(k.startswith("patch_embed.") for k in keys):
             preview = ", ".join(sorted(keys)[:10])
             raise KeyMappingError(
-                "WAN22 key remap output is missing required patch_embed.* keys. "
+                "WAN22 keyspace resolver output is missing required patch_embed.* keys. "
                 f"sample_keys=[{preview}]"
             )
 
@@ -464,18 +406,18 @@ def remap_wan22_transformer_state_dict(state_dict: MutableMapping[str, _T]) -> t
         KeyStyle.DIFFUSERS: lambda k: _export_to_codex(_diffusers_to_export(k)),
     }
 
-    return remap_state_dict_view(
+    resolved = resolve_state_dict_keyspace(
         state_dict,
         detector=_DETECTOR,
-        normalize=_normalize,
+        source_key_guard=lambda key: fail_on_key_name_rewrite(key, _PREFIXES),
         mappers=mappers,
         output_validator=_validate_output,
     )
+    resolved.metadata.setdefault("resolver", "wan22_transformer")
+    return resolved
 
 
 __all__ = [
-    "Wan22RequestKeys",
-    "WAN22_REQUEST_KEYS",
-    "remap_wan22_lora_logical_key",
-    "remap_wan22_transformer_state_dict",
+    "resolve_wan22_lora_logical_key",
+    "resolve_wan22_transformer_keyspace",
 ]

@@ -7,12 +7,13 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Public types for the GGUF converter tool.
-Defines the conversion config, quantization selector enum, progress tracking, and verification error type.
+Defines the conversion config, quantization selector enum, precision controls, progress tracking, and verification error type.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `QuantizationType` (enum): Supported “human” quantization selectors for conversion (maps to `GGMLQuantizationType`).
 - `PrecisionMode` (enum): Mixed-quant float precision policy selector (`full_*` and `*_plus_fp32` modes).
 - `MIXED_FLOAT_OVERRIDE_VALUES` (tuple): Canonical allowed literals for mixed float override values.
+- `PRECISION_MODE_VALUES` (tuple): Canonical allowed literals for precision-mode selectors.
 - `normalize_mixed_float_override` (function): Normalizes and validates a mixed float override literal (`auto|F16|BF16|F32`).
 - `normalize_precision_mode` (function): Normalizes and validates a precision-mode selector.
 - `ConversionConfig` (dataclass): Conversion configuration (paths, profile selection, quantization, and dtype override knobs).
@@ -123,7 +124,6 @@ class ConversionConfig:
     output_path: str  # Output .gguf path
     profile_id: Optional[str] = None
     quantization: QuantizationType = QuantizationType.F16
-    comfy_layout: bool = True
     tensor_type_overrides: Sequence[str] = ()
     float_group_overrides: dict[str, str] = field(default_factory=dict)
     precision_mode: PrecisionMode | None = None

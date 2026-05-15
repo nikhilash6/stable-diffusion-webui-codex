@@ -8,7 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: Anima runtime configuration and state-dict inference helpers.
 Defines strict dataclasses for Cosmos Predict2 (MiniTrainDiT) and Anima's LLMAdapter, plus best-effort inference
-from a `net.*`-stripped transformer state dict (fail-loud on ambiguity).
+from the canonical Anima transformer lookup keyspace resolved from raw `net.*` checkpoints or an already-canonical view (fail-loud on ambiguity).
 
 Symbols (top-level; keep in sync; no ghosts):
 - `CosmosPredict2Config` (dataclass): MiniTrainDiT runtime config used to instantiate the core model.
@@ -52,8 +52,8 @@ class CosmosPredict2Config:
     pos_emb_interpolation: str = "crop"
     min_fps: int = 1
     max_fps: int = 30
-    rope_h_extrapolation_ratio: float = 1.0
-    rope_w_extrapolation_ratio: float = 1.0
+    rope_h_extrapolation_ratio: float = 4.0
+    rope_w_extrapolation_ratio: float = 4.0
     rope_t_extrapolation_ratio: float = 1.0
     rope_enable_fps_modulation: bool = True
     extra_per_block_abs_pos_emb: bool = False
@@ -156,6 +156,12 @@ def _infer_patch_config(*, x_in_dim: int, final_out: int) -> tuple[int, int, int
     return int(latent_channels), int(out_channels), int(patch_spatial), int(patch_temporal), bool(concat_padding_mask)
 
 
+def _infer_rope_extrapolation_ratios(*, in_channels: int) -> tuple[float, float, float]:
+    if int(in_channels) == 16:
+        return 4.0, 4.0, 1.0
+    return 1.0, 1.0, 1.0
+
+
 def _infer_cosmos_predict2_config_from_state_dict(
     state_dict: Mapping[str, torch.Tensor],
     *,
@@ -203,6 +209,9 @@ def _infer_cosmos_predict2_config_from_state_dict(
             adaln_lora_dim, _ = _require_2d(state_dict, "blocks.0.adaln_modulation_self_attn.1.weight")
         except Exception:
             adaln_lora_dim = 256
+    rope_h_extrapolation_ratio, rope_w_extrapolation_ratio, rope_t_extrapolation_ratio = _infer_rope_extrapolation_ratios(
+        in_channels=int(in_channels)
+    )
 
     return CosmosPredict2Config(
         max_img_h=int(max_img_h),
@@ -218,6 +227,9 @@ def _infer_cosmos_predict2_config_from_state_dict(
         num_heads=int(num_heads),
         mlp_ratio=float(mlp_ratio),
         crossattn_emb_channels=int(ctx_dim),
+        rope_h_extrapolation_ratio=float(rope_h_extrapolation_ratio),
+        rope_w_extrapolation_ratio=float(rope_w_extrapolation_ratio),
+        rope_t_extrapolation_ratio=float(rope_t_extrapolation_ratio),
         use_adaln_lora=bool(use_adaln_lora),
         adaln_lora_dim=int(adaln_lora_dim),
     )
@@ -284,4 +296,3 @@ def infer_anima_config_from_state_dict(
         raise RuntimeError("Anima core checkpoint is missing required llm_adapter weights (expected llm_adapter.embed.weight).")
     adapter = _infer_llm_adapter_config_from_state_dict(state_dict)
     return AnimaConfig(dit=dit, adapter=adapter)
-

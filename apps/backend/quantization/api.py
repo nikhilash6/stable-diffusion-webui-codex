@@ -20,6 +20,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from typing import TYPE_CHECKING
@@ -33,7 +34,7 @@ from .core import get_quant_spec, QuantType
 if TYPE_CHECKING:
     from .tensor import CodexParameter
 
-logger = logging.getLogger(__name__)
+logger = get_backend_logger(__name__)
 
 __all__ = ["dequantize", "bake", "quantize", "dequantize_numpy", "quantize_numpy"]
 

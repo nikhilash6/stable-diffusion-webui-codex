@@ -11,6 +11,38 @@
     border: 1px solid rgba(111, 130, 160, 0.34);
   }
 
+  .bootstrap-inline-status {
+    margin: 0.45rem 0 0.7rem;
+    padding: 0.6rem 0.8rem;
+    border-radius: 0.55rem;
+    border: 1px solid rgba(111, 130, 160, 0.34);
+    background: rgba(17, 22, 33, 0.52);
+  }
+
+  .bootstrap-inline-status--error {
+    border-color: rgba(194, 80, 96, 0.58);
+    background: rgba(35, 12, 18, 0.58);
+  }
+
+  .bootstrap-inline-status-title {
+    margin: 0;
+    font-size: 0.88rem;
+    font-weight: 600;
+  }
+
+  .bootstrap-inline-status-detail {
+    margin: 0.32rem 0 0;
+    color: rgba(186, 202, 229, 0.9);
+    font-size: 0.82rem;
+  }
+
+  .bootstrap-inline-actions {
+    margin-top: 0.55rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
   .bootstrap-panel--fatal {
     border-color: rgba(194, 80, 96, 0.58);
   }

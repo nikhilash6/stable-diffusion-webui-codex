@@ -18,14 +18,14 @@ Symbols (top-level; keep in sync; no ghosts):
 -->
 
 <template>
-    <div class="path-list">
+    <div>
     <div class="pathlist-controls">
       <input class="ui-input" v-model="newPath" placeholder="Add path (or use Browse)" />
       <button class="btn btn-sm btn-secondary" type="button" @click="add">Add</button>
       <button class="btn btn-sm btn-outline" type="button" @click="browse">Browse…</button>
     </div>
-    <ul class="list">
-      <li v-for="(p, idx) in modelValue" :key="p+idx" class="list-item flex items-center justify-between">
+    <ul class="cdx-list">
+      <li v-for="(p, idx) in modelValue" :key="p+idx" class="cdx-list-item">
         <span class="text-sm break-all">{{ p }}</span>
         <button class="btn btn-sm btn-ghost" type="button" @click="remove(idx)">Remove</button>
       </li>

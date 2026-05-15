@@ -6,7 +6,8 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Converter profile registry for GGUF conversion (selects layout/planner/key mapping + per-model dtype policies).
+Purpose: Converter profile registry for GGUF conversion.
+Selects source/native metadata normalizers, key mappings, and per-model dtype policies.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_is_flux` (function): Detect whether a config.json describes a Flux transformer.
@@ -15,11 +16,6 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_is_ltx2` (function): Detect whether a config.json describes an LTX2 transformer.
 - `_is_gemma3_tenc` (function): Detect whether a config.json describes a Gemma3 text encoder export.
 - `_build_llama_mapping` (function): Build a Llama HF→GGUF key mapping from the model config.
-- `_plan_flux` (function): Delegates Flux tensor planning to the tensor planner (supports key remaps and QKV packing).
-- `_plan_zimage` (function): Delegates ZImage tensor planning to the tensor planner (supports key remaps and QKV packing).
-- `_plan_wan22` (function): Delegates WAN22 tensor planning to the tensor planner (Diffusers → Comfy key mapping).
-- `_plan_ltx2` (function): Delegates LTX2 tensor planning to the tensor planner (Diffusers → Comfy key mapping).
-- `_plan_gemma3_tenc` (function): Delegates Gemma3 TE tensor planning to the tensor planner (prefix stripping).
 - `_COND_QUANTIZED` (constant): Condition helper matching any quantized preset (non-F16/F32).
 - `_COND_FLUX_MIXED` (constant): Condition helper matching Flux mixed presets (`Q5_K_M`/`Q4_K_M`).
 - `_COND_WAN22_MIXED` (constant): Condition helper matching WAN22 mixed presets (`Q5_K_M`/`Q4_K_M`).
@@ -29,7 +25,8 @@ Symbols (top-level; keep in sync; no ghosts):
 - `ZIMAGE_QUANT_POLICY` (constant): ZImage per-tensor dtype policy (pad tokens must remain float).
 - `LLAMA_QUANT_POLICY` (constant): Llama per-tensor dtype policy (mixed presets bump key weights to higher precision).
 - `PROFILE_REGISTRY` (constant): Registry of built-in converter profiles (table-driven dispatch).
-- `resolve_profile` (function): Resolve the effective `ConverterProfileSpec` from a config.json and `comfy_layout`.
+- `_PROFILES_BY_ID` (constant): Indexed lookup table for profile ids.
+- `resolve_profile` (function): Resolve the effective `ConverterProfileSpec` from a config.json.
 - `profile_by_id` (function): Resolve a profile by its stable id string (no heuristics).
 """
 
@@ -41,13 +38,10 @@ from apps.backend.quantization.gguf import GGMLQuantizationType
 from apps.backend.runtime.tools import gguf_converter_key_mapping as _key_mapping
 from apps.backend.runtime.tools import gguf_converter_tensor_planner as _tensor_planner
 from apps.backend.runtime.tools.gguf_converter_specs import (
-    CompiledTensorTypeRule,
     ConverterProfileId,
     ConverterProfileSpec,
     GGUFArch,
-    GGUFKeyLayout,
     KeyMappingSpec,
-    PlannerSpec,
     QuantizationCondition,
     QuantizationPolicySpec,
     TensorNameTarget,
@@ -91,94 +85,104 @@ FLUX_QUANT_POLICY = QuantizationPolicySpec(
     # Required model policy: do not allow user overrides to violate these.
     required_rules=(
         TensorTypeRule(
-            pattern=r"^img_in\.weight$",
+            pattern=r"^x_embedder\.weight$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="Flux input embedder is quality-sensitive; keep float",
         ),
         TensorTypeRule(
-            pattern=r"^(?:guidance_in|time_in|vector_in)\.in_layer\.weight$",
+            pattern=r"^time_text_embed\.(?:timestep_embedder|text_embedder|guidance_embedder)\.linear_1\.weight$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="Flux in-projections are quality-sensitive; keep float",
         ),
         TensorTypeRule(
-            pattern=r"^final_layer\.linear\.weight$",
+            pattern=r"^proj_out\.weight$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="Flux output projection is quality-sensitive; keep float",
         ),
         TensorTypeRule(
-            pattern=r"^(?:guidance_in|time_in|vector_in)\.out_layer\.weight$",
+            pattern=r"^time_text_embed\.(?:timestep_embedder|text_embedder|guidance_embedder)\.linear_2\.weight$",
             ggml_type=GGMLQuantizationType.F16,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="Flux out-projections can be F16 without visible regressions",
         ),
         TensorTypeRule(
-            pattern=r"^txt_in\.weight$",
+            pattern=r"^context_embedder\.weight$",
             ggml_type=GGMLQuantizationType.F16,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="Flux txt_in can be F16 while preserving prompt semantics",
         ),
         TensorTypeRule(
-            pattern=r"^final_layer\.adaLN_modulation\.1\.weight$",
+            pattern=r"^norm_out\.linear\.weight$",
             ggml_type=GGMLQuantizationType.F16,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="Flux final_layer modulation can be F16",
         ),
         TensorTypeRule(
-            pattern=r"^(?:double_blocks|single_blocks)\..*\.(?:bias|scale)$",
+            pattern=r"^(?:transformer_blocks|single_transformer_blocks)\..*\.bias$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="Flux 1D tensors (biases/scales) stay F32 for stability",
         ),
         TensorTypeRule(
-            pattern=r"^(?:img_in|txt_in)\.bias$",
+            pattern=r"^(?:x_embedder|context_embedder)\.bias$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="Flux biases stay F32 for stability",
         ),
         TensorTypeRule(
-            pattern=r"^(?:guidance_in|time_in|vector_in)\.(?:in_layer|out_layer)\.bias$",
+            pattern=r"^time_text_embed\.(?:timestep_embedder|text_embedder|guidance_embedder)\.linear_[12]\.bias$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="Flux biases stay F32 for stability",
         ),
         TensorTypeRule(
-            pattern=r"^final_layer\.(?:linear|adaLN_modulation\.1)\.bias$",
+            pattern=r"^(?:proj_out|norm_out\.linear)\.bias$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="Flux biases stay F32 for stability",
+        ),
+        TensorTypeRule(
+            pattern=(
+                r"^(?:transformer_blocks\.\d+\.attn\.(?:norm_q|norm_k|norm_added_q|norm_added_k)"
+                r"|single_transformer_blocks\.\d+\.attn\.norm_[qk])\.weight$"
+            ),
+            ggml_type=GGMLQuantizationType.F32,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            reason="Flux q/k norm weights stay F32 for stability",
         ),
         # Mixed presets are explicitly allowed to trade size for quality.
         TensorTypeRule(
-            pattern=r"^(?:guidance_in|time_in|vector_in)\.out_layer\.weight$",
+            pattern=r"^time_text_embed\.(?:timestep_embedder|text_embedder|guidance_embedder)\.linear_2\.weight$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_FLUX_MIXED,
             reason="Flux mixed preset: keep out-projections float32 for higher quality",
         ),
         TensorTypeRule(
-            pattern=r"^txt_in\.weight$",
+            pattern=r"^context_embedder\.weight$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_FLUX_MIXED,
             reason="Flux mixed preset: keep txt_in float32 for higher quality",
         ),
         TensorTypeRule(
-            pattern=r"^final_layer\.adaLN_modulation\.1\.weight$",
+            pattern=r"^norm_out\.linear\.weight$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_FLUX_MIXED,
             reason="Flux mixed preset: keep final modulation float32 for higher quality",
         ),
@@ -193,95 +197,95 @@ WAN22_QUANT_POLICY = QuantizationPolicySpec(
         TensorTypeRule(
             pattern=r"^patch_embedding\.(?:weight|bias)$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="WAN22 patch embedding is quality-sensitive; keep float",
         ),
         TensorTypeRule(
-            pattern=r"^head\.head\.(?:weight|bias)$",
+            pattern=r"^proj_out\.(?:weight|bias)$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="WAN22 output projection is quality-sensitive; keep float",
         ),
         TensorTypeRule(
-            pattern=r"^time_embedding\.0\.(?:weight|bias)$",
+            pattern=r"^condition_embedder\.time_embedder\.linear_1\.(?:weight|bias)$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="WAN22 time embedding in-projection is quality-sensitive; keep float",
         ),
         TensorTypeRule(
-            pattern=r"^time_projection\.1\.(?:weight|bias)$",
+            pattern=r"^condition_embedder\.time_proj\.(?:weight|bias)$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="WAN22 time projection to modulation is quality-sensitive; keep float",
         ),
         # Allow non-mixed quantized presets to keep the big embedder weights in float16
         # (mixed presets can trade size for more float32 below).
         TensorTypeRule(
-            pattern=r"^time_embedding\.2\.(?:weight|bias)$",
+            pattern=r"^condition_embedder\.time_embedder\.linear_2\.(?:weight|bias)$",
             ggml_type=GGMLQuantizationType.F16,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="WAN22 time embedding out-projection can be float16 without visible regressions",
         ),
         TensorTypeRule(
-            pattern=r"^text_embedding\.(?:0|2)\.(?:weight|bias)$",
+            pattern=r"^condition_embedder\.text_embedder\.linear_(?:1|2)\.(?:weight|bias)$",
             ggml_type=GGMLQuantizationType.F16,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="WAN22 text embedder weights can be float16 while preserving prompt semantics",
         ),
         # Stability: keep small tensors in float32.
         TensorTypeRule(
-            pattern=r"^(?:head\.modulation|blocks\.\d+\.modulation)$",
+            pattern=r"^(?:scale_shift_table|blocks\.\d+\.scale_shift_table)$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="WAN22 modulation tables stay float32 for stability",
         ),
         TensorTypeRule(
-            pattern=r"^blocks\.\d+\.norm3\.(?:weight|bias)$",
+            pattern=r"^blocks\.\d+\.norm2\.(?:weight|bias)$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="WAN22 LayerNorm affine tensors stay float32 for stability",
         ),
         TensorTypeRule(
-            pattern=r"^blocks\.\d+\.(?:self_attn|cross_attn)\.norm_[qk]\.weight$",
+            pattern=r"^blocks\.\d+\.attn[12]\.norm_[qk]\.weight$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="WAN22 q/k norm scales stay float32 for stability",
         ),
         TensorTypeRule(
-            pattern=r"^blocks\.\d+\.(?:self_attn|cross_attn)\.(?:q|k|v|o)\.bias$",
+            pattern=r"^blocks\.\d+\.attn[12]\.(?:to_[qkv]|to_out\.0)\.bias$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="WAN22 attention biases stay float32 for stability",
         ),
         TensorTypeRule(
-            pattern=r"^blocks\.\d+\.ffn\.(?:0|2)\.bias$",
+            pattern=r"^blocks\.\d+\.ffn\.net\.(?:0\.proj|2)\.bias$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="WAN22 MLP biases stay float32 for stability",
         ),
         # Mixed presets explicitly trade size for quality.
         TensorTypeRule(
-            pattern=r"^time_embedding\.2\.(?:weight|bias)$",
+            pattern=r"^condition_embedder\.time_embedder\.linear_2\.(?:weight|bias)$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_WAN22_MIXED,
             reason="WAN22 mixed preset: keep time embedder out-projection float32 for higher quality",
         ),
         TensorTypeRule(
-            pattern=r"^text_embedding\.(?:0|2)\.(?:weight|bias)$",
+            pattern=r"^condition_embedder\.text_embedder\.linear_(?:1|2)\.(?:weight|bias)$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_WAN22_MIXED,
             reason="WAN22 mixed preset: keep text embedder weights float32 for higher quality",
         ),
@@ -295,56 +299,56 @@ LTX2_QUANT_POLICY = QuantizationPolicySpec(
         TensorTypeRule(
             pattern=r"(?:^|\.)bias$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="LTX2 biases stay float32 for stability",
         ),
         TensorTypeRule(
-            pattern=r"^(?:patchify_proj|audio_patchify_proj|proj_out|audio_proj_out)\.(?:weight|bias)$",
+            pattern=r"^(?:proj_in|audio_proj_in|proj_out|audio_proj_out)\.(?:weight|bias)$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="LTX2 IO projections are quality-sensitive; keep float",
         ),
         TensorTypeRule(
             pattern=r"(?:^|\.)scale_shift_table(?:$|\.)",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="LTX2 modulation tables stay float32 for stability",
         ),
         TensorTypeRule(
-            pattern=r"(?:^|\.)adaln_single\.linear\.weight$",
+            pattern=r"(?:^|\.)time_embed\.linear\.weight$",
             ggml_type=GGMLQuantizationType.F16,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="LTX2 adaLN linear weights stay float16 for stability",
         ),
         TensorTypeRule(
-            pattern=r"(?:^|\.)audio_adaln_single\.linear\.weight$",
+            pattern=r"(?:^|\.)audio_time_embed\.linear\.weight$",
             ggml_type=GGMLQuantizationType.F16,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="LTX2 audio adaLN linear weights stay float16 for stability",
         ),
         TensorTypeRule(
-            pattern=r"(?:^|\.)av_ca_(?:video_scale_shift|audio_scale_shift|a2v_gate|v2a_gate)_adaln_single\.linear\.weight$",
+            pattern=r"(?:^|\.)av_cross_attn_(?:video_scale_shift|audio_scale_shift|video_a2v_gate|audio_v2a_gate)\.linear\.weight$",
             ggml_type=GGMLQuantizationType.F16,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="LTX2 AV cross-attn adaLN weights stay float16 for stability",
         ),
         TensorTypeRule(
-            pattern=r"(?:^|\.)q_norm\.weight$",
+            pattern=r"(?:^|\.)norm_q\.weight$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="LTX2 q_norm stays float32 for stability",
         ),
         TensorTypeRule(
-            pattern=r"(?:^|\.)k_norm\.weight$",
+            pattern=r"(?:^|\.)norm_k\.weight$",
             ggml_type=GGMLQuantizationType.F32,
-            apply_to=TensorNameTarget.DST,
+            apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="LTX2 k_norm stays float32 for stability",
         ),
@@ -463,167 +467,45 @@ GENERIC_QUANT_POLICY = QuantizationPolicySpec(id="generic")
 _LLAMA_KEY_MAPPING = KeyMappingSpec(id="llama_hf_to_gguf", build=_build_llama_mapping)
 
 
-def _plan_flux(
-    tensor_names: list[str],
-    safetensors_handle: Any,
-    requested_type: GGMLQuantizationType,
-    rules: list[CompiledTensorTypeRule],
-) -> tuple[list[Any], dict[str, str]]:
-    return _tensor_planner.plan_flux_transformer_tensors(tensor_names, safetensors_handle, requested_type, rules)
-
-
-def _plan_zimage(
-    tensor_names: list[str],
-    safetensors_handle: Any,
-    requested_type: GGMLQuantizationType,
-    rules: list[CompiledTensorTypeRule],
-) -> tuple[list[Any], dict[str, str]]:
-    return _tensor_planner.plan_zimage_transformer_tensors(tensor_names, safetensors_handle, requested_type, rules)
-
-
-def _plan_wan22(
-    tensor_names: list[str],
-    safetensors_handle: Any,
-    requested_type: GGMLQuantizationType,
-    rules: list[CompiledTensorTypeRule],
-) -> tuple[list[Any], dict[str, str]]:
-    return _tensor_planner.plan_wan22_transformer_tensors(tensor_names, safetensors_handle, requested_type, rules)
-
-
-def _plan_ltx2(
-    tensor_names: list[str],
-    safetensors_handle: Any,
-    requested_type: GGMLQuantizationType,
-    rules: list[CompiledTensorTypeRule],
-) -> tuple[list[Any], dict[str, str]]:
-    return _tensor_planner.plan_ltx2_transformer_tensors(tensor_names, safetensors_handle, requested_type, rules)
-
-
-def _plan_gemma3_tenc(
-    tensor_names: list[str],
-    safetensors_handle: Any,
-    requested_type: GGMLQuantizationType,
-    rules: list[CompiledTensorTypeRule],
-) -> tuple[list[Any], dict[str, str]]:
-    return _tensor_planner.plan_gemma3_text_encoder_tensors(tensor_names, safetensors_handle, requested_type, rules)
-
-
-_FLUX_PLANNER = PlannerSpec(
-    id="flux_transformer",
-    plan=_plan_flux,
-    normalize_metadata=_tensor_planner.normalize_flux_transformer_metadata_config,
-)
-
-_ZIMAGE_PLANNER = PlannerSpec(
-    id="zimage_transformer",
-    plan=_plan_zimage,
-    normalize_metadata=_tensor_planner.normalize_zimage_transformer_metadata_config,
-)
-
-_WAN22_PLANNER = PlannerSpec(
-    id="wan22_transformer",
-    plan=_plan_wan22,
-    normalize_metadata=_tensor_planner.normalize_wan22_transformer_metadata_config,
-)
-
-_LTX2_PLANNER = PlannerSpec(
-    id="ltx2_transformer",
-    plan=_plan_ltx2,
-    normalize_metadata=_tensor_planner.normalize_ltx2_transformer_metadata_config,
-)
-
-_GEMMA3_TENC_PLANNER = PlannerSpec(
-    id="gemma3_text_encoder",
-    plan=_plan_gemma3_tenc,
-    normalize_metadata=_tensor_planner.normalize_gemma3_text_encoder_metadata_config,
-)
-
-
 PROFILE_REGISTRY: tuple[ConverterProfileSpec, ...] = (
     ConverterProfileSpec(
-        id=ConverterProfileId.FLUX_TRANSFORMER_COMFY,
+        id=ConverterProfileId.FLUX_TRANSFORMER,
         arch=GGUFArch.FLUX,
-        layout=GGUFKeyLayout.COMFY_CODEX,
         detect=_is_flux,
         quant_policy=FLUX_QUANT_POLICY,
-        planner=_FLUX_PLANNER,
+        metadata_normalizer=_tensor_planner.normalize_flux_transformer_metadata_config,
     ),
     ConverterProfileSpec(
-        id=ConverterProfileId.FLUX_TRANSFORMER_NATIVE,
-        arch=GGUFArch.FLUX,
-        layout=GGUFKeyLayout.NATIVE_KEYS,
-        detect=_is_flux,
-        quant_policy=FLUX_QUANT_POLICY,
-        planner=_FLUX_PLANNER,
-    ),
-    ConverterProfileSpec(
-        id=ConverterProfileId.ZIMAGE_TRANSFORMER_COMFY,
+        id=ConverterProfileId.ZIMAGE_TRANSFORMER,
         arch=GGUFArch.ZIMAGE,
-        layout=GGUFKeyLayout.COMFY_CODEX,
         detect=_is_zimage,
         quant_policy=ZIMAGE_QUANT_POLICY,
-        planner=_ZIMAGE_PLANNER,
+        metadata_normalizer=_tensor_planner.normalize_zimage_transformer_metadata_config,
     ),
     ConverterProfileSpec(
-        id=ConverterProfileId.ZIMAGE_TRANSFORMER_NATIVE,
-        arch=GGUFArch.ZIMAGE,
-        layout=GGUFKeyLayout.NATIVE_KEYS,
-        detect=_is_zimage,
-        quant_policy=ZIMAGE_QUANT_POLICY,
-        planner=_ZIMAGE_PLANNER,
-    ),
-    ConverterProfileSpec(
-        id=ConverterProfileId.WAN22_TRANSFORMER_COMFY,
+        id=ConverterProfileId.WAN22_TRANSFORMER,
         arch=GGUFArch.WAN22,
-        layout=GGUFKeyLayout.COMFY_CODEX,
         detect=_is_wan22,
         quant_policy=WAN22_QUANT_POLICY,
-        planner=_WAN22_PLANNER,
+        metadata_normalizer=_tensor_planner.normalize_wan22_transformer_metadata_config,
     ),
     ConverterProfileSpec(
-        id=ConverterProfileId.WAN22_TRANSFORMER_NATIVE,
-        arch=GGUFArch.WAN22,
-        layout=GGUFKeyLayout.NATIVE_KEYS,
-        detect=_is_wan22,
-        quant_policy=WAN22_QUANT_POLICY,
-        planner=_WAN22_PLANNER,
-    ),
-    ConverterProfileSpec(
-        id=ConverterProfileId.LTX2_TRANSFORMER_COMFY,
+        id=ConverterProfileId.LTX2_TRANSFORMER,
         arch=GGUFArch.LTX2,
-        layout=GGUFKeyLayout.COMFY_CODEX,
         detect=_is_ltx2,
         quant_policy=LTX2_QUANT_POLICY,
-        planner=_LTX2_PLANNER,
+        metadata_normalizer=_tensor_planner.normalize_ltx2_transformer_metadata_config,
     ),
     ConverterProfileSpec(
-        id=ConverterProfileId.LTX2_TRANSFORMER_NATIVE,
-        arch=GGUFArch.LTX2,
-        layout=GGUFKeyLayout.NATIVE_KEYS,
-        detect=_is_ltx2,
-        quant_policy=LTX2_QUANT_POLICY,
-        planner=_LTX2_PLANNER,
-    ),
-    ConverterProfileSpec(
-        id=ConverterProfileId.GEMMA3_TENC_COMFY,
+        id=ConverterProfileId.GEMMA3_TENC,
         arch=GGUFArch.GEMMA3,
-        layout=GGUFKeyLayout.COMFY_CODEX,
         detect=_is_gemma3_tenc,
         quant_policy=LLAMA_QUANT_POLICY,
-        planner=_GEMMA3_TENC_PLANNER,
-    ),
-    ConverterProfileSpec(
-        id=ConverterProfileId.GEMMA3_TENC_NATIVE,
-        arch=GGUFArch.GEMMA3,
-        layout=GGUFKeyLayout.NATIVE_KEYS,
-        detect=_is_gemma3_tenc,
-        quant_policy=LLAMA_QUANT_POLICY,
-        planner=_GEMMA3_TENC_PLANNER,
+        metadata_normalizer=_tensor_planner.normalize_gemma3_text_encoder_metadata_config,
     ),
     ConverterProfileSpec(
         id=ConverterProfileId.LLAMA_HF_TO_GGUF,
         arch=GGUFArch.LLAMA,
-        layout=GGUFKeyLayout.LLAMA_GGUF,
         detect=lambda cfg: not _is_flux(cfg)
         and not _is_zimage(cfg)
         and not _is_wan22(cfg)
@@ -635,18 +517,14 @@ PROFILE_REGISTRY: tuple[ConverterProfileSpec, ...] = (
 )
 
 
-def resolve_profile(config_json: Mapping[str, Any], *, comfy_layout: bool) -> ConverterProfileSpec:
-    if _is_flux(config_json):
-        return PROFILE_REGISTRY[0] if comfy_layout else PROFILE_REGISTRY[1]
-    if _is_zimage(config_json):
-        return PROFILE_REGISTRY[2] if comfy_layout else PROFILE_REGISTRY[3]
-    if _is_wan22(config_json):
-        return PROFILE_REGISTRY[4] if comfy_layout else PROFILE_REGISTRY[5]
-    if _is_ltx2(config_json):
-        return PROFILE_REGISTRY[6] if comfy_layout else PROFILE_REGISTRY[7]
-    if _is_gemma3_tenc(config_json):
-        return PROFILE_REGISTRY[8] if comfy_layout else PROFILE_REGISTRY[9]
-    return PROFILE_REGISTRY[10]
+_PROFILES_BY_ID: dict[ConverterProfileId, ConverterProfileSpec] = {profile.id: profile for profile in PROFILE_REGISTRY}
+
+
+def resolve_profile(config_json: Mapping[str, Any]) -> ConverterProfileSpec:
+    for profile in PROFILE_REGISTRY:
+        if profile.detect(config_json):
+            return profile
+    raise ValueError("Unsupported GGUF converter config: no registered profile matched the provided config.json")
 
 
 def profile_by_id(profile_id: str) -> ConverterProfileSpec:
@@ -655,11 +533,10 @@ def profile_by_id(profile_id: str) -> ConverterProfileSpec:
     except ValueError as exc:
         raise ValueError(f"Unknown GGUF converter profile_id: {profile_id!r}") from exc
 
-    for profile in PROFILE_REGISTRY:
-        if profile.id is pid:
-            return profile
-
-    raise ValueError(f"GGUF converter profile_id not registered: {profile_id!r}")
+    profile = _PROFILES_BY_ID.get(pid)
+    if profile is None:
+        raise ValueError(f"GGUF converter profile_id not registered: {profile_id!r}")
+    return profile
 
 
 __all__ = ["PROFILE_REGISTRY", "profile_by_id", "resolve_profile"]

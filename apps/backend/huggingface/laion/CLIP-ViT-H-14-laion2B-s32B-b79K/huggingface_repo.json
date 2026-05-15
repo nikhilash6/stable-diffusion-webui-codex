@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "purpose": "Upstream Hugging Face provenance for a locally repacked VISIONONLY CLIP image encoder folder.",
+  "created_by": "stable-diffusion-webui-codex",
+  "created_at_utc": "2026-03-28T00:00:00Z",
+  "recommended_local_folder_name": "ViT-H-VISIONONLY",
+  "upstream": {
+    "provider": "huggingface",
+    "repo_type": "model",
+    "repo_id": "laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
+    "repo_url": "https://huggingface.co/laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
+    "tree_url": "https://huggingface.co/laion/CLIP-ViT-H-14-laion2B-s32B-b79K/tree/main",
+    "api_url": "https://huggingface.co/api/models/laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
+    "revision": "main",
+    "sha": "1c2b8495b28150b8a4922ee1c8edee224c284c0c",
+    "last_modified": "2025-01-22T04:38:44.000Z",
+    "license": "mit",
+    "library_name": "open_clip",
+    "pipeline_tag": "zero-shot-image-classification"
+  },
+  "local_repack": {
+    "folder_name": "ViT-H-VISIONONLY",
+    "intended_contents": [
+      "config.json",
+      "model.safetensors"
+    ],
+    "preferred_runtime_weight_file": "model.safetensors",
+    "note": "Provenance sidecar only. Current Codex IP-Adapter runtime loads the selected encoder weight file directly and does not read this JSON."
+  },
+  "upstream_files": [
+    ".gitattributes",
+    "README.md",
+    "config.json",
+    "merges.txt",
+    "model.safetensors",
+    "open_clip_config.json",
+    "open_clip_model.safetensors",
+    "open_clip_pytorch_model.bin",
+    "preprocessor_config.json",
+    "pytorch_model.bin",
+    "special_tokens_map.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "vocab.json"
+  ]
+}

@@ -34,6 +34,7 @@ Symbols (top-level; keep in sync; no ghosts):
 import logging
 import math
 from typing import Dict, List, Optional
+from apps.backend.runtime.logging import emit_backend_message, get_backend_logger
 
 import numpy as np
 import torch
@@ -44,7 +45,7 @@ from apps.backend.runtime.attention import attention_function as dispatch_attent
 from apps.backend.runtime.memory.config import AttentionBackend
 from apps.backend.runtime.misc.autocast import autocast_disabled
 
-_log = logging.getLogger("backend.runtime.sd.mmditx")
+_log = get_backend_logger("backend.runtime.sd.mmditx")
 
 def attention(q, k, v, heads, mask=None):
     """Convenience wrapper around a basic attention operation"""
@@ -824,16 +825,31 @@ class SD3Transformer2DModel(nn.Module):
     ):
         super().__init__()
         if verbose:
-            _log.debug(
-                "mmdit initializing with: input_size=%s, patch_size=%s, in_channels=%s, depth=%s, "
-                "mlp_ratio=%s, learn_sigma=%s, adm_in_channels=%s, context_embedder_config=%s, "
-                "register_length=%s, rmsnorm=%s, scale_mod_only=%s, swiglu=%s, out_channels=%s, "
-                "pos_embed_scaling_factor=%s, pos_embed_offset=%s, pos_embed_max_size=%s, "
-                "num_patches=%s, qk_norm=%s, qkv_bias=%s, dtype=%s, device=%s",
-                input_size, patch_size, in_channels, depth, mlp_ratio, learn_sigma,
-                adm_in_channels, context_embedder_config, register_length, rmsnorm,
-                scale_mod_only, swiglu, out_channels, pos_embed_scaling_factor,
-                pos_embed_offset, pos_embed_max_size, num_patches, qk_norm, qkv_bias, dtype, device
+            emit_backend_message(
+                "mmdit initializing",
+                logger=_log.name,
+                level=logging.DEBUG,
+                input_size=input_size,
+                patch_size=patch_size,
+                in_channels=in_channels,
+                depth=depth,
+                mlp_ratio=mlp_ratio,
+                learn_sigma=learn_sigma,
+                adm_in_channels=adm_in_channels,
+                context_embedder_config=context_embedder_config,
+                register_length=register_length,
+                rmsnorm=rmsnorm,
+                scale_mod_only=scale_mod_only,
+                swiglu=swiglu,
+                out_channels=out_channels,
+                pos_embed_scaling_factor=pos_embed_scaling_factor,
+                pos_embed_offset=pos_embed_offset,
+                pos_embed_max_size=pos_embed_max_size,
+                num_patches=num_patches,
+                qk_norm=qk_norm,
+                qkv_bias=qkv_bias,
+                dtype=dtype,
+                device=device,
             )
         self.dtype = dtype
         self.learn_sigma = learn_sigma

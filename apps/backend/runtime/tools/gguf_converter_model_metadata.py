@@ -8,14 +8,14 @@ Required Notice: see NOTICE
 
 Purpose: Vendored model metadata for the GGUF converter UI.
 Scans the local Hugging Face mirror under `apps/backend/huggingface/**` and exposes “model metadata” entries (org/repo)
-with supported conversion components (Flux/ZImage/WAN22/LTX2 denoisers).
+with supported conversion components (Flux/ZImage/WAN22/LTX2 denoisers plus Gemma3 text encoders).
 
 Symbols (top-level; keep in sync; no ghosts):
-- `GGUFConverterModelComponent` (dataclass): Convertible component entry (config dir + profile hints).
+- `GGUFConverterModelComponent` (dataclass): Convertible component entry (config dir + one truthful profile id).
 - `GGUFConverterModelMetadata` (dataclass): Model entry (org/repo + components).
 - `_iter_candidate_config_dirs` (function): Iterates candidate config directories within a repo (root + subdirs).
 - `_has_weights_index` (function): Returns True when a config dir contains weights files or a sharded weights index.
-- `_classify_config` (function): Classifies a diffusers config.json into a converter component kind + profile hints.
+- `_classify_config` (function): Classifies a config.json into a converter component kind + profile id.
 - `list_vendored_gguf_converter_model_metadata` (function): Lists supported model metadata from the vendored HF mirror.
 """
 
@@ -37,8 +37,6 @@ class GGUFConverterModelComponent:
     config_dir: str
     kind: str
     profile_id: str | None = None
-    profile_id_comfy: str | None = None
-    profile_id_native: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,42 +73,23 @@ def _has_weights_index(dir_path: str) -> bool:
     return False
 
 
-def _classify_config(cfg: dict[str, Any]) -> tuple[str, dict[str, str]]:
+def _classify_config(cfg: dict[str, Any]) -> tuple[str, str | None]:
     class_name = str(cfg.get("_class_name") or "").strip()
+    model_type = str(cfg.get("model_type") or "").strip()
+    text_cfg = cfg.get("text_config")
+    text_model_type = str(text_cfg.get("model_type") or "").strip() if isinstance(text_cfg, dict) else ""
     if class_name == "FluxTransformer2DModel":
-        return (
-            "flux_transformer",
-            {
-                "profile_id_comfy": "flux_transformer_comfy",
-                "profile_id_native": "flux_transformer_native",
-            },
-        )
+        return ("flux_transformer", "flux_transformer")
     if class_name == "ZImageTransformer2DModel":
-        return (
-            "zimage_transformer",
-            {
-                "profile_id_comfy": "zimage_transformer_comfy",
-                "profile_id_native": "zimage_transformer_native",
-            },
-        )
+        return ("zimage_transformer", "zimage_transformer")
     if class_name in {"WanTransformer3DModel", "WanModel"}:
-        return (
-            "wan22_transformer",
-            {
-                "profile_id_comfy": "wan22_transformer_comfy",
-                "profile_id_native": "wan22_transformer_native",
-            },
-        )
+        return ("wan22_transformer", "wan22_transformer")
     if class_name == "LTX2VideoTransformer3DModel":
-        return (
-            "ltx2_transformer",
-            {
-                "profile_id_comfy": "ltx2_transformer_comfy",
-                "profile_id_native": "ltx2_transformer_native",
-            },
-        )
+        return ("ltx2_transformer", "ltx2_transformer")
+    if model_type == "gemma3" or text_model_type == "gemma3_text":
+        return ("gemma3_tenc", "gemma3_tenc")
 
-    return ("unknown", {})
+    return ("unknown", None)
 
 
 def list_vendored_gguf_converter_model_metadata(*, codex_root: Path) -> list[GGUFConverterModelMetadata]:
@@ -140,7 +119,7 @@ def list_vendored_gguf_converter_model_metadata(*, codex_root: Path) -> list[GGU
             except Exception:
                 continue
 
-            kind, profile_hints = _classify_config(cfg)
+            kind, profile_id = _classify_config(cfg)
             if kind == "unknown":
                 continue
 
@@ -148,6 +127,8 @@ def list_vendored_gguf_converter_model_metadata(*, codex_root: Path) -> list[GGU
             component_label = subdir or "root"
             if kind in {"flux_transformer", "zimage_transformer", "ltx2_transformer"}:
                 component_label = "denoiser"
+            if kind == "gemma3_tenc":
+                component_label = "text_encoder"
             if kind == "wan22_transformer" and wan_two_stage:
                 if component_id in {"transformer", "high_noise_model"}:
                     component_label = "high_noise"
@@ -159,16 +140,20 @@ def list_vendored_gguf_converter_model_metadata(*, codex_root: Path) -> list[GGU
                     label=component_label,
                     config_dir=str(Path(config_dir).resolve()),
                     kind=kind,
-                    profile_id=profile_hints.get("profile_id"),
-                    profile_id_comfy=profile_hints.get("profile_id_comfy"),
-                    profile_id_native=profile_hints.get("profile_id_native"),
+                    profile_id=profile_id,
                 )
             )
 
         if not components:
             continue
 
-        kind_priority = {"flux_transformer": 0, "zimage_transformer": 0, "ltx2_transformer": 0}
+        kind_priority = {
+            "flux_transformer": 0,
+            "zimage_transformer": 0,
+            "wan22_transformer": 0,
+            "ltx2_transformer": 0,
+            "gemma3_tenc": 1,
+        }
         components.sort(key=lambda c: (kind_priority.get(c.kind, 9), c.label.lower()))
         model_id = f"{org}/{repo}"
         models.append(

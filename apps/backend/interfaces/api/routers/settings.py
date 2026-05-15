@@ -14,6 +14,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from pathlib import Path
@@ -43,7 +44,7 @@ def build_router(
                 try:
                     _settings_schema_cache = schema_hardcoded()
                 except Exception as exc:  # pragma: no cover
-                    logging.getLogger("backend.api").warning("settings hardcoded schema failed: %s", exc)
+                    get_backend_logger("backend.api").warning("settings hardcoded schema failed: %s", exc)
                     _settings_schema_cache = None
             if _settings_schema_cache is None:
                 schema_path = str(codex_root / "apps" / "backend" / "interfaces" / "schemas" / "settings_schema.json")

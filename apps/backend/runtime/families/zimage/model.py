@@ -27,6 +27,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 # Key dimensions (from `z_image_turbo_bf16.safetensors`):
 # - hidden_dim = 3840
@@ -40,6 +41,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Optional, Tuple, Dict
 
 import torch
@@ -51,7 +53,7 @@ from apps.backend.runtime.memory.config import AttentionBackend
 from apps.backend.runtime.misc.autocast import autocast_disabled
 from .debug import env_flag, env_int, tensor_stats
 
-logger = logging.getLogger("backend.runtime.zimage.model")
+logger = get_backend_logger("backend.runtime.zimage.model")
 
 _DEFAULT_ZIMAGE_AXES_DIMS: tuple[int, int, int] = (32, 48, 48)
 _SEQ_MULTI_OF = 32
@@ -736,6 +738,11 @@ class ZImageTransformer2DModel(nn.Module):
                 out_bias=out_bias,
             )
         self.config = config
+        self.codex_config = SimpleNamespace(
+            in_channels=int(config.latent_channels),
+            context_dim=int(config.context_dim),
+            adm_in_channels=None,
+        )
         self.time_scale = float(getattr(config, "t_scale", float(time_scale)))
         
         self.patch_size = config.patch_size
@@ -1090,9 +1097,9 @@ class ZImageTransformer2DModel(nn.Module):
         )
         freqs = self.rope(pos_ids)
         if debug_layers and debug_step < debug_limit:
-            tensor_stats(logger, "rope.pos_ids", pos_ids)
+            tensor_stats(logger.name, "rope.pos_ids", pos_ids)
             # freqs is large but bounded; stats help spot dtype/device mismatches.
-            tensor_stats(logger, "rope.freqs", freqs)
+            tensor_stats(logger.name, "rope.freqs", freqs)
         
         # Diffusers order: refine image first, then caption. Token order in unified stream:
         # image tokens first, caption tokens after.
@@ -1102,19 +1109,19 @@ class ZImageTransformer2DModel(nn.Module):
         for layer in self.noise_refiner:
             img_patches = layer(img_patches, attn_mask_img, freqs[:, : int(image_total_len)], t_emb)
         if debug_layers and debug_step < debug_limit:
-            tensor_stats(logger, "after.noise_refiner", img_patches)
+            tensor_stats(logger.name, "after.noise_refiner", img_patches)
 
         for layer in self.context_refiner:
             cap_start = int(image_total_len)
             cap_end = cap_start + int(cap_total_len)
             cap_feats = layer(cap_feats, attn_mask_cap, freqs[:, cap_start:cap_end])
         if debug_layers and debug_step < debug_limit:
-            tensor_stats(logger, "after.context_refiner", cap_feats)
+            tensor_stats(logger.name, "after.context_refiner", cap_feats)
         
         # Concatenate
         full_seq = torch.cat([img_patches, cap_feats], dim=1)
         if debug_layers and debug_step < debug_limit:
-            tensor_stats(logger, "full_seq", full_seq)
+            tensor_stats(logger.name, "full_seq", full_seq)
         
         # Main transformer
         full_mask = torch.ones((B, int(full_seq.shape[1])), device=x.device, dtype=torch.bool)
@@ -1122,7 +1129,7 @@ class ZImageTransformer2DModel(nn.Module):
         for idx, layer in enumerate(self.layers):
             full_seq = layer(full_seq, full_mask, freqs, t_emb)
             if debug_layers and debug_step < debug_limit and ((idx == 0) or ((idx + 1) % layer_every == 0) or ((idx + 1) == len(self.layers))):
-                tensor_stats(logger, f"layer.{idx+1:02d}.full_seq", full_seq)
+                tensor_stats(logger.name, f"layer.{idx+1:02d}.full_seq", full_seq)
         
         # Final projection
         output = self.final_layer(full_seq, t_emb)

@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Hugging Face → GGUF key mapping helpers for the GGUF converter.
-Provides deterministic tensor-name remapping for known architectures (layer-indexed mappings).
+Provides deterministic tensor-name translation for known architectures (layer-indexed mappings).
 
 Symbols (top-level; keep in sync; no ghosts):
 - `build_key_mapping` (function): Build the full HuggingFace → GGUF key mapping for a model given number of layers.

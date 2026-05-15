@@ -7,15 +7,16 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Load and normalize the `apps/paths.json` backend paths config.
-Provides cached accessors for model asset roots (checkpoints/text encoders/VAEs/LoRAs) and expands repo-relative paths into absolute paths.
-Also provides roots for global modules such as upscalers.
-Known per-family model keys include SD1.5, SDXL, Flux, Anima, WAN22, and ZImage roots.
+Provides cached accessors for model asset roots (checkpoints/text encoders/VAEs/LoRAs/connectors/IP-Adapter assets) and expands repo-relative paths into absolute paths.
+Also provides roots for global modules such as upscalers and SUPIR models.
+Known provisioned keys include SD1.5, SDXL, Flux.1, Flux.2, Anima, WAN22, LTX2, Netflix VOID, ZImage, dedicated IP-Adapter roots, and the SDXL accessory roots `sdxl_fooocus_inpaint` / `sdxl_brushnet`.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_MODEL_DIR_KEYS` (constant): Keys in `apps/paths.json` whose missing repo-relative directories are created best-effort.
 - `_repo_root` (function): Returns repo root (delegates to `get_repo_root()`).
 - `_paths_json_path` (function): Returns the absolute path to `apps/paths.json` under the repo root.
 - `_load_paths_config` (function): Loads and caches the `paths.json` mapping (and triggers best-effort directory provisioning).
+- `invalidate_paths_cache` (function): Clears the process-local `paths.json` cache so the next read reloads from disk.
 - `_resolve_repo_relative_path` (function): Resolves and validates repo-relative entries with root-containment checks.
 - `_ensure_model_dirs` (function): Creates missing model directories for known keys when entries are repo-relative.
 - `get_paths_config` (function): Returns a shallow copy of the raw `paths.json` mapping.
@@ -23,6 +24,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import json
 import os
@@ -34,7 +36,7 @@ from .repo_root import get_repo_root
 
 _PATHS_CACHE: Dict[str, List[str]] | None = None
 _PATHS_MTIME: float | None = None
-_LOG = logging.getLogger("backend.infra.config.paths")
+_LOG = get_backend_logger("backend.infra.config.paths")
 
 
 _MODEL_DIR_KEYS: tuple[str, ...] = (
@@ -48,11 +50,18 @@ _MODEL_DIR_KEYS: tuple[str, ...] = (
     "sdxl_tenc",
     "sdxl_vae",
     "sdxl_loras",
+    "sdxl_fooocus_inpaint",
+    "sdxl_brushnet",
     # Flux
     "flux1_ckpt",
     "flux1_tenc",
     "flux1_vae",
     "flux1_loras",
+    # Flux.2
+    "flux2_ckpt",
+    "flux2_tenc",
+    "flux2_vae",
+    "flux2_loras",
     # Anima
     "anima_ckpt",
     "anima_tenc",
@@ -63,11 +72,23 @@ _MODEL_DIR_KEYS: tuple[str, ...] = (
     "wan22_tenc",
     "wan22_vae",
     "wan22_loras",
+    # LTX2
+    "ltx2_ckpt",
+    "ltx2_tenc",
+    "ltx2_vae",
+    "ltx2_connectors",
+    "ltx2_loras",
+    # Netflix VOID
+    "netflix_void_ckpt",
+    "netflix_void_base",
     # Z Image
     "zimage_ckpt",
     "zimage_tenc",
     "zimage_vae",
     "zimage_loras",
+    # IP-Adapter
+    "ip_adapter_models",
+    "ip_adapter_image_encoders",
     # SUPIR
     "supir_models",
     # Upscalers (standalone + hires-fix)
@@ -166,6 +187,13 @@ def _load_paths_config() -> Dict[str, List[str]]:
     return cfg
 
 
+def invalidate_paths_cache() -> None:
+    global _PATHS_CACHE, _PATHS_MTIME
+    _PATHS_CACHE = None
+    _PATHS_MTIME = None
+    _LOG.debug("paths config cache invalidated")
+
+
 def _ensure_model_dirs(cfg: Dict[str, List[str]]) -> None:
     """Create default model directories for known keys when missing.
 
@@ -186,6 +214,10 @@ def _ensure_model_dirs(cfg: Dict[str, List[str]]) -> None:
             if os.path.isabs(v):
                 continue
             path = _resolve_repo_relative_path(root=root, key=key, entry=v)
+            if key in {"ip_adapter_models", "ip_adapter_image_encoders"} and v.lower().endswith(
+                (".safetensors", ".bin", ".pt", ".pth")
+            ):
+                path = path.parent
             try:
                 path.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
@@ -228,4 +260,4 @@ def get_paths_for(key: str) -> List[str]:
     return out
 
 
-__all__ = ["get_paths_config", "get_paths_for"]
+__all__ = ["get_paths_config", "get_paths_for", "invalidate_paths_cache"]

@@ -53,6 +53,7 @@ apps/interface/dist/
 apps/interface/.vite/
 apps/interface/.eslintcache
 apps/interface/.pnpm-debug.log
+apps/interface/.reports/css-contract-report.json
 
 # Local runtime state (do not commit)
 apps/interface/tabs.json

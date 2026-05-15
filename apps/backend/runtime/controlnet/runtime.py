@@ -16,6 +16,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 from typing import Iterable, List, Optional
@@ -24,7 +25,7 @@ import torch
 
 from .config import ControlGraph, ControlNode
 
-logger = logging.getLogger("backend.runtime.controlnet")
+logger = get_backend_logger("backend.runtime.controlnet")
 
 
 class ControlComposite:

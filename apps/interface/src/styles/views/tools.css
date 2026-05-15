@@ -96,11 +96,6 @@
     word-break: break-word;
   }
 
-  .cdx-tools .cdx-tools-overrides {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-    font-size: 0.85rem;
-  }
-
   .cdx-tools .cdx-tools-pathbar {
     display: flex;
     align-items: center;

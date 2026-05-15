@@ -100,10 +100,6 @@
     line-height: 1.2;
     color: rgba(255, 255, 255, 0.9);
   }
-  .image-zoom-guide-edit-row {
-    display: grid;
-    gap: 0.25rem;
-  }
   .image-zoom-guide-size-grid {
     display: grid;
     grid-template-columns: auto 1fr;
@@ -129,5 +125,66 @@
     text-align: right;
     font-weight: 600;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  }
+
+  .video-zoom-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: flex;
+    background: rgba(0, 0, 0, 0.85);
+  }
+  .video-zoom-main {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    padding: 1.5rem;
+    box-sizing: border-box;
+  }
+  .video-zoom-canvas {
+    position: relative;
+    display: inline-block;
+    transform-origin: center center;
+  }
+  .video-zoom-overlay .video-zoom-media {
+    display: block;
+    max-width: none;
+    max-height: none;
+    cursor: auto;
+  }
+  .video-zoom-overlay .video-zoom-media:active {
+    cursor: auto;
+  }
+  .video-zoom-pan-zone {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: transparent;
+    touch-action: none;
+  }
+  .video-zoom-pan-zone--active {
+    pointer-events: auto;
+    cursor: grab;
+  }
+  .video-zoom-pan-zone--active:active {
+    cursor: grabbing;
+  }
+  .video-zoom-toolbar {
+    width: 11rem;
+    padding: 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    align-items: stretch;
+    justify-content: center;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .video-zoom-toolbar .toolbar-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
   }
 }

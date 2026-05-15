@@ -9,8 +9,10 @@ Required Notice: see NOTICE
 Purpose: Per-model-family runtime specification (capabilities + latent/normalization defaults).
 Defines UI-facing capability flags and runtime defaults per `ModelFamily` (latent channels, prediction kind, normalization hints),
 acting as the single source of truth for both backend assembly and frontend conditional UI (flow-shift is left unset when variant-specific).
-Includes Anima (`ModelFamily.ANIMA`) as a flow-based image family with fixed flow shift defaults (ComfyUI parity).
-Includes explicit WAN22 family variants (`WAN22_5B`/`WAN22_14B`/`WAN22_ANIMATE`) with independent defaults.
+Includes Anima (`ModelFamily.ANIMA`) as a flow-based image family with fixed flow shift defaults, FLUX.2 as a
+32-channel flow family whose scheduler shift remains dynamic/variant-aware (`flow_shift=None` here; runtime owns the truthful bridge),
+explicit WAN22 family variants (`WAN22_5B`/`WAN22_14B`/`WAN22_ANIMATE`) with independent defaults, and the
+CogVideoX-Fun-backed Netflix VOID vid2vid scaffold (`ModelFamily.NETFLIX_VOID`).
 
 Symbols (top-level; keep in sync; no ghosts):
 - `FamilyCapabilities` (dataclass): UI-facing capability flags (what controls should be shown/hidden; supported/excluded samplers/schedulers).
@@ -102,6 +104,27 @@ CAPABILITIES_FLOW_WITH_CFG = FamilyCapabilities(
     supports_negative_prompt=True,
     supports_cfg=True,
     shows_clip_skip=False,  # Uses T5
+)
+
+CAPABILITIES_NETFLIX_VOID = FamilyCapabilities(
+    supports_negative_prompt=True,
+    supports_cfg=True,
+    shows_clip_skip=False,
+    supported_samplers=("ddim",),
+    supported_schedulers=("ddim",),
+    resolution_step=8,
+)
+
+# Family-level FLUX.2 capabilities cover the supported Klein 4B/base-4B slice as a whole.
+# Distilled-vs-base guidance and negative-prompt behavior are resolved from the selected checkpoint at runtime/UI seams.
+CAPABILITIES_FLUX2 = FamilyCapabilities(
+    supports_negative_prompt=True,
+    supports_cfg=True,
+    shows_clip_skip=False,
+    shows_guidance_scale=True,
+    supported_samplers=("euler", "dpm++ 2m"),
+    supported_schedulers=("simple",),
+    resolution_step=16,
 )
 
 CAPABILITIES_TURBO = FamilyCapabilities(
@@ -337,6 +360,31 @@ FAMILY_RUNTIME_SPECS: Dict[ModelFamily, FamilyRuntimeSpec] = {
         patch_size=2,
         capabilities=CAPABILITIES_KONTEXT,
     ),
+    ModelFamily.FLUX2: FamilyRuntimeSpec(
+        family=ModelFamily.FLUX2,
+        latent_channels=32,
+        latent_scale_factor=8,
+        # AutoencoderKLFlux2 latent normalization is batch-norm based over patchified latents, so scalar process_in/out
+        # must stay identity. FLUX.2 encode/decode overrides handle the truthful latent contract explicitly.
+        vae_scaling_factor=1.0,
+        vae_shift_factor=0.0,
+        context_dim=7680,
+        uses_pooled_output=False,
+        uses_guidance_embed=False,
+        default_cfg=4.0,
+        prediction=PredictionKind.FLOW,
+        default_steps=20,
+        # FLUX.2 scheduler config uses dynamic shifting (base/max shift + image seq len); runtime computes the truthful bridge.
+        flow_shift=None,
+        scheduler_default="simple",
+        clip_skip_default=1,
+        uses_t5=False,
+        is_xl_variant=True,
+        preferred_width=1024,
+        preferred_height=1024,
+        patch_size=2,
+        capabilities=CAPABILITIES_FLUX2,
+    ),
     ModelFamily.CHROMA: FamilyRuntimeSpec(
         family=ModelFamily.CHROMA,
         latent_channels=16,
@@ -432,6 +480,26 @@ FAMILY_RUNTIME_SPECS: Dict[ModelFamily, FamilyRuntimeSpec] = {
         uses_t5=True,
         capabilities=CAPABILITIES_FLOW_WITH_CFG,
     ),
+    ModelFamily.NETFLIX_VOID: FamilyRuntimeSpec(
+        family=ModelFamily.NETFLIX_VOID,
+        latent_channels=16,
+        latent_scale_factor=8,
+        vae_scaling_factor=1.15258426,
+        vae_shift_factor=0.0,
+        context_dim=4096,
+        uses_pooled_output=False,
+        uses_guidance_embed=False,
+        default_cfg=1.0,
+        prediction=PredictionKind.EPSILON,
+        default_steps=30,
+        scheduler_default="ddim",
+        t5_min_length=226,
+        uses_t5=True,
+        preferred_width=672,
+        preferred_height=384,
+        patch_size=2,
+        capabilities=CAPABILITIES_NETFLIX_VOID,
+    ),
     ModelFamily.ZIMAGE: FamilyRuntimeSpec(
         family=ModelFamily.ZIMAGE,
         latent_channels=16,
@@ -457,7 +525,7 @@ FAMILY_RUNTIME_SPECS: Dict[ModelFamily, FamilyRuntimeSpec] = {
         family=ModelFamily.ANIMA,
         latent_channels=16,
         latent_scale_factor=8,
-        # Anima uses ComfyUI WanVAE-style weights (`qwen_image_vae.safetensors`; 3D conv) in reference flows.
+        # Anima uses the WanVAE-style 3D-conv image VAE weights (`qwen_image_vae.safetensors`) in its reference asset bundle.
         vae_scaling_factor=1.0,
         vae_shift_factor=0.0,
         context_dim=1024,  # Qwen3 0.6B hidden size
@@ -521,6 +589,7 @@ __all__ = [
     "CAPABILITIES_XL",
     "CAPABILITIES_FLOW_NO_CFG",
     "CAPABILITIES_FLOW_WITH_CFG",
+    "CAPABILITIES_FLUX2",
     "CAPABILITIES_TURBO",
     "FamilyRuntimeSpec",
     "FAMILY_RUNTIME_SPECS",

@@ -24,6 +24,7 @@ from torch import nn
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 
+from apps.backend.runtime.logging import get_backend_logger
 from apps.backend.runtime.sampling.block_progress import (
     BLOCK_PROGRESS_INDEX_KEY,
     BLOCK_PROGRESS_TOTAL_KEY,
@@ -392,8 +393,7 @@ class UNet2DConditionModel(nn.Module, ConfigMixin):
             )
         # Optional debug of context feature dim
         try:
-            from logging import getLogger
-            _logger = getLogger("backend.runtime.unet")
+            _logger = get_backend_logger("backend.runtime.unet")
             if _logger.isEnabledFor(10):  # DEBUG
                 _cd = getattr(self, 'codex_config', None)
                 _ctx = getattr(_cd, 'context_dim', None) if _cd is not None else None

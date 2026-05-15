@@ -57,12 +57,12 @@ def maybe_decode_for_hr(
     hires_upscaler_id: str | None = None,
 ) -> torch.Tensor | None:
     """Decode samples to RGB only when hires preparation needs pixel-space input."""
-    if not getattr(processing, "enable_hr", False):
+    hires_cfg = getattr(processing, "hires", None)
+    if not bool(getattr(hires_cfg, "enabled", False)):
         return None
 
     upscaler_id = hires_upscaler_id
     if not isinstance(upscaler_id, str) or not upscaler_id.strip():
-        hires_cfg = getattr(processing, "hires", None)
         candidate = getattr(hires_cfg, "upscaler", None) if hires_cfg is not None else None
         upscaler_id = str(candidate).strip() if isinstance(candidate, str) else ""
 

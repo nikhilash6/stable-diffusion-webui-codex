@@ -6,13 +6,13 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Key remapping helpers for llama.cpp-style GGUF tensor names.
+Purpose: Keyspace resolver helpers for llama.cpp-style GGUF tensor names.
 Provides strict, fail-loud mapping from common llama.cpp GGUF tensor keys (e.g. `token_embd.weight`, `blk.N.attn_q.weight`)
-into HuggingFace/Codex-native parameter names used by runtime modules.
+into HuggingFace/Codex-native parameter names used by runtime modules without any generic source-key rewrite seam.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `QWEN3_LLAMA_GGUF_LAYER_SUFFIX_TO_HF_PREFIX` (constant): Qwen3 per-layer GGUF suffix → HF prefix (without `.weight`/`.bias`).
-- `remap_llama_gguf_text_model_state_dict` (function): Remaps a llama.cpp GGUF-ish state_dict to HF keys (or no-ops when already HF).
+- `resolve_llama_gguf_text_model_keyspace` (function): Resolves llama.cpp GGUF-ish state_dict keys to canonical HF keys.
 """
 
 from __future__ import annotations
@@ -27,8 +27,9 @@ from apps.backend.runtime.state_dict.key_mapping import (
     KeyStyle,
     KeyStyleDetector,
     KeyStyleSpec,
+    ResolvedKeyspace,
     SentinelKind,
-    remap_state_dict_view,
+    resolve_state_dict_keyspace,
 )
 
 _T = TypeVar("_T")
@@ -80,20 +81,17 @@ _DETECTOR = KeyStyleDetector(
 )
 
 
-def remap_llama_gguf_text_model_state_dict(
+def resolve_llama_gguf_text_model_keyspace(
     state_dict: MutableMapping[str, _T],
     *,
     num_layers: int,
     layer_suffix_to_hf_prefix: Mapping[str, str],
-) -> tuple[KeyStyle, MutableMapping[str, _T]]:
-    """Return a view that remaps llama.cpp GGUF tensor keys into HF-style keys.
+) -> ResolvedKeyspace[_T]:
+    """Resolve llama.cpp GGUF tensor keys into HF-style keys.
 
     - If the input already uses HF keys, this is a no-op.
     - If the input looks like llama.cpp GGUF keys, this is strict and fails loud on unknown keys.
     """
-
-    def _normalize(key: str) -> str:
-        return str(key)
 
     def _map_llama_gguf(key: str) -> str:
         direct = _DIRECT_TO_HF.get(key)
@@ -102,31 +100,38 @@ def remap_llama_gguf_text_model_state_dict(
 
         m = _RX_LAYER_PARAM.match(key)
         if not m:
-            raise KeyMappingError(f"llama.cpp GGUF remap: unsupported key={key!r}")
+            raise KeyMappingError(f"llama.cpp GGUF resolver: unsupported key={key!r}")
 
         idx = int(m.group("idx"))
         if idx < 0 or idx >= int(num_layers):
             raise KeyMappingError(
-                f"llama.cpp GGUF remap: layer index out of range (idx={idx}, num_layers={num_layers}) for key={key!r}"
+                f"llama.cpp GGUF resolver: layer index out of range (idx={idx}, num_layers={num_layers}) for key={key!r}"
             )
 
         suffix = m.group("suffix")
         prefix = layer_suffix_to_hf_prefix.get(suffix)
         if prefix is None:
-            raise KeyMappingError(f"llama.cpp GGUF remap: unknown per-layer key suffix={suffix!r} for key={key!r}")
+            raise KeyMappingError(
+                f"llama.cpp GGUF resolver: unknown per-layer key suffix={suffix!r} for key={key!r}"
+            )
 
         param = m.group("param")
         return f"model.layers.{idx}.{prefix}.{param}"
 
-    mappers = {
-        KeyStyle.HF: lambda k: k,
-        KeyStyle.LLAMA_GGUF: _map_llama_gguf,
-    }
-
-    return remap_state_dict_view(
+    resolved = resolve_state_dict_keyspace(
         state_dict,
         detector=_DETECTOR,
-        normalize=_normalize,
-        mappers=mappers,
+        mappers={
+            KeyStyle.HF: lambda k: k,
+            KeyStyle.LLAMA_GGUF: _map_llama_gguf,
+        },
     )
+    resolved.metadata.setdefault("resolver", "llama_gguf_text_model")
+    resolved.metadata.setdefault("num_layers", int(num_layers))
+    return resolved
 
+
+__all__ = [
+    "QWEN3_LLAMA_GGUF_LAYER_SUFFIX_TO_HF_PREFIX",
+    "resolve_llama_gguf_text_model_keyspace",
+]

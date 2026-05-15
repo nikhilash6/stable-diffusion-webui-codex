@@ -21,6 +21,7 @@ Symbols (top-level; keep in sync; no ghosts):
 """
 
 from __future__ import annotations
+from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 
@@ -29,7 +30,7 @@ from apps.backend.infra.config.args import args
 from apps.backend.runtime.memory.config import SwapMethod
 
 
-logger = logging.getLogger("backend.runtime.memory.stream")
+logger = get_backend_logger("backend.runtime.memory.stream")
 
 _STREAM_SWAP_METHODS = {
     SwapMethod.ASYNC.value,
