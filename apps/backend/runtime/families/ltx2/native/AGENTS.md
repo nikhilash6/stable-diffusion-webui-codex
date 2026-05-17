@@ -1,7 +1,7 @@
 <!-- tags: backend, runtime, families, ltx2, native, transformer, vae, audio -->
 # apps/backend/runtime/families/ltx2/native Overview
 Date: 2026-03-12
-Last Review: 2026-03-26
+Last Review: 2026-05-17
 Status: Active
 
 ## Purpose
@@ -33,5 +33,6 @@ Status: Active
 - `pipelines.py` may rely on the local scheduler/text/native module contracts, but canonical API/result/export ownership stays outside this directory in the canonical use-cases.
 - `pipelines.py` directly touches `native.transformer.config`, `native.transformer.rope`, `native.transformer.audio_rope`, and `cache_context(...)`; any streamed wrapper must proxy those surfaces honestly and cleanup must live here, not in public metadata.
 - `pipelines.py` is now the only native owner for the LTX two-stage latent bridge contract: stage sampling returns unpacked/unnormalized video latents plus packed/normalized audio latents, decode stays explicit, and one-stage wrappers must continue to route through the same refactored primitives instead of forking behavior.
+- `pipelines.py` must pass the request-owned generator into every native scheduler step. `scheduler.py` may consume one generator for stochastic FlowMatchEuler noise, but per-batch generator sequences are not implemented at this seam and must fail loud.
 - Public native stage samplers must execute against `native.transformer` only; do not reintroduce optional transformer override plumbing that competes with the runtime-local lock / temporary LoRA owner model.
 - `latent_upsampler.py` must model only explicit known source styles. Current supported sources are the diffusers-style `LTX2LatentUpsamplerModel` config and the metadata-carried legacy `LatentUpsampler` config emitted by real side assets; do not add generic remap glue or mixed-style tolerance.

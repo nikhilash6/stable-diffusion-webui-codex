@@ -1,7 +1,7 @@
 <!-- tags: backend, runtime, wan22, gguf, streaming, transformer -->
 # apps/backend/runtime/families/wan22 Overview
 Status: Active
-Last Review: 2026-03-31
+Last Review: 2026-05-17
 
 ## Purpose
 - WAN 2.2 GGUF runtime components used by WAN engines.
@@ -30,6 +30,7 @@ Last Review: 2026-03-31
 - Base `.gguf` artifacts are the supported root-path input; unsupported packed artifacts must fail loud.
 - Exact stage ownership now matters in config/runtime too: WAN 2.2 5B uses `RunConfig.single` plus dedicated single-stage txt2vid/img2vid entrypoints, while 14B keeps `RunConfig.high` + `RunConfig.low`. Do not fabricate empty `high/low` stages for 5B convenience.
 - WAN22 GGUF sampler support is intentionally narrow: `uni-pc` (optional solver hint), `euler`, and `euler a`. Non-lane labels (`uni-pc bh2`, `euler cfg++`, `euler a cfg++`) must fail loud and must not collapse to executable lanes.
+- `run.py` owns seed-to-`torch.Generator` construction for request and chunk scopes. `sampling.py` and `scheduler.py` consume caller-owned generators only so stochastic `euler a` draws remain seed-reproducible across initial latents and scheduler noise.
 - `text_context.py` must keep tokenizer/model loading local-files-only and strict on device/key mismatches.
 - Stage and VAE placement remain owned by the memory manager.
 - `stage_lora.py` is a no-remap seam: it may interpret WAN22 LoRA logical keys through `keymap_wan22_transformer.py`, but it must not invent runtime state-dict remaps or alias shims outside that seam.

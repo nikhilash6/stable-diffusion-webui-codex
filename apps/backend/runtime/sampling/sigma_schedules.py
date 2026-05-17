@@ -10,7 +10,8 @@ Purpose: Sigma schedule construction utilities for diffusion samplers.
 Defines canonical scheduler names and builds sigma schedules (Karras, exponential, DDIM, beta, align-your-steps, etc.).
 SIMPLE schedules are predictor-aware and support explicit mode selection (legacy shifted-linspace vs tail-downsample sigma selection), and
 all builder branches now pass through a central shape/finiteness/monotonicity validator. `linear_quadratic` follows the parity-target
-piecewise shape with strict input guards and intentionally ignores `sigma_min`.
+piecewise shape with strict input guards and intentionally ignores `sigma_min`; `uniform` fails loud when the useful
+predictor ladder is shorter than the requested step count.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `SchedulerName` (enum): Canonical scheduler names for sigma schedule construction (strict, no silent fallback).
@@ -165,12 +166,12 @@ def _uniform_schedule_from_predictor(steps: int, predictor, *, device: torch.dev
     # Predictor ladders are sigma_min -> sigma_max. Sampling consumes high -> low and skips the min endpoint.
     ladder = sigmas[1:].flip(0)
     if ladder.numel() < steps:
-        ladder = torch.nn.functional.interpolate(
-            ladder.view(1, 1, -1), size=steps, mode="linear", align_corners=True
-        ).view(-1)
-    else:
-        idx = torch.linspace(0, int(ladder.numel()) - 1, int(steps), device=device)
-        ladder = ladder[idx.round().long()]
+        raise ValueError(
+            "uniform scheduler cannot satisfy requested steps from predictor ladder: "
+            f"requested={int(steps)}, useful_ladder={int(ladder.numel())}."
+        )
+    idx = torch.linspace(0, int(ladder.numel()) - 1, int(steps), device=device)
+    ladder = ladder[idx.round().long()]
     return _append_zero(ladder, device=device, dtype=dtype)
 
 

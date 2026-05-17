@@ -61,9 +61,15 @@ Status: Active
   - Schedules are built and consumed in fp32 to protect timestep/sigma mapping stability.
 - Sigma ladder shape is builder-enforced:
   - `build_sigma_schedule(...)` must return a 1D, finite, non-negative, `steps + 1` schedule with terminal zero and a non-increasing non-terminal body.
-  - `uniform` consumes predictor ladders as `sigma_min -> sigma_max` source data and selects high-to-low sampling sigmas before appending terminal zero.
+  - `uniform` consumes predictor ladders as `sigma_min -> sigma_max` source data, selects high-to-low sampling sigmas before appending terminal zero, and fails loud when the useful predictor ladder is shorter than the requested step count.
   - `ddim` / `ddim_uniform` fail loud when requested steps exceed the useful predictor ladder instead of returning a short schedule.
   - `linear_quadratic` intentionally follows the Comfy/Mochi parity shape scaled by `sigma_max`; `sigma_min` is not a range endpoint for that scheduler.
+- Sampler-aware active schedule validation:
+  - `driver.py` validates the final active `sigmas_run` before coefficient setup.
+  - LMS, IPNDM-V, DEIS, UniPC, and UniPC BH2 reject duplicate adjacent positive sigma nodes.
+  - LMS, IPNDM-V, and DEIS reject double-zero terminal schedules. UniPC / UniPC BH2 preserve a double-zero terminal as an explicit terminal no-op and account for it separately from effective solver steps.
+  - Solver-extra trimming is only `_drop_solver_extra_penultimate_sigma(...)` and may drop only a strictly-positive penultimate entry; duplicate-terminal-zero cleanup is not a solver-extra trim.
+- `SamplingContext.sigma_min` is the effective positive denoising minimum for CONST/flow-shift schedules, while `sigma_terminal` carries the appended terminal value for telemetry/debugging.
 - `ddpm + beta` seam:
   - `ddpm` executes natively in `driver.py`.
   - `beta` is predictor-ladder based and no longer uses continuous sigma interpolation.

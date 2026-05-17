@@ -7,11 +7,11 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Sampling context construction utilities for diffusion samplers.
-Builds per-run sampling state (sampler kind, noise settings, scheduler config) into a `SamplingContext`, including console block-progress enablement (`CODEX_PROGRESS_BAR`, default on).
+Builds per-run sampling state (sampler kind, noise settings, scheduler config, effective sigma bounds, terminal sigma) into a `SamplingContext`, including console block-progress enablement (`CODEX_PROGRESS_BAR`, default on).
 Sigma schedule construction lives in `sigma_schedules.py`.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `SamplingContext` (dataclass): Bundles sampling configuration/state for one run (sampler kind, scheduler, noise settings, etc.).
+- `SamplingContext` (dataclass): Bundles sampling configuration/state for one run (sampler kind, scheduler, noise settings, effective sigma range, terminal sigma, etc.).
 - `build_sampling_context` (function): Builds a `SamplingContext` from inputs (engine/runtime settings + request payload).
 - `SchedulerName` (enum): Canonical scheduler names for sigma schedule construction (strict, no silent fallback).
 - `build_sigma_schedule` (function): Main scheduler entrypoint; selects the schedule builder and returns the sigma tensor.
@@ -46,6 +46,7 @@ class SamplingContext:
     prediction_type: str | None = None
     sigma_min: float | None = None
     sigma_max: float | None = None
+    sigma_terminal: float | None = None
     sigma_data: float | None = None
     flow_shift: float | None = None
     flow_shift_config_path: str | None = None
@@ -129,13 +130,16 @@ def build_sampling_context(
         flow_shift=flow_shift_value,
         is_sdxl=is_sdxl or bool(getattr(sd_model, "is_sdxl", False)),
     )
+    terminal_sigma = float(sigmas[-1].detach().cpu().item())
+    positive_sigmas = sigmas[sigmas > 0]
+    if int(positive_sigmas.numel()) > 0:
+        effective_sigma_min = float(positive_sigmas[-1].detach().cpu().item())
+    else:
+        effective_sigma_min = terminal_sigma
 
     if prediction_type == "const" and flow_shift_value is not None:
-        try:
-            sigma_max = float(sigmas[0].detach().cpu().item())
-            sigma_min = float(sigmas[-1].detach().cpu().item())
-        except Exception:
-            pass
+        sigma_max = float(sigmas[0].detach().cpu().item())
+        sigma_min = effective_sigma_min
 
     context = SamplingContext(
         sampler_kind=sampler_kind,
@@ -148,6 +152,7 @@ def build_sampling_context(
         prediction_type=prediction_type,
         sigma_min=sigma_min,
         sigma_max=sigma_max,
+        sigma_terminal=terminal_sigma,
         sigma_data=sigma_data,
         flow_shift=flow_shift_value,
         flow_shift_config_path=flow_shift_config_path,
@@ -166,6 +171,7 @@ def build_sampling_context(
         prediction=context.prediction_type,
         sigma_min=float(context.sigma_min) if context.sigma_min is not None else float("nan"),
         sigma_max=float(context.sigma_max) if context.sigma_max is not None else float("nan"),
+        sigma_terminal=float(context.sigma_terminal) if context.sigma_terminal is not None else float("nan"),
     )
     return context
 

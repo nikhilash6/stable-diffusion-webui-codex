@@ -15,7 +15,8 @@ while emitting timeline/diagnostic hooks (and optional global profiling sections
 and dedicated `uni-pc` / `uni-pc bh2`
 multistep predictor/corrector handling, strict runtime option validation (`solver_type`, `max_stage`, `eta`, `s_noise`) and optional guidance policy wiring
 (APG/rescale/trunc/renorm), emits explicit runtime telemetry for console block-progress activation state, and owns the
-shared img2img denoise-step split between proportional base execution and internal fixed-step hires continuations while
+shared img2img denoise-step split between proportional base execution and internal fixed-step hires continuations,
+sampler-aware active sigma validation, solver-extra penultimate trimming, and terminal no-op accounting while
 reaffirming the processing-owned raw progress-owner token when sampling starts.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -25,6 +26,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_resolve_guidance_policy` (function): Resolves and validates optional guidance policy overrides (env + request extras) for APG/rescale/trunc/renorm.
 - `SamplingBoundaryState` (dataclass): Opaque sampler-owned boundary carrier for exact same-latent mid-schedule resume.
 - `SamplingResult` (dataclass): Sampler return object carrying final latents plus an optional captured boundary state.
+- `_SigmaStepCounts` (dataclass): Internal active sigma schedule accounting for total, effective solver, and terminal no-op steps.
 - `CodexSampler` (class): Main sampler driver; builds `SamplingContext`, resolves sampler specs, runs the native sampler loop, and integrates
   memory-management/timeline diagnostics.
 """
@@ -134,6 +136,13 @@ class SamplingResult:
 
     samples: torch.Tensor
     boundary_state: SamplingBoundaryState | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _SigmaStepCounts:
+    total_schedule_steps: int
+    effective_solver_steps: int
+    terminal_noop_steps: int
 
 
 _EXACT_BOUNDARY_RESUME_SUPPORTED_SAMPLERS: frozenset[SamplerKind] = frozenset(
@@ -701,13 +710,104 @@ class CodexSampler:
         return int(steps) - cls._flow_partial_denoise_start_index(steps=int(steps), denoise_strength=float(denoise_strength))
 
     @staticmethod
-    def _discard_penultimate_sigma_ladder(sigmas: torch.Tensor) -> torch.Tensor:
+    def _has_terminal_double_zero(sigmas: torch.Tensor) -> bool:
+        if sigmas.ndim != 1 or int(sigmas.numel()) < 2:
+            return False
+        last = float(sigmas[-1].detach().cpu().item())
+        penultimate = float(sigmas[-2].detach().cpu().item())
+        return last == 0.0 and penultimate == 0.0
+
+    @staticmethod
+    def _drop_solver_extra_penultimate_sigma(sigmas: torch.Tensor) -> torch.Tensor:
         if sigmas.ndim != 1:
-            raise RuntimeError(f"Discard-penultimate sigma ladder must be 1D; got shape={tuple(sigmas.shape)}")
+            raise RuntimeError(f"Solver-extra sigma ladder must be 1D; got shape={tuple(sigmas.shape)}")
         sigma_count = int(sigmas.numel())
         if sigma_count < 3:
-            raise RuntimeError(f"Discard-penultimate samplers require at least 3 sigma entries; got {sigma_count}.")
+            raise RuntimeError(f"Solver-extra samplers require at least 3 sigma entries; got {sigma_count}.")
+        penultimate = float(sigmas[-2].detach().cpu().item())
+        if penultimate == 0.0:
+            raise RuntimeError(
+                "solver-extra penultimate sigma drop requires a strictly-positive penultimate entry; "
+                "duplicate terminal zero schedules must be handled by sampler-specific validation."
+            )
         return torch.cat([sigmas[:-2], sigmas[-1:]])
+
+    @classmethod
+    def _resolve_sigma_step_counts(
+        cls,
+        sigmas: torch.Tensor,
+        sampler_kind: SamplerKind,
+        scheduler_name: str,
+    ) -> _SigmaStepCounts:
+        if sigmas.ndim != 1:
+            raise RuntimeError(
+                f"{sampler_kind.value}/{scheduler_name}: sigma schedule must be 1D; got shape={tuple(sigmas.shape)}."
+            )
+        sigma_count = int(sigmas.numel())
+        if sigma_count < 2:
+            raise RuntimeError(
+                f"{sampler_kind.value}/{scheduler_name}: sigma schedule must expose at least 2 entries; got {sigma_count}."
+            )
+        total_schedule_steps = sigma_count - 1
+        terminal_noop_steps = 0
+        if sampler_kind in (SamplerKind.UNI_PC, SamplerKind.UNI_PC_BH2) and cls._has_terminal_double_zero(sigmas):
+            terminal_noop_steps = 1
+        effective_solver_steps = total_schedule_steps - terminal_noop_steps
+        if effective_solver_steps <= 0:
+            raise RuntimeError(
+                f"{sampler_kind.value}/{scheduler_name}: sigma schedule has no effective solver steps "
+                f"(total={total_schedule_steps}, terminal_noop={terminal_noop_steps})."
+            )
+        return _SigmaStepCounts(
+            total_schedule_steps=int(total_schedule_steps),
+            effective_solver_steps=int(effective_solver_steps),
+            terminal_noop_steps=int(terminal_noop_steps),
+        )
+
+    @classmethod
+    def _validate_active_sigma_schedule_for_sampler(
+        cls,
+        sigmas: torch.Tensor,
+        sampler_kind: SamplerKind,
+        scheduler_name: str,
+    ) -> None:
+        if sigmas.ndim != 1:
+            raise ValueError(
+                f"{sampler_kind.value}/{scheduler_name}: active sigma schedule must be 1D; got shape={tuple(sigmas.shape)}."
+            )
+        if int(sigmas.numel()) < 2:
+            raise ValueError(
+                f"{sampler_kind.value}/{scheduler_name}: active sigma schedule must have at least 2 entries."
+            )
+        if not torch.isfinite(sigmas).all().item():
+            raise ValueError(f"{sampler_kind.value}/{scheduler_name}: active sigma schedule contains NaN/Inf values.")
+        if (sigmas < 0).any().item():
+            raise ValueError(f"{sampler_kind.value}/{scheduler_name}: active sigma schedule contains negative values.")
+        body = sigmas[:-1]
+        if body.numel() > 1 and (body[1:] > body[:-1]).any().item():
+            raise ValueError(f"{sampler_kind.value}/{scheduler_name}: active sigma schedule must be non-increasing.")
+
+        duplicate_forbidden = {
+            SamplerKind.LMS,
+            SamplerKind.IPNDM_V,
+            SamplerKind.DEIS,
+            SamplerKind.UNI_PC,
+            SamplerKind.UNI_PC_BH2,
+        }
+        duplicate_positive = (
+            body.numel() > 1
+            and ((body[1:] == body[:-1]) & (body[1:] > 0) & (body[:-1] > 0)).any().item()
+        )
+        if sampler_kind in duplicate_forbidden and duplicate_positive:
+            raise ValueError(
+                f"{sampler_kind.value}/{scheduler_name}: duplicate adjacent positive sigma nodes are not supported."
+            )
+
+        if (
+            sampler_kind in {SamplerKind.LMS, SamplerKind.IPNDM_V, SamplerKind.DEIS}
+            and cls._has_terminal_double_zero(sigmas)
+        ):
+            raise ValueError(f"{sampler_kind.value}/{scheduler_name}: double-zero terminal sigma is not supported.")
 
     def _build_flow_partial_denoise_sigmas(
         self,
@@ -716,17 +816,33 @@ class CodexSampler:
         noise: torch.Tensor,
         steps: int,
         denoise_strength: float,
+        sampler_kind: SamplerKind,
         discard_penultimate_sigma: bool = False,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, bool]:
         base_sigmas = active_context.sigmas.to(device=noise.device, dtype=torch.float32)
         if base_sigmas.ndim != 1:
             raise RuntimeError(f"Flow partial denoise sigma schedule must be 1D; got shape={tuple(base_sigmas.shape)}")
         flow_steps = int(steps)
+        solver_extra_trim_applied = False
+        terminal_noop_steps = 0
         if discard_penultimate_sigma:
-            base_sigmas = self._discard_penultimate_sigma_ladder(base_sigmas)
-            flow_steps -= 1
-        t_start = self._flow_partial_denoise_start_index(steps=int(flow_steps), denoise_strength=float(denoise_strength))
-        effective_steps = int(flow_steps) - int(t_start)
+            if sampler_kind in (SamplerKind.UNI_PC, SamplerKind.UNI_PC_BH2) and self._has_terminal_double_zero(base_sigmas):
+                terminal_noop_steps = 1
+            else:
+                base_sigmas = self._drop_solver_extra_penultimate_sigma(base_sigmas)
+                solver_extra_trim_applied = True
+                flow_steps -= 1
+        flow_step_domain = int(flow_steps) - int(terminal_noop_steps)
+        if flow_step_domain < 1:
+            raise RuntimeError(
+                "Flow partial denoise sigma schedule has no effective solver steps "
+                f"(steps={flow_steps}, terminal_noop_steps={terminal_noop_steps})."
+            )
+        t_start = self._flow_partial_denoise_start_index(
+            steps=int(flow_step_domain),
+            denoise_strength=float(denoise_strength),
+        )
+        effective_steps = int(flow_step_domain) - int(t_start)
         if effective_steps < 1:
             raise ValueError(
                 "After adjusting the num_inference_steps by strength parameter: "
@@ -734,7 +850,7 @@ class CodexSampler:
                 "and not appropriate for this pipeline."
             )
         tail = base_sigmas[int(t_start) :]
-        expected_length = int(effective_steps) + 1
+        expected_length = int(effective_steps) + int(terminal_noop_steps) + 1
         if int(tail.numel()) != expected_length:
             raise RuntimeError(
                 "Flow partial denoise sigma schedule length mismatch: "
@@ -744,15 +860,17 @@ class CodexSampler:
         if self._log_enabled:
             self._emit_event(
                 "sampling.denoise_schedule",
-                steps=int(flow_steps),
+                steps=int(flow_step_domain),
                 denoise=float(denoise_strength),
                 mode="flow_trim",
                 t_start=int(t_start),
                 effective_steps=int(effective_steps),
+                terminal_noop_steps=int(terminal_noop_steps),
                 first=float(tail[0].item()),
                 last=float(tail[-1].item()),
+                solver_extra_trim_applied=bool(solver_extra_trim_applied),
             )
-        return tail
+        return tail, solver_extra_trim_applied
 
     def _build_fixed_step_partial_denoise_sigmas(
         self,
@@ -1531,7 +1649,8 @@ class CodexSampler:
                 sampling_prepare(denoiser, noise)
                 prepared = True
 
-                discard_penultimate_sigma = spec.kind in {
+                sampler_kind = spec.kind
+                discard_penultimate_sigma = sampler_kind in {
                     SamplerKind.DPM2,
                     SamplerKind.DPM2_ANCESTRAL,
                     SamplerKind.UNI_PC,
@@ -1569,6 +1688,7 @@ class CodexSampler:
                 # Keep sigma ladder in fp32 for numeric stability; casting to bf16/fp16
                 # quantizes the schedule and can produce severe quality regressions.
                 schedule_steps = int(active_context.steps)
+                sampler_kind = active_context.sampler_kind
                 flow_partial_denoise = (
                     normalized_denoise is not None
                     and self.uses_img2img_continuation(normalized_denoise)
@@ -1585,6 +1705,7 @@ class CodexSampler:
                     and not bool(img2img_fix_steps)
                     and not flow_partial_denoise
                 )
+                solver_extra_trim_applied = False
                 if normalized_denoise is None or proportional_partial_denoise:
                     sigmas = active_context.sigmas.to(device=noise.device, dtype=torch.float32)
                     if proportional_partial_denoise and self._log_enabled:
@@ -1608,14 +1729,17 @@ class CodexSampler:
                         steps=schedule_steps,
                         denoise_strength=normalized_denoise,
                     )
-                else:
-                    sigmas = self._build_flow_partial_denoise_sigmas(
+                elif flow_partial_denoise:
+                    sigmas, solver_extra_trim_applied = self._build_flow_partial_denoise_sigmas(
                         active_context=active_context,
                         noise=noise,
                         steps=schedule_steps,
                         denoise_strength=normalized_denoise,
+                        sampler_kind=sampler_kind,
                         discard_penultimate_sigma=discard_penultimate_sigma,
                     )
+                else:
+                    raise RuntimeError("sampling schedule branch resolution failed.")
 
                 if sigmas.ndim != 1 or int(sigmas.numel()) < 2:
                     raise RuntimeError(f"sigma schedule must be 1D with at least 2 entries; got shape={tuple(sigmas.shape)}")
@@ -1626,35 +1750,46 @@ class CodexSampler:
                             f"got {sigma_count}, max_expected {schedule_steps + 1} (schedule_steps={schedule_steps})."
                         )
                 if discard_penultimate_sigma and not flow_partial_denoise:
-                    sigmas = self._discard_penultimate_sigma_ladder(sigmas)
+                    if sampler_kind in (SamplerKind.UNI_PC, SamplerKind.UNI_PC_BH2) and self._has_terminal_double_zero(sigmas):
+                        pass
+                    else:
+                        sigmas = self._drop_solver_extra_penultimate_sigma(sigmas)
+                        solver_extra_trim_applied = True
                 sigma_count = int(sigmas.numel())
-                total_schedule_steps = sigma_count - 1
-                if total_schedule_steps <= 0:
-                    raise RuntimeError(
-                        f"sigma schedule must expose at least one denoise step; got sigma_count={sigma_count}."
-                    )
+                built_sigma_step_counts = self._resolve_sigma_step_counts(
+                    sigmas,
+                    sampler_kind,
+                    active_context.scheduler_name,
+                )
                 expected_total_schedule_steps = int(requested_steps)
                 if flow_partial_denoise:
+                    expected_flow_steps = (
+                        int(schedule_steps)
+                        - (1 if solver_extra_trim_applied else 0)
+                        - int(built_sigma_step_counts.terminal_noop_steps)
+                    )
                     expected_total_schedule_steps = self._flow_partial_denoise_effective_steps(
-                        steps=int(schedule_steps) - (1 if discard_penultimate_sigma else 0),
+                        steps=int(expected_flow_steps),
                         denoise_strength=float(normalized_denoise),
                     )
                 ddpm_beta_dedup = (
                     active_context.sampler_kind is SamplerKind.DDPM and active_context.scheduler_name == "beta"
                 )
-                if total_schedule_steps != expected_total_schedule_steps:
+                if built_sigma_step_counts.effective_solver_steps != expected_total_schedule_steps:
                     if not ddpm_beta_dedup:
                         raise RuntimeError(
                             "post-adjust sigma schedule length mismatch: "
-                            f"got {sigma_count}, expected {expected_total_schedule_steps + 1} "
+                            f"got effective_steps={built_sigma_step_counts.effective_solver_steps}, "
+                            f"expected={expected_total_schedule_steps} "
                             f"(requested_steps={requested_steps} effective_expected={expected_total_schedule_steps})."
                         )
-                    if total_schedule_steps > expected_total_schedule_steps:
+                    if built_sigma_step_counts.effective_solver_steps > expected_total_schedule_steps:
                         raise RuntimeError(
                             "beta scheduler produced more steps than requested for ddpm: "
-                            f"requested_steps={expected_total_schedule_steps}, effective_steps={total_schedule_steps}."
+                            f"requested_steps={expected_total_schedule_steps}, "
+                            f"effective_steps={built_sigma_step_counts.effective_solver_steps}."
                         )
-                steps = total_schedule_steps
+                steps = built_sigma_step_counts.total_schedule_steps
 
                 if self._log_sigmas or self._log_enabled:
                     schedule_first = float(sigmas[0]) if len(sigmas) > 0 else float("nan")
@@ -1662,11 +1797,15 @@ class CodexSampler:
                     schedule_summary = self._summarize_sigmas(sigmas)
                     sigma_min_val = float("nan") if active_context.sigma_min is None else float(active_context.sigma_min)
                     sigma_max_val = float("nan") if active_context.sigma_max is None else float(active_context.sigma_max)
+                    sigma_terminal_val = (
+                        float("nan") if active_context.sigma_terminal is None else float(active_context.sigma_terminal)
+                    )
                     self._emit_event(
                         "sampling.sigma_schedule",
                         length=len(sigmas) - 1,
                         predict_min=sigma_min_val,
                         predict_max=sigma_max_val,
+                        sigma_terminal=sigma_terminal_val,
                         first=schedule_first,
                         last=schedule_last,
                         ladder=schedule_summary,
@@ -1726,14 +1865,28 @@ class CodexSampler:
                     sigma0 = sigmas_run[:1].to(dtype=noise.dtype)
                     x = model.predictor.noise_scaling(sigma0, noise, torch.zeros_like(noise))
 
+                self._validate_active_sigma_schedule_for_sampler(sigmas_run, sampler_kind, active_context.scheduler_name)
+                active_sigma_step_counts = self._resolve_sigma_step_counts(sigmas_run, sampler_kind, active_context.scheduler_name)
+                active_terminal_noop_steps = active_sigma_step_counts.terminal_noop_steps
+
                 if self._log_enabled:
                     try:
-                        smax = float(sigmas[0].item()) if hasattr(sigmas[0], "item") else float(sigmas[0])
-                        smin = float(sigmas[-1].item()) if hasattr(sigmas[-1], "item") else float(sigmas[-1])
+                        sigma_max_val = (
+                            float("nan") if active_context.sigma_max is None else float(active_context.sigma_max)
+                        )
+                        sigma_min_val = (
+                            float("nan") if active_context.sigma_min is None else float(active_context.sigma_min)
+                        )
+                        sigma_terminal_val = (
+                            float("nan")
+                            if active_context.sigma_terminal is None
+                            else float(active_context.sigma_terminal)
+                        )
                         head = [float(v) for v in sigmas[: min(4, len(sigmas))].detach().cpu().tolist()]
                     except Exception:
-                        smax = float("nan")
-                        smin = float("nan")
+                        sigma_max_val = float("nan")
+                        sigma_min_val = float("nan")
+                        sigma_terminal_val = float("nan")
                         head = []
                     pred_type = getattr(model.predictor, "prediction_type", None)
                     sigma_data = getattr(model.predictor, "sigma_data", None)
@@ -1744,8 +1897,9 @@ class CodexSampler:
                         steps=steps,
                         cfg_scale=float(cfg_scale),
                         prediction=pred_type or getattr(active_context, "prediction_type", None) or "<unknown>",
-                        sigma_max=smax,
-                        sigma_min=smin,
+                        sigma_max=sigma_max_val,
+                        sigma_min=sigma_min_val,
+                        sigma_terminal=sigma_terminal_val,
                         sigma_data=float(sigma_data) if sigma_data is not None else "n/a",
                         head=self._compact_series(head),
                     )
@@ -1773,11 +1927,11 @@ class CodexSampler:
                             for entry in compiled_uncond:
                                 entry["model_conds"]["c_concat"] = Condition(image_conditioning)
 
-                run_total_steps = (
-                    steps
-                    if exact_resume_active
-                    else (len(restart_step_plan) if restart_step_plan is not None else steps - start_idx)
-                )
+                run_total_steps = active_sigma_step_counts.total_schedule_steps
+                if exact_resume_active:
+                    run_total_steps = steps
+                elif restart_step_plan is not None:
+                    run_total_steps = len(restart_step_plan)
                 reported_total_steps: int | None = None if sampler_kind is SamplerKind.DPM_ADAPTIVE else run_total_steps
                 guidance_policy = _resolve_guidance_policy(processing)
                 if guidance_policy is None:

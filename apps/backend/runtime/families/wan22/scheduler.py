@@ -11,7 +11,7 @@ Provides a strict reader for `scheduler_config.json` (vendored HF mirror) and a 
 matches the flow-sigmas schedule used by WAN2.2 (source-of-truth: `scheduler_config.json`), without importing Diffusers.
 Includes explicit mixed-precision stability guards for UniPC corrector linear solves, per-device/dtype sigma cache reuse
 for hot-path step calls (avoiding repeated scalar device materialization), and an experimental FlowMatch-Euler lane for
-sampler experiments.
+sampler experiments with caller-owned generator support for stochastic Euler updates.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `WanSchedulerOutput` (dataclass): Minimal scheduler step output with `prev_sample` (Diffusers-compatible surface).
@@ -229,6 +229,7 @@ class WanFlowMatchEulerScheduler:
         model_output: torch.Tensor,
         timestep: int | float | torch.Tensor,
         sample: torch.Tensor,
+        generator: torch.Generator | None = None,
     ) -> WanSchedulerOutput:
         if self._step_index is None:
             self._init_step_index(timestep)
@@ -264,7 +265,12 @@ class WanFlowMatchEulerScheduler:
 
         if self._stochastic_sampling:
             x0 = sample_fp32 - sigma * model_output_fp32
-            noise = torch.randn_like(sample_fp32)
+            noise = torch.randn(
+                sample_fp32.shape,
+                generator=generator,
+                device=sample_fp32.device,
+                dtype=sample_fp32.dtype,
+            )
             prev_sample = (1.0 - sigma_next) * x0 + sigma_next * noise
         else:
             dt = sigma_next - sigma
@@ -563,7 +569,9 @@ class WanUniPCFlowScheduler:
         model_output: torch.Tensor,
         timestep: Any,
         sample: torch.Tensor,
+        generator: torch.Generator | None = None,
     ) -> WanSchedulerOutput:
+        del generator
         if self._step_index is None:
             self._init_step_index(timestep)
 

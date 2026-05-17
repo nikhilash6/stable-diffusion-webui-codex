@@ -10,7 +10,7 @@ Purpose: Native LTX2 txt2vid/img2vid execution helpers.
 Owns direct native execution against loaded LTX2 components (text encoder, connectors, transformer, VAEs, vocoder,
 and native FlowMatch-Euler scheduler), including deterministic generation-boundary cleanup for streamed transformers,
 truthful request-owned seed/guidance handling, explicit latent-stage sampling/decode primitives for the `two_stage`
-runtime path, keeps public stage sampling pinned to the locked `native.transformer` owner, returns raw `(video, audio)`
+runtime path, request-owned generator propagation through scheduler steps, keeps public stage sampling pinned to the locked `native.transformer` owner, returns raw `(video, audio)`
 tuples that runtime.py can normalize into the family-local result contract,
 and threads the explicit zero-timestep decode input required by timestep-conditioned LTX video VAEs.
 
@@ -26,9 +26,10 @@ Symbols (top-level; keep in sync; no ghosts):
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 import numpy as np
 from PIL import Image
@@ -827,7 +828,13 @@ def _sample_ltx2_native_latents(
                 )
 
         if conditioning_mask is None:
-            video_latents = scheduler.step(noise_pred_video, timestep, video_latents, return_dict=False)[0]
+            video_latents = scheduler.step(
+                noise_pred_video,
+                timestep,
+                video_latents,
+                generator=generator,
+                return_dict=False,
+            )[0]
         else:
             unpacked_noise_pred_video = _unpack_video_latents(
                 noise_pred_video,
@@ -849,6 +856,7 @@ def _sample_ltx2_native_latents(
                 unpacked_noise_pred_video[:, :, 1:],
                 timestep,
                 unpacked_video_latents[:, :, 1:],
+                generator=generator,
                 return_dict=False,
             )[0]
             unpacked_video_latents = torch.cat([unpacked_video_latents[:, :, :1], predicted_latents], dim=2)
@@ -862,6 +870,7 @@ def _sample_ltx2_native_latents(
             noise_pred_audio,
             timestep,
             audio_latents_tensor,
+            generator=generator,
             return_dict=False,
         )[0]
 

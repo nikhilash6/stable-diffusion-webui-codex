@@ -17,6 +17,7 @@ before runtime scheduler construction.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_USE_CFG_SEED` (constant): Sentinel that distinguishes implicit cfg-seed usage from explicit random (`None`) override in chunked seeding.
+- `_build_wan_request_generator` (function): Build the caller-owned WAN request/chunk RNG generator from the resolved seed.
 - `_WAN_CHUNK_HYBRID_RAM_BUDGET_MB` (constant): Default RAM budget threshold (MB) used by `chunk_buffer_mode='hybrid'` when resolving low/decode tensor storage (`ram` vs `ram+hd`).
 - `_wan_trace_inference_enabled` (function): Returns whether WAN orchestration trace checkpoints are enabled (`CODEX_TRACE_INFERENCE_DEBUG`).
 - `_wan_trace` (function): Emits gated `[wan22.trace]` DEBUG checkpoints for run-level orchestration boundaries.
@@ -135,6 +136,22 @@ _WAN_CONTINUITY_PROFILE_SVI2 = "svi2"
 _WAN_CONTINUITY_PROFILE_SVI2_PRO = "svi2_pro"
 _WAN_CHUNK_HYBRID_RAM_BUDGET_MB = 2048.0
 _WAN_PROGRESS_ADAPTER_NAME = "wan22_block_progress_v1"
+
+
+def _build_wan_request_generator(*, device: torch.device, seed: Any) -> torch.Generator | None:
+    if seed is None:
+        return None
+    if isinstance(seed, bool):
+        raise RuntimeError(f"WAN22 GGUF: invalid bool seed for request generator: {seed!r}.")
+    try:
+        seed_value = int(seed)
+    except Exception as exc:
+        raise RuntimeError(f"WAN22 GGUF: seed must be int or None, got {seed!r}.") from exc
+    if seed_value < 0:
+        return None
+    generator = torch.Generator(device=device)
+    generator.manual_seed(seed_value)
+    return generator
 
 
 def _coarse_progress_event(
@@ -752,6 +769,7 @@ def _build_i2v_seed_state(
     device: torch.device,
     dtype: torch.dtype,
     logger: Any,
+    generator: torch.Generator | None,
     seed_override: object = _USE_CFG_SEED,
 ) -> torch.Tensor:
     """Build the initial I2V state `[lat16 + mask4 + img16]` (Diffusers-compatible).
@@ -814,12 +832,9 @@ def _build_i2v_seed_state(
         except Exception as exc:
             raise RuntimeError(f"WAN22 GGUF: seed must be int or None, got {seed_raw!r}.") from exc
 
-    if seed_val is not None and seed_val >= 0:
-        gen = torch.Generator(device=device)
-        gen.manual_seed(seed_val)
-        latents = torch.randn(shape, generator=gen, device=device, dtype=dtype)
-    else:
-        latents = torch.randn(shape, device=device, dtype=dtype)
+    if seed_val is not None and seed_val >= 0 and generator is None:
+        raise RuntimeError("WAN22 GGUF: deterministic I2V seed state requires a caller-owned request generator.")
+    latents = torch.randn(shape, generator=generator, device=device, dtype=dtype)
 
     init_noise_sigma = resolve_init_noise_sigma(scheduler)
     latents = latents * float(init_noise_sigma)
@@ -1092,6 +1107,7 @@ def _sample_chunk_stage_with_progress(
     phase_span_pct: float,
     chunk_index: int,
     chunk_total: int,
+    generator: torch.Generator | None,
 ):
     branch_label = f"chunk:{phase_name}:{stage_name}"
     progress_adapter = _WanUnifiedBlockProgressAdapter(stage_name=stage_name)
@@ -1113,7 +1129,7 @@ def _sample_chunk_stage_with_progress(
         scheduler_obj=scheduler_obj,
         timestep_start=timestep_start,
         timestep_end=timestep_end,
-        seed=None,
+        generator=generator,
         state_init=state_init,
         log_mem_interval=log_mem_interval,
         flow_shift=flow_shift,
@@ -1416,6 +1432,7 @@ def run_txt2vid_single(cfg: RunConfig, *, logger: Any = None, on_progress: Any =
             scheduler=(getattr(cfg.single, "scheduler", None) if cfg.single else None),
             return_effective_sampler=True,
         )
+        request_generator = _build_wan_request_generator(device=dev, seed=cfg.seed)
         log.info(
             "[wan22.gguf] SINGLE: steps=%s sampler_effective=%s sampler_configured=%s scheduler=%s cfg_scale=%s seed=%s",
             total_steps,
@@ -1447,7 +1464,7 @@ def run_txt2vid_single(cfg: RunConfig, *, logger: Any = None, on_progress: Any =
                 scheduler_obj=scheduler,
                 timestep_start=0,
                 timestep_end=total_steps,
-                seed=cfg.seed,
+                generator=request_generator,
                 state_init=None,
                 on_progress=(lambda **p: on_progress(stage="single", **p)) if on_progress else None,
                 log_mem_interval=getattr(cfg, "log_mem_interval", None),
@@ -1548,6 +1565,7 @@ def stream_txt2vid_single(cfg: RunConfig, *, logger: Any = None):
             scheduler=(getattr(cfg.single, "scheduler", None) if cfg.single else None),
             return_effective_sampler=True,
         )
+        request_generator = _build_wan_request_generator(device=dev, seed=cfg.seed)
         log.info(
             "[wan22.gguf] SINGLE: steps=%s sampler_effective=%s sampler_configured=%s scheduler=%s",
             total_steps,
@@ -1577,7 +1595,7 @@ def stream_txt2vid_single(cfg: RunConfig, *, logger: Any = None):
                 scheduler_obj=scheduler,
                 timestep_start=0,
                 timestep_end=total_steps,
-                seed=cfg.seed,
+                generator=request_generator,
                 state_init=None,
                 log_mem_interval=getattr(cfg, "log_mem_interval", None),
                 flow_shift=flow_shift_value,
@@ -1762,6 +1780,7 @@ def run_txt2vid(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) 
             flow_shift_hi=flow_shift_hi_value,
             flow_shift_lo=flow_shift_lo_value,
         )
+        request_generator = _build_wan_request_generator(device=dev, seed=cfg.seed)
         log.info(
             "[wan22.gguf] schedule: steps_total=%d steps_high=%d steps_low=%d sampler_configured=%s sampler_effective=%s",
             total_steps,
@@ -1801,7 +1820,7 @@ def run_txt2vid(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) 
                 scheduler_obj=scheduler,
                 timestep_start=0,
                 timestep_end=steps_hi,
-                seed=cfg.seed,
+                generator=request_generator,
                 state_init=None,
                 on_progress=(lambda **p: on_progress(stage="high", **p)) if on_progress else None,
                 log_mem_interval=getattr(cfg, "log_mem_interval", None),
@@ -1889,7 +1908,7 @@ def run_txt2vid(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) 
                 scheduler_obj=scheduler,
                 timestep_start=steps_hi,
                 timestep_end=total_steps,
-                seed=None,
+                generator=request_generator,
                 state_init=seed_latents,
                 on_progress=(lambda **p: on_progress(stage="low", **p)) if on_progress else None,
                 log_mem_interval=getattr(cfg, "log_mem_interval", None),
@@ -2046,6 +2065,7 @@ def stream_txt2vid(cfg: RunConfig, *, logger: Any = None):
             flow_shift_hi=flow_shift_hi_value,
             flow_shift_lo=flow_shift_lo_value,
         )
+        request_generator = _build_wan_request_generator(device=dev, seed=cfg.seed)
         log.info(
             "[wan22.gguf] schedule: steps_total=%d steps_high=%d steps_low=%d sampler_configured=%s sampler_effective=%s",
             total_steps,
@@ -2076,7 +2096,7 @@ def stream_txt2vid(cfg: RunConfig, *, logger: Any = None):
                 scheduler_obj=scheduler,
                 timestep_start=0,
                 timestep_end=steps_hi,
-                seed=cfg.seed,
+                generator=request_generator,
                 state_init=None,
                 log_mem_interval=getattr(cfg, "log_mem_interval", None),
                 flow_shift=flow_shift_hi_value,
@@ -2149,7 +2169,7 @@ def stream_txt2vid(cfg: RunConfig, *, logger: Any = None):
                 scheduler_obj=scheduler,
                 timestep_start=steps_hi,
                 timestep_end=total_steps,
-                seed=None,
+                generator=request_generator,
                 state_init=seed_latents,
                 log_mem_interval=getattr(cfg, "log_mem_interval", None),
                 flow_shift=flow_shift_lo_value,
@@ -2310,6 +2330,7 @@ def run_img2vid_single(cfg: RunConfig, *, logger: Any = None, on_progress: Any =
             scheduler=(getattr(cfg.single, "scheduler", None) if cfg.single else None),
             return_effective_sampler=True,
         )
+        request_generator = _build_wan_request_generator(device=dev, seed=cfg.seed)
         seed_state = _build_i2v_seed_state(
             cfg=cfg,
             scheduler=scheduler,
@@ -2323,6 +2344,7 @@ def run_img2vid_single(cfg: RunConfig, *, logger: Any = None, on_progress: Any =
             device=dev,
             dtype=dt,
             logger=log,
+            generator=request_generator,
         )
         del latent_condition
 
@@ -2347,7 +2369,7 @@ def run_img2vid_single(cfg: RunConfig, *, logger: Any = None, on_progress: Any =
                 scheduler_obj=scheduler,
                 timestep_start=0,
                 timestep_end=total_steps,
-                seed=None,
+                generator=request_generator,
                 state_init=seed_state,
                 on_progress=(lambda **p: on_progress(stage="single", **p)) if on_progress else None,
                 log_mem_interval=getattr(cfg, "log_mem_interval", None),
@@ -2481,6 +2503,7 @@ def stream_img2vid_single(cfg: RunConfig, *, logger: Any = None):
             scheduler=(getattr(cfg.single, "scheduler", None) if cfg.single else None),
             return_effective_sampler=True,
         )
+        request_generator = _build_wan_request_generator(device=dev, seed=cfg.seed)
         seed_state = _build_i2v_seed_state(
             cfg=cfg,
             scheduler=scheduler,
@@ -2494,6 +2517,7 @@ def stream_img2vid_single(cfg: RunConfig, *, logger: Any = None):
             device=dev,
             dtype=dt,
             logger=log,
+            generator=request_generator,
         )
         del latent_condition
 
@@ -2518,7 +2542,7 @@ def stream_img2vid_single(cfg: RunConfig, *, logger: Any = None):
                 scheduler_obj=scheduler,
                 timestep_start=0,
                 timestep_end=total_steps,
-                seed=None,
+                generator=request_generator,
                 state_init=seed_state,
                 log_mem_interval=getattr(cfg, "log_mem_interval", None),
                 flow_shift=flow_shift_value,
@@ -2727,6 +2751,7 @@ def run_img2vid(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) 
             flow_shift_hi=flow_shift_hi_value,
             flow_shift_lo=flow_shift_lo_value,
         )
+        request_generator = _build_wan_request_generator(device=dev, seed=cfg.seed)
         log.info(
             "[wan22.gguf] schedule: steps_total=%d steps_high=%d steps_low=%d sampler_configured=%s sampler_effective=%s",
             total_steps,
@@ -2749,6 +2774,7 @@ def run_img2vid(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) 
             device=dev,
             dtype=dt,
             logger=log,
+            generator=request_generator,
         )
         del latent_condition
 
@@ -2773,7 +2799,7 @@ def run_img2vid(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) 
                 scheduler_obj=scheduler,
                 timestep_start=0,
                 timestep_end=steps_hi,
-                seed=None,
+                generator=request_generator,
                 state_init=seed_hi,
                 on_progress=(lambda **p: on_progress(stage="high", **p)) if on_progress else None,
                 log_mem_interval=getattr(cfg, "log_mem_interval", None),
@@ -2848,7 +2874,7 @@ def run_img2vid(cfg: RunConfig, *, logger: Any = None, on_progress: Any = None) 
                 scheduler_obj=scheduler,
                 timestep_start=steps_hi,
                 timestep_end=total_steps,
-                seed=None,
+                generator=request_generator,
                 state_init=seed_lo,
                 on_progress=(lambda **p: on_progress(stage="low", **p)) if on_progress else None,
                 log_mem_interval=getattr(cfg, "log_mem_interval", None),
@@ -3046,6 +3072,7 @@ def stream_img2vid(cfg: RunConfig, *, logger: Any = None):
             flow_shift_hi=flow_shift_hi_value,
             flow_shift_lo=flow_shift_lo_value,
         )
+        request_generator = _build_wan_request_generator(device=dev, seed=cfg.seed)
         log.info(
             "[wan22.gguf] schedule: steps_total=%d steps_high=%d steps_low=%d sampler_configured=%s sampler_effective=%s",
             total_steps,
@@ -3068,6 +3095,7 @@ def stream_img2vid(cfg: RunConfig, *, logger: Any = None):
             device=dev,
             dtype=dt,
             logger=log,
+            generator=request_generator,
         )
         del latent_condition
 
@@ -3092,7 +3120,7 @@ def stream_img2vid(cfg: RunConfig, *, logger: Any = None):
                 scheduler_obj=scheduler,
                 timestep_start=0,
                 timestep_end=steps_hi,
-                seed=None,
+                generator=request_generator,
                 state_init=seed_hi,
                 log_mem_interval=getattr(cfg, "log_mem_interval", None),
                 flow_shift=flow_shift_hi_value,
@@ -3167,7 +3195,7 @@ def stream_img2vid(cfg: RunConfig, *, logger: Any = None):
                 scheduler_obj=scheduler,
                 timestep_start=steps_hi,
                 timestep_end=total_steps,
-                seed=None,
+                generator=request_generator,
                 state_init=seed_lo,
                 log_mem_interval=getattr(cfg, "log_mem_interval", None),
                 flow_shift=flow_shift_lo_value,
@@ -3614,6 +3642,7 @@ def stream_img2vid_chunked(
                     chunk_condition = chunk_condition_buffer
 
             chunk_seed = _resolve_chunk_seed(getattr(cfg, "seed", None), chunk_index=chunk_index, mode=chunk_seed_mode)
+            chunk_generator = _build_wan_request_generator(device=dev, seed=chunk_seed)
             chunk_scheduler, _, _, _ = _build_shared_scheduler_from_spec(cfg, spec=shared_scheduler_spec)
 
             chunk_pct_span = float(chunk_sampling_span_pct) / float(len(chunk_starts))
@@ -3653,6 +3682,7 @@ def stream_img2vid_chunked(
                     device=dev,
                     dtype=dt,
                     logger=log,
+                    generator=chunk_generator,
                     seed_override=chunk_seed,
                 )
                 latents_hi = yield from _sample_chunk_stage_with_progress(
@@ -3681,6 +3711,7 @@ def stream_img2vid_chunked(
                     phase_span_pct=high_phase_span_pct,
                     chunk_index=0,
                     chunk_total=1,
+                    generator=chunk_generator,
                 )
                 del seed_hi
                 del chunk_high_prompt_embeds
@@ -3767,6 +3798,7 @@ def stream_img2vid_chunked(
                     phase_span_pct=low_phase_span_pct,
                     chunk_index=0,
                     chunk_total=1,
+                    generator=chunk_generator,
                 )
                 decode_chunk_latents = _extract_i2v_decode_latents(
                     state=latents_lo,

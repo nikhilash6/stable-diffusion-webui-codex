@@ -9,7 +9,8 @@ Required Notice: see NOTICE
 Purpose: Native FlowMatch-Euler scheduler helpers for the LTX2 runtime lane.
 Rebuilds the small scheduler surface the native LTX2 execution helpers need from the vendored scheduler config,
 including dynamic flow-shift resolution, terminal stretching, and Euler stepping, without importing Diffusers
-scheduler classes.
+scheduler classes. Stochastic scheduler steps consume one caller-owned generator and fail loud for per-batch generator
+sequences.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `Ltx2FlowMatchEulerStepOutput` (dataclass): Small scheduler step result carrying `prev_sample`.
@@ -18,9 +19,10 @@ Symbols (top-level; keep in sync; no ghosts):
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 import math
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 import numpy as np
 import torch
@@ -322,7 +324,7 @@ class Ltx2FlowMatchEulerScheduler:
         timestep: int | float | torch.Tensor,
         sample: torch.Tensor,
         *,
-        generator: torch.Generator | None = None,
+        generator: torch.Generator | Sequence[torch.Generator] | None = None,
         return_dict: bool = True,
     ) -> Ltx2FlowMatchEulerStepOutput | tuple[torch.Tensor]:
         if self._step_index is None:
@@ -355,6 +357,8 @@ class Ltx2FlowMatchEulerScheduler:
         sigma_next = sigmas[self._step_index + 1]
 
         if self._stochastic_sampling:
+            if isinstance(generator, Sequence):
+                raise ValueError("per-batch stochastic scheduler generators are not implemented")
             x0 = sample_fp32 - sigma * model_output_fp32
             noise = torch.randn(
                 sample_fp32.shape,

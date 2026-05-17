@@ -8,7 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: WAN22 GGUF sampling helpers (geometry + scheduler + per-stage sampling loops).
 Builds patch geometry, prepares per-stage latent tensors, and runs the stage sampling loop (generator yields progress events); CFG execution uses sequential cond/uncond passes to lower VRAM peaks, I2V conditioning channels are cached once per stage loop to avoid redundant per-step buffer copies, and scheduler aliases/sampler overrides are validated fail-loud against the real WAN22 runtime lanes (`uni-pc`, `euler`, `euler a`) without collapsing cfg++ labels into plain Euler paths.
-Per-step compute runs under `torch.inference_mode()` to reduce overhead (model assembly/load stays outside inference mode); block-progress callback wiring is strict/mandatory and must be provided through `transformer_options` by the WAN unified progress adapter.
+Per-step compute runs under `torch.inference_mode()` to reduce overhead (model assembly/load stays outside inference mode); block-progress callback wiring is strict/mandatory and must be provided through `transformer_options` by the WAN unified progress adapter. Stage latents and stochastic scheduler draws consume the caller-owned request/chunk `torch.Generator`.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `PatchGeometry` (dataclass): Patch/tile geometry configuration used to infer latent/video shapes.
@@ -24,8 +24,8 @@ Symbols (top-level; keep in sync; no ghosts):
 - `prepare_stage_seed_latents` (function): Prepares seeded stage latents (for determinism across runs/stages).
 - `build_i2v_mask4` (function): Builds the 4-channel I2V first-frame mask (Diffusers-compatible; latent time scale=4).
 - `assemble_i2v_state` (function): Assembles I2V model state `[lat16 + mask4 + img16]` (order-aware, strict).
-- `sample_stage_latents` (function): Core latent sampling for a single WAN stage (high/low) using the selected scheduler/sampler; requires adapter-wired `transformer_options` for block-progress callback hookup.
-- `sample_stage_latents_generator` (function): Generator version of stage sampling for streaming progress (yields intermediate states; CFG path runs sequential cond/uncond passes, I2V conditioning channels are cached once per stage loop, and non-CFG timestep buffers are reused), with strict fail-loud block-progress emitter wiring.
+- `sample_stage_latents` (function): Core latent sampling for a single WAN stage (high/low) using the selected scheduler/sampler and caller-owned RNG generator; requires adapter-wired `transformer_options` for block-progress callback hookup.
+- `sample_stage_latents_generator` (function): Generator version of stage sampling for streaming progress using the caller-owned RNG generator (yields intermediate states; CFG path runs sequential cond/uncond passes, I2V conditioning channels are cached once per stage loop, and non-CFG timestep buffers are reused), with strict fail-loud block-progress emitter wiring.
 """
 
 from __future__ import annotations
@@ -544,7 +544,7 @@ def sample_stage_latents(
     scheduler_obj: Any | None = None,
     timestep_start: int = 0,
     timestep_end: Optional[int] = None,
-    seed: Optional[int] = None,
+    generator: torch.Generator | None = None,
     state_init: Optional[torch.Tensor] = None,
     on_progress: Optional[Any] = None,
     log_mem_interval: Optional[int] = None,
@@ -569,7 +569,7 @@ def sample_stage_latents(
         scheduler_obj=scheduler_obj,
         timestep_start=timestep_start,
         timestep_end=timestep_end,
-        seed=seed,
+        generator=generator,
         state_init=state_init,
         log_mem_interval=log_mem_interval,
         flow_shift=flow_shift,
@@ -614,7 +614,7 @@ def sample_stage_latents_generator(
     scheduler_obj: Any | None = None,
     timestep_start: int = 0,
     timestep_end: Optional[int] = None,
-    seed: Optional[int] = None,
+    generator: torch.Generator | None = None,
     state_init: Optional[torch.Tensor] = None,
     log_mem_interval: Optional[int] = None,
     flow_shift: float,
@@ -715,12 +715,7 @@ def sample_stage_latents_generator(
                 "WAN22 GGUF: state_init is required when model.in_channels != model.latent_channels "
                 f"(in_channels={cin}, latent_channels={cout})."
             )
-        if seed is not None and int(seed) >= 0:
-            generator = torch.Generator(device=device)
-            generator.manual_seed(int(seed))
-            state = torch.randn(shape, generator=generator, device=device, dtype=scheduler_state_dtype)
-        else:
-            state = torch.randn(shape, device=device, dtype=scheduler_state_dtype)
+        state = torch.randn(shape, generator=generator, device=device, dtype=scheduler_state_dtype)
         init_noise_sigma = resolve_init_noise_sigma(scheduler)
         state = state * float(init_noise_sigma)
 
@@ -1019,7 +1014,7 @@ def sample_stage_latents_generator(
                 eps = eps_scheduler_buffer
 
             if not has_conditioning:
-                out = scheduler.step(model_output=eps, timestep=timestep, sample=state_lat)
+                out = scheduler.step(model_output=eps, timestep=timestep, sample=state_lat, generator=generator)
                 state = out.prev_sample
                 _assert_finite_tensor(
                     state,
@@ -1037,7 +1032,7 @@ def sample_stage_latents_generator(
                         f"(patch_size={geom.patch_kernel} grid={geom.grid})"
                     )
 
-                out = scheduler.step(model_output=eps, timestep=timestep, sample=state_lat)
+                out = scheduler.step(model_output=eps, timestep=timestep, sample=state_lat, generator=generator)
                 lat_next = out.prev_sample
                 _assert_finite_tensor(
                     lat_next,
