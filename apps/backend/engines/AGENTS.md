@@ -5,11 +5,11 @@ Last Review: 2026-05-17
 Status: Active
 
 ## Purpose
-- Implements model-specific execution logic (Diffusion engines, WAN22, Flux, FLUX.2, SD, Chroma, Netflix VOID), plus shared engine utilities and registration.
+- Implements model-specific execution logic (Diffusion engines, WAN22, Flux, FLUX.2, SD, Chroma, Qwen Image, Netflix VOID), plus shared engine utilities and registration.
 
 ## Subdirectories
 - `common/` — Shared base classes/helpers used by multiple engines.
-- `sd/`, `flux/`, `flux2/`, `ltx2/`, `netflix_void/`, `wan22/`, `zimage/`, `anima/` — Model-specific engine implementations and components (Flux family includes Chroma + Kontext variants; `flux2/` is the separate Klein 4B/base-4B seam).
+- `sd/`, `flux/`, `flux2/`, `ltx2/`, `netflix_void/`, `wan22/`, `zimage/`, `anima/`, `qwen_image/` — Model-specific engine implementations and components (Flux family includes Chroma + Kontext variants; `flux2/` is the separate Klein 4B/base-4B seam; `qwen_image/` is the single Qwen Image architecture family facade).
 - `util/` — Utility helpers for schedulers, attention mapping, etc.
 
 ## Key Files
@@ -35,6 +35,7 @@ Status: Active
   - Generic conditioning cache helpers (overrideable per call) + shared tensor move helpers for CPU↔device caching.
   - Runtime guard helper (`require_runtime`) for consistent “call load() first” errors across engines.
 - 2026-02-05: Added the `anima` engine key.
+- 2026-05-17: Added the `qwen_image` engine key/facade with internal variants only (`2512` txt2img, `edit_2511` img2img edit); no `qwen_image_2512` or `qwen_image_edit_2511` engine ids/aliases exist.
 - 2026-02-08: Engine adapters now map swap-model pointer semantics using `switch_at_step` (`RefinerConfig.swap_at_step`) for both global and hires nested refiner config.
 - 2026-02-28: `AnimaEngine` is an implemented runtime-backed engine (`apps/backend/engines/anima/anima.py`) and is registered by default (`registration.register_anima` / `register_default_engines`); it is no longer a stub facade.
 - 2026-03-06: Added the dedicated `flux2/` engine package plus default registration key `flux2`. The FLUX.2 seam is separate from Flux.1/Chroma/Kontext, uses one Qwen3-4B text encoder, owns its AutoencoderKLFlux2 latent encode/decode contract locally, and now exposes txt2img plus dedicated image-conditioned img2img on the registered engine path: masked img2img/inpaint remains active, partial-denoise img2img is wired, unmasked hires img2img is wired, and masked hires still fails loud.

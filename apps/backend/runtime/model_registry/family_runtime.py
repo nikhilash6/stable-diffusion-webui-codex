@@ -9,8 +9,8 @@ Required Notice: see NOTICE
 Purpose: Per-model-family runtime specification (capabilities + latent/normalization defaults).
 Defines UI-facing capability flags and runtime defaults per `ModelFamily` (latent channels, prediction kind, normalization hints),
 acting as the single source of truth for both backend assembly and frontend conditional UI (flow-shift is left unset when variant-specific).
-Includes Anima (`ModelFamily.ANIMA`) as a flow-based image family with fixed flow shift defaults, FLUX.2 as a
-32-channel flow family whose scheduler shift remains dynamic/variant-aware (`flow_shift=None` here; runtime owns the truthful bridge),
+Includes Qwen Image (`ModelFamily.QWEN_IMAGE`) as a Qwen2.5-VL-conditioned flow-image family, Anima (`ModelFamily.ANIMA`) as a
+flow-based image family with fixed flow shift defaults, FLUX.2 as a 32-channel flow family whose scheduler shift remains dynamic/variant-aware (`flow_shift=None` here; runtime owns the truthful bridge),
 explicit WAN22 family variants (`WAN22_5B`/`WAN22_14B`/`WAN22_ANIMATE`) with independent defaults, and the
 CogVideoX-Fun-backed Netflix VOID vid2vid scaffold (`ModelFamily.NETFLIX_VOID`).
 
@@ -123,6 +123,16 @@ CAPABILITIES_FLUX2 = FamilyCapabilities(
     shows_clip_skip=False,
     shows_guidance_scale=True,
     supported_samplers=("euler", "dpm++ 2m"),
+    supported_schedulers=("simple",),
+    resolution_step=16,
+)
+
+CAPABILITIES_QWEN_IMAGE = FamilyCapabilities(
+    supports_negative_prompt=True,
+    supports_cfg=True,
+    shows_clip_skip=False,
+    shows_guidance_scale=True,
+    supported_samplers=("euler",),
     supported_schedulers=("simple",),
     resolution_step=16,
 )
@@ -385,6 +395,29 @@ FAMILY_RUNTIME_SPECS: Dict[ModelFamily, FamilyRuntimeSpec] = {
         patch_size=2,
         capabilities=CAPABILITIES_FLUX2,
     ),
+    ModelFamily.QWEN_IMAGE: FamilyRuntimeSpec(
+        family=ModelFamily.QWEN_IMAGE,
+        latent_channels=16,
+        latent_scale_factor=8,
+        # AutoencoderKLQwenImage uses per-channel latent mean/std vectors; scalar hints stay identity.
+        vae_scaling_factor=1.0,
+        vae_shift_factor=0.0,
+        context_dim=3584,
+        uses_pooled_output=False,
+        uses_guidance_embed=False,
+        default_cfg=4.0,
+        prediction=PredictionKind.FLOW,
+        default_steps=50,
+        flow_shift=None,
+        scheduler_default="simple",
+        clip_skip_default=1,
+        uses_t5=False,
+        is_xl_variant=True,
+        preferred_width=1328,
+        preferred_height=1328,
+        patch_size=2,
+        capabilities=CAPABILITIES_QWEN_IMAGE,
+    ),
     ModelFamily.CHROMA: FamilyRuntimeSpec(
         family=ModelFamily.CHROMA,
         latent_channels=16,
@@ -590,6 +623,7 @@ __all__ = [
     "CAPABILITIES_FLOW_NO_CFG",
     "CAPABILITIES_FLOW_WITH_CFG",
     "CAPABILITIES_FLUX2",
+    "CAPABILITIES_QWEN_IMAGE",
     "CAPABILITIES_TURBO",
     "FamilyRuntimeSpec",
     "FAMILY_RUNTIME_SPECS",

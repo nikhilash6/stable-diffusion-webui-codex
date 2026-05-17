@@ -1,7 +1,7 @@
 # Runtime Models — AGENTS Notes
 <!-- tags: runtime, models, loader, prediction -->
 Date: 2025-12-05
-Last Review: 2026-04-02
+Last Review: 2026-05-17
 Status: Active
 
 ## Scope
@@ -100,3 +100,4 @@ Applies to `apps/backend/runtime/models/*` including `loader.py`, `registry.py`,
 - 2026-03-11: `loader.py` now turns `ModelFamily.LTX2` parser output into a typed minimal bundle-planning contract (parser-owned `transformer` / `connectors` / `vae` / `audio_vae` / `vocoder` + exactly one external `gemma3_12b` asset + vendored tokenizer/config metadata). Engine registration/runtime execution still lands separately; generic diffusers component assembly remains forbidden for LTX2.
 - 2026-03-12: `registry.py` discovery roots now include `ltx2_ckpt` and `ltx2_vae`, `family_hint` recognizes `models/ltx2/*`, and generic VAE inventory excludes `audio_vae` bundle filenames so the split LTX 2.3 package does not surface the audio bundle as a selectable video VAE.
 - 2026-03-12: `loader.py` now normalizes the single resolved LTX2 external text-encoder path into the fixed `gemma3_12b` slot before bundle planning, writes the rewritten five-component core-only GGUF bundle map into `_build_diffusion_bundle(...)`, and fail-loud checks that `estimated_config.components` stayed aligned with that rewritten contract.
+- 2026-05-17: `loader.py` handles Qwen Image HF-style repos through a metadata-only `qwen_image` branch immediately after `model_index.json` parsing and before generic Diffusers component `from_pretrained(...)`; it validates transformer/text-encoder/VAE/scheduler metadata and records the internal variant (`2512` or `edit_2511`) without creating public variant engine ids.

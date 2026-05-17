@@ -14,7 +14,7 @@ When `CODEX_TRACE_CONTRACT=1`, emits prompt-redacted contract-trace JSONL events
 
 Symbols (top-level; keep in sync; no ghosts):
 - `encode_images` (function): Encode PIL images to base64 PNG payloads, optionally injecting PNG text metadata.
-- `build_engine_options` (function): Build `engine_options` dict from request extras + options snapshot (TE/VAE overrides, explicit checkpoint selectors, Z-Image variant, core streaming).
+- `build_engine_options` (function): Build `engine_options` dict from request extras + options snapshot (TE/VAE overrides, explicit checkpoint selectors, Z-Image/Qwen Image variants, core streaming).
 - `resolve_request_smart_flags` (function): Parse/validate per-request smart flags (`smart_offload`/`smart_fallback`/`smart_cache`) as strict booleans.
 - `force_runtime_memory_cleanup` (function): Best-effort runtime cleanup used on worker error paths (orchestrator cache + memory manager + CUDA cache).
 - `_format_parameters_infotext` (function): Serializes generation `info` dicts into A1111-compatible infotext for PNG `parameters`.
@@ -53,6 +53,7 @@ from apps.backend.runtime.diagnostics.contract_trace import emit_event as emit_c
 from apps.backend.runtime.diagnostics.contract_trace import hash_request_prompt
 from apps.backend.runtime.diagnostics.fallback_state import fallback_used as fallback_state_used
 from apps.backend.runtime.diagnostics.fallback_state import reset_fallback_state
+from apps.backend.runtime.families.qwen_image.config import QWEN_IMAGE_VARIANT_KEY, require_qwen_image_variant
 from apps.backend.runtime.load_authority import (
     LoadAuthorityStage,
     coordinator_load_permit,
@@ -160,6 +161,13 @@ def build_engine_options(*, req: Any, opts_snapshot: Callable[[], Any]) -> dict[
     zimage_variant = extras.get("zimage_variant")
     if isinstance(zimage_variant, str) and zimage_variant.strip():
         engine_options["zimage_variant"] = zimage_variant.strip()
+
+    qwen_image_variant = extras.get(QWEN_IMAGE_VARIANT_KEY)
+    if isinstance(qwen_image_variant, str) and qwen_image_variant.strip():
+        engine_options[QWEN_IMAGE_VARIANT_KEY] = require_qwen_image_variant(
+            qwen_image_variant,
+            context=f"extras.{QWEN_IMAGE_VARIANT_KEY}",
+        )
 
     # Pass streaming option from settings to engine (no model-part fallbacks).
     snap = opts_snapshot()

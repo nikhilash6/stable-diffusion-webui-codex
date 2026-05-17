@@ -1,7 +1,7 @@
 # apps/backend/interfaces/api/tasks Overview
 <!-- tags: backend, api, tasks, orchestration -->
 Date: 2026-01-30
-Last Review: 2026-03-31
+Last Review: 2026-05-17
 Status: Active
 
 ## Purpose
@@ -14,6 +14,7 @@ Status: Active
 
 ## Notes
 - 2026-03-20: `generation_tasks.py::build_engine_options(...)` now requires and forwards image selectors `checkpoint_core_only`, `model_format`, and `vae_source` from request extras unchanged; task helpers fail loud instead of re-authoring image asset/source semantics behind the router contract.
+- 2026-05-17: `generation_tasks.py::build_engine_options(...)` forwards internal `extras.qwen_image_variant` values (`2512` / `edit_2511`) into engine options so Qwen Image cache/reload ownership stays variant-aware without accepting a public variant payload key.
 - This package must remain import-light (avoid importing torch-heavy modules at import time). Prefer local imports inside functions.
 - Cancellation semantics are owned by `apps/backend/interfaces/api/task_registry.py` and must be preserved (always emit `end`).
 - 2026-02-09: Task workers now compare cancellation policy using `TaskCancelMode.IMMEDIATE` (enumized contract from `task_registry.py`) instead of raw string literals.

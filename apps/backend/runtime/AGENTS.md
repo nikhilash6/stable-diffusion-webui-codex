@@ -1,7 +1,7 @@
 # apps/backend/runtime Overview
 <!-- tags: backend, runtime, overview -->
 Date: 2025-10-30
-Last Review: 2026-02-22
+Last Review: 2026-05-17
 Status: Active
 
 ## Purpose
@@ -19,7 +19,7 @@ Status: Active
 - `checkpoint/` — Checkpoint IO helpers (safetensors/GGUF/pickle + config reads).
 - `state_dict/` — Lightweight state-dict views + small state-dict utilities.
 - `models/` — Model registry/load helpers (checkpoints, VAEs, etc.).
-- `families/` — Model/runtime-specific implementations by engine family (`sd/`, `flux/`, `chroma/`, `zimage/`, `wan22/`).
+- `families/` — Model/runtime-specific implementations by engine family (`sd/`, `flux/`, `chroma/`, `zimage/`, `wan22/`, `qwen_image/`).
 - `vision/` — Vision encoder runtimes (clip specs/registry/encoders) shared across engines and patchers.
 - `processing/` — High-level input preprocessing utilities shared by use cases.
 - `pipeline_stages/` — Shared pipeline helper stages consumed by canonical use-cases (Option A; no engine-specific pipelines).

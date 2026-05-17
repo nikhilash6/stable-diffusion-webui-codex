@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Text encoder weight-file discovery policy used by backend inventories.
-Defines text encoder locations from per-family `apps/paths.json` keys (`*_tenc`, including Flux.2, LTX2, and Anima) and yields weight
+Defines text encoder locations from per-family `apps/paths.json` keys (`*_tenc`, including Flux.2, Qwen Image, LTX2, and Anima) and yields weight
 file paths in stable order while excluding non-text-encoder GGUF sidecars such as `mmproj`.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -48,7 +48,17 @@ def list_text_encoder_roots(models_root: str | None = None) -> list[str]:
     roots: list[str] = []
 
     # Per-family roots from apps/paths.json.
-    for key in ("sd15_tenc", "sdxl_tenc", "flux1_tenc", "flux2_tenc", "ltx2_tenc", "anima_tenc", "wan22_tenc", "zimage_tenc"):
+    for key in (
+        "sd15_tenc",
+        "sdxl_tenc",
+        "flux1_tenc",
+        "flux2_tenc",
+        "qwen_image_tenc",
+        "ltx2_tenc",
+        "anima_tenc",
+        "wan22_tenc",
+        "zimage_tenc",
+    ):
         for p in get_paths_for(key):
             if os.path.isdir(p):
                 roots.append(p)

@@ -1,7 +1,7 @@
 <!-- tags: backend, infra-registry, assets, text-encoders -->
 # apps/backend/infra/registry Overview
 Date: 2025-12-05
-Last Review: 2026-05-11
+Last Review: 2026-05-17
 Status: Active
 
 ## Purpose
@@ -25,3 +25,4 @@ Status: Active
 - 2026-02-16: `text_encoder_roots.py` now exposes explicit WAN22 variant families (`WAN22_5B`, `WAN22_14B`, `WAN22_ANIMATE`) mapped to `wan22_tenc` roots.
 - 2026-03-12: `text_encoder_roots.py` now maps `ModelFamily.LTX2` to `apps/paths.json["ltx2_tenc"]` so diagnostics and inventory-adjacent listings reflect the dedicated LTX2 text-encoder root.
 - 2026-05-11: LoRA/VAE public discovery is owned by `apps/backend/inventory/scanners/*`, `/api/models/inventory`, and `apps/backend/runtime/models/registry.py` as applicable.
+- 2026-05-17: `text_encoder_roots.py` maps `ModelFamily.QWEN_IMAGE` to `apps/paths.json["qwen_image_tenc"]` so Qwen Image text-encoder override labels stay family-scoped.

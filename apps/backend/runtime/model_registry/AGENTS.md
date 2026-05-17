@@ -14,6 +14,7 @@ Status: Draft
 - `capabilities.py` also owns `CAPABILITY_ONLY_EXACT_ENGINES`. Capability-only exact ids may appear only in capability/taxonomy maps and must not become registered engines, parked engines, aliases, facades, asset-contract ids, live-preview ids, runtime-family ids, or runtime dispatch ids.
 - 2025-12-14: `ModelSignature` gained a legacy `unet` alias for `core`, keeping older call sites working while the new contract stays `signature.core`.
 - 2025-12-14: Qwen Image detector reintroduced (`detectors/qwen_image.py`) and enums extended (`ModelFamily.QWEN_IMAGE`, `LatentFormat.QWEN_IMAGE`).
+- 2026-05-17: Qwen Image capability/runtime metadata now treats `qwen_image` as the single architecture family; `Qwen-Image-2512` and `Qwen-Image-Edit-2511` are internal variants, not separate engine or family ids.
 - 2025-12-12: Z Image runtime metadata was corrected (`context_dim=2560`, `flow_shift=3.0`) to match the canonical HF assets for Z-Image Turbo.
 - 2025-12-13: Z Image Turbo default steps adjusted to 9 to match diffusers `ZImagePipeline` recommendation (≈8 effective updates; last `dt=0`).
 - 2025-12-14: `ModelFamily.ZIMAGE.flow_shift` re-aligned to `3.0` in `family_runtime.py` (HF scheduler_config parity).

@@ -53,6 +53,15 @@
   "flux2_loras": [
     "models/flux2-loras"
   ],
+  "qwen_image_ckpt": [
+    "models/qwen-image"
+  ],
+  "qwen_image_tenc": [
+    "models/qwen-image-tenc"
+  ],
+  "qwen_image_vae": [
+    "models/qwen-image-vae"
+  ],
   "anima_ckpt": [
     "models/anima"
   ],

@@ -8,7 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: Header-only text encoder slot classification for sha-selected assets.
 Provides a fast, import-light helper used by API request paths to classify a resolved text encoder weights file into
-an explicit slot (`clip_l`, `clip_g`, `t5xxl`, `qwen3_4b`, `qwen3_06b`, `gemma3_12b`) without loading any tensors.
+an explicit slot (`clip_l`, `clip_g`, `t5xxl`, `qwen3_4b`, `qwen3_06b`, `qwen2_5_vl_7b`, `gemma3_12b`) without loading any tensors.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `TextEncoderSlotError` (class): Raised when a weights file cannot be classified into a known slot.
@@ -139,6 +139,9 @@ def _classify_safetensors_header(header: Mapping[str, object], *, context: str) 
                 return tuple(int(x) for x in shape)
         return None
 
+    def _has_key_prefix(prefix: str) -> bool:
+        return any(str(key).startswith(prefix) for key in keys)
+
     # --- CLIP (CLIP-L / CLIP-G)
     clip_shape = _shape_for_suffix(
         (
@@ -168,19 +171,27 @@ def _classify_safetensors_header(header: Mapping[str, object], *, context: str) 
             f"Unrecognized T5 hidden size {hidden} for {context} (expected 4096 for T5-XXL)."
         )
 
-    # --- Qwen3 / Gemma3 (used by flow-based text encoder selection)
+    # --- Qwen / Gemma (used by flow-based text encoder selection)
     qwen_embed = _shape_for_suffix(("model.embed_tokens.weight", "embed_tokens.weight"))
     if qwen_embed and len(qwen_embed) >= 2:
         hidden = int(qwen_embed[-1])
         if hidden == 3840:
             return "gemma3_12b"
+        if hidden == 3584:
+            if _has_key_prefix("visual."):
+                return "qwen2_5_vl_7b"
+            raise TextEncoderSlotError(
+                f"Qwen2.5-VL-7B slot classification for {context} requires visual-tower tensor evidence "
+                "(`visual.*`) in addition to embed dim 3584."
+            )
         if hidden == 2560:
             return "qwen3_4b"
         if hidden == 1024:
             return "qwen3_06b"
         raise TextEncoderSlotError(
             f"Unrecognized LLM embed dim {hidden} for {context} "
-            "(expected 3840 (Gemma3-12B), 2560 (Qwen3-4B), or 1024 (Qwen3-0.6B))."
+            "(expected 3840 (Gemma3-12B), 3584 with visual tower (Qwen2.5-VL-7B), "
+            "2560 (Qwen3-4B), or 1024 (Qwen3-0.6B))."
         )
 
     raise TextEncoderSlotError(
@@ -345,8 +356,13 @@ def _classify_gguf_kv(kv: Mapping[str, object], *, context: str) -> str:
             return "qwen3_4b"
         if embed == 1024:
             return "qwen3_06b"
+        if embed == 3584:
+            raise TextEncoderSlotError(
+                f"GGUF Qwen2.5-VL-7B slot classification is unsupported without visual-tower tensor evidence: {context}"
+            )
         raise TextEncoderSlotError(
-            f"Unrecognized GGUF Qwen embed dim {embed} for {context} (expected 2560 (Qwen3-4B) or 1024 (Qwen3-0.6B))."
+            f"Unrecognized GGUF Qwen embed dim {embed} for {context} "
+            "(expected 2560 (Qwen3-4B) or 1024 (Qwen3-0.6B); 3584 Qwen2.5-VL requires safetensors visual evidence)."
         )
     if "gemma" in hint:
         embed = _resolve_embed_dim()

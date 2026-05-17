@@ -18,6 +18,8 @@ Flux T5 component loading now guarantees model construction before state-dict lo
 FLUX.2 Klein 4B/base-4B expected-family loads use vendored HF metadata plus family-scoped keyspace resolution so native/source GGUF keys and
 legacy fused core slices land in the Diffusers `Flux2Transformer2DModel` lookup space without mutating the checkpoint; unsupported FLUX.2
 variants/configs fail loud.
+Qwen Image HF-style repos are metadata-gated before generic Diffusers component loading; they return a repo-owned split-asset bundle
+(`qwen_image` with internal variant metadata) and never run generic `from_pretrained(...)` component materialization in this loader path.
 SDXL VAE conversion now preflights canonical projection keys after keyspace resolution so projection-lane shape violations surface explicitly (instead of collapsing into generic missing-key noise).
 GGUF smart-offload staging for large transformer classes now emits canonical INFO audit events via `backend.smart_offload`.
 Those staging events are tagged via the canonical `SmartOffloadAction.STAGE_LOAD` enum action.
@@ -44,6 +46,8 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_resolve_flux2_repo_id_from_path` (function): Chooses the supported FLUX.2 4B/base-4B vendored repo id from a checkpoint path hint.
 - `_validate_supported_flux2_transformer_config` (function): Validates that a FLUX.2 transformer config matches the supported Klein 4B/base-4B slice.
 - `_flux2_signature_from_vendored_hf` (function): Builds a FLUX.2 `ModelSignature` from vendored HF metadata for the supported 4B/base-4B slice.
+- `_qwen_image_signature_from_hf_metadata` (function): Builds a Qwen Image `ModelSignature` from split HF metadata without loading weights.
+- `_qwen_image_bundle_from_diffusers_metadata` (function): Builds the metadata-only Qwen Image bundle before generic Diffusers component loading.
 - `_sdxl_expected_signature_from_state_dict` (function): Builds an SDXL/SDXL refiner signature from expected-family checkpoint truth, including core-only detection.
 - `_requires_sdxl_checkpoint_keymap` (function): Determines whether SDXL checkpoint keyspace resolution must run for a checkpoint parse call.
 - `_maybe_resolve_expected_family_keyspace` (function): Applies family-scoped GGUF/native keyspace interpretation for expected-family loads.
@@ -112,6 +116,20 @@ from apps.backend.runtime.model_parser.quantization import detect_state_dict_dty
 from apps.backend.runtime.model_parser.specs import CodexEstimatedConfig
 from apps.backend.runtime.families.ltx2.config import LTX2_REQUIRED_TEXT_ENCODER_SLOT
 from apps.backend.runtime.families.ltx2.loader import build_ltx2_bundle_metadata, prepare_ltx2_bundle_inputs
+from apps.backend.runtime.families.qwen_image.config import (
+    QWEN_IMAGE_EDIT_PIPELINE_CLASS,
+    QWEN_IMAGE_EDIT_REPO_ID,
+    QWEN_IMAGE_EDIT_VARIANT,
+    QWEN_IMAGE_ENGINE_ID,
+    QWEN_IMAGE_TXT2IMG_PIPELINE_CLASS,
+    QWEN_IMAGE_TXT2IMG_REPO_ID,
+    QWEN_IMAGE_TXT2IMG_VARIANT,
+    QWEN_IMAGE_VARIANT_KEY,
+)
+from apps.backend.runtime.families.qwen_image.scheduler import qwen_image_scheduler_config_from_mapping
+from apps.backend.runtime.families.qwen_image.text_encoder import qwen_image_text_encoder_config_from_mapping
+from apps.backend.runtime.families.qwen_image.transformer import qwen_image_transformer_config_from_mapping
+from apps.backend.runtime.families.qwen_image.vae import qwen_image_vae_config_from_mapping
 from apps.backend.runtime.model_registry.errors import ModelRegistryError
 from apps.backend.runtime.model_registry.loader import detect_from_state_dict as registry_detect
 from apps.backend.runtime.model_registry.signals import build_bundle, count_blocks
@@ -155,6 +173,7 @@ SUPPORTED_INFERENCE_DTYPES: Dict[ModelFamily, tuple[torch.dtype, ...]] = {
     ModelFamily.FLUX: (torch.bfloat16, torch.float16, torch.float32),
     ModelFamily.FLUX_KONTEXT: (torch.bfloat16, torch.float16, torch.float32),
     ModelFamily.FLUX2: (torch.bfloat16, torch.float16, torch.float32),
+    ModelFamily.QWEN_IMAGE: (torch.bfloat16, torch.float16, torch.float32),
     ModelFamily.CHROMA: (torch.bfloat16, torch.float16, torch.float32),
 }
 DEFAULT_SUPPORTED_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
@@ -209,6 +228,7 @@ ENGINE_KEY_TO_FAMILY: Dict[str, ModelFamily] = {
     "flux1": ModelFamily.FLUX,
     "flux1_kontext": ModelFamily.FLUX_KONTEXT,
     "flux2": ModelFamily.FLUX2,
+    QWEN_IMAGE_ENGINE_ID: ModelFamily.QWEN_IMAGE,
     "sd35": ModelFamily.SD35,
     "sd3": ModelFamily.SD3,
     "flux1_chroma": ModelFamily.CHROMA,
@@ -227,6 +247,7 @@ FAMILY_TO_ENGINE_KEY: Dict[ModelFamily, str] = {
     ModelFamily.FLUX: "flux1",
     ModelFamily.FLUX_KONTEXT: "flux1_kontext",
     ModelFamily.FLUX2: "flux2",
+    ModelFamily.QWEN_IMAGE: QWEN_IMAGE_ENGINE_ID,
     ModelFamily.LTX2: "ltx2",
     ModelFamily.SD35: "sd35",
     ModelFamily.SD3: "sd35",
@@ -262,6 +283,11 @@ _SUPPORTED_FLUX2_TRANSFORMER_CONFIG: Dict[str, object] = {
     "num_single_layers": 20,
     "patch_size": 1,
     "timestep_guidance_channels": 256,
+}
+
+_QWEN_IMAGE_PIPELINE_VARIANTS: Dict[str, tuple[str, str]] = {
+    QWEN_IMAGE_TXT2IMG_PIPELINE_CLASS.lower(): (QWEN_IMAGE_TXT2IMG_REPO_ID, QWEN_IMAGE_TXT2IMG_VARIANT),
+    QWEN_IMAGE_EDIT_PIPELINE_CLASS.lower(): (QWEN_IMAGE_EDIT_REPO_ID, QWEN_IMAGE_EDIT_VARIANT),
 }
 
 _SDXL_VAE_CANONICAL_PROJECTION_KEYS = (
@@ -736,6 +762,234 @@ def _validate_supported_flux2_transformer_config(
                 "Field %r expected %r, got %r."
                 % (context, field, expected, actual)
             )
+
+
+def _component_class_name(model_index: Mapping[str, Any], component_name: str) -> str:
+    spec = model_index.get(component_name)
+    if not isinstance(spec, list) or len(spec) != 2:
+        return ""
+    class_name = spec[1]
+    return class_name.strip() if isinstance(class_name, str) else ""
+
+
+def _require_component_class(
+    model_index: Mapping[str, Any],
+    *,
+    component_name: str,
+    expected_class_name: str,
+    context: str,
+) -> None:
+    actual = _component_class_name(model_index, component_name)
+    if actual != expected_class_name:
+        raise RuntimeError(
+            "Unsupported Qwen Image metadata for %s. Component %r expected class %r, got %r."
+            % (context, component_name, expected_class_name, actual or "<missing>")
+        )
+
+
+def _is_qwen_image_model_index(model_index: Mapping[str, Any]) -> bool:
+    pipeline_cls = str(model_index.get("_class_name") or "").strip().lower()
+    if pipeline_cls in _QWEN_IMAGE_PIPELINE_VARIANTS:
+        return True
+    return _component_class_name(model_index, "transformer") == "QwenImageTransformer2DModel"
+
+
+def _qwen_image_variant_from_metadata(
+    *,
+    model_index: Mapping[str, Any],
+    transformer_config: Mapping[str, Any],
+    repo_dir: str,
+) -> tuple[str, str]:
+    pipeline_cls = str(model_index.get("_class_name") or "").strip().lower()
+    if pipeline_cls in _QWEN_IMAGE_PIPELINE_VARIANTS:
+        return _QWEN_IMAGE_PIPELINE_VARIANTS[pipeline_cls]
+
+    normalized_path = str(repo_dir or "").replace("\\", "/").lower()
+    if "qwen-image-edit-2511" in normalized_path:
+        return (QWEN_IMAGE_EDIT_REPO_ID, QWEN_IMAGE_EDIT_VARIANT)
+    if "qwen-image-2512" in normalized_path:
+        return (QWEN_IMAGE_TXT2IMG_REPO_ID, QWEN_IMAGE_TXT2IMG_VARIANT)
+
+    zero_cond_t = transformer_config.get("zero_cond_t")
+    if zero_cond_t is True:
+        return (QWEN_IMAGE_EDIT_REPO_ID, QWEN_IMAGE_EDIT_VARIANT)
+    if zero_cond_t in (None, False):
+        return (QWEN_IMAGE_TXT2IMG_REPO_ID, QWEN_IMAGE_TXT2IMG_VARIANT)
+    raise RuntimeError(
+        "Unsupported Qwen Image transformer config for %s: zero_cond_t must be true, false, or absent; got %r."
+        % (repo_dir, zero_cond_t)
+    )
+
+
+def _validate_supported_qwen_image_transformer_config(
+    transformer_cfg: Mapping[str, Any],
+    *,
+    variant: str,
+    context: str,
+) -> None:
+    qwen_image_transformer_config_from_mapping(transformer_cfg, variant=variant, context=context)
+
+
+def _validate_qwen_image_text_encoder_config(text_encoder_cfg: Mapping[str, Any], *, context: str) -> None:
+    qwen_image_text_encoder_config_from_mapping(text_encoder_cfg, context=context)
+
+
+def _validate_qwen_image_vae_config(vae_cfg: Mapping[str, Any], *, context: str) -> None:
+    qwen_image_vae_config_from_mapping(vae_cfg, context=context)
+
+
+def _validate_qwen_image_scheduler_config(scheduler_cfg: Mapping[str, Any], *, context: str) -> None:
+    qwen_image_scheduler_config_from_mapping(scheduler_cfg, context=context)
+
+
+def _qwen_image_signature_from_hf_metadata(
+    *,
+    repo_hint: str,
+    variant: str,
+    transformer_cfg: Mapping[str, Any],
+    text_encoder_cfg: Mapping[str, Any],
+    vae_cfg: Mapping[str, Any],
+) -> ModelSignature:
+    context_dim = int(transformer_cfg["joint_attention_dim"])
+    channels_in = int(transformer_cfg["in_channels"])
+    channels_out = int(transformer_cfg["out_channels"])
+    num_layers = int(transformer_cfg["num_layers"])
+    latent_channels = int(vae_cfg["z_dim"])
+
+    return ModelSignature(
+        family=ModelFamily.QWEN_IMAGE,
+        repo_hint=repo_hint,
+        prediction=PredictionKind.FLOW,
+        latent_format=LatentFormat.QWEN_IMAGE,
+        quantization=QuantizationHint(),
+        core=CodexCoreSignature(
+            architecture=CodexCoreArchitecture.FLOW_TRANSFORMER,
+            channels_in=channels_in,
+            channels_out=channels_out,
+            context_dim=context_dim,
+            temporal=False,
+            depth=num_layers,
+            key_prefixes=["transformer."],
+        ),
+        text_encoders=[
+            TextEncoderSignature(
+                name="qwen2_5_vl_7b",
+                key_prefix="text_encoder.",
+                expected_dim=int(text_encoder_cfg["hidden_size"]),
+                tokenizer_hint=f"{repo_hint}/tokenizer",
+            )
+        ],
+        vae=VAESignature(key_prefix="vae.", latent_channels=latent_channels),
+        extras={
+            QWEN_IMAGE_VARIANT_KEY: variant,
+            "zero_cond_t": bool(transformer_cfg.get("zero_cond_t") is True),
+            "guidance_embed": bool(transformer_cfg.get("guidance_embeds", False)),
+            "signature_source": "hf_metadata",
+        },
+    )
+
+
+def _qwen_image_bundle_from_diffusers_metadata(
+    *,
+    repo_dir: str,
+    model_index: Mapping[str, Any],
+    expected_family: ModelFamily | None,
+) -> DiffusionModelBundle:
+    if expected_family is not None and expected_family is not ModelFamily.QWEN_IMAGE:
+        raise RuntimeError(
+            "Diffusers repo %r is Qwen Image metadata, but expected_family=%r."
+            % (repo_dir, getattr(expected_family, "value", expected_family))
+        )
+
+    context = str(repo_dir)
+    _require_component_class(
+        model_index,
+        component_name="transformer",
+        expected_class_name="QwenImageTransformer2DModel",
+        context=context,
+    )
+    _require_component_class(
+        model_index,
+        component_name="text_encoder",
+        expected_class_name="Qwen2_5_VLForConditionalGeneration",
+        context=context,
+    )
+    _require_component_class(
+        model_index,
+        component_name="vae",
+        expected_class_name="AutoencoderKLQwenImage",
+        context=context,
+    )
+    _require_component_class(
+        model_index,
+        component_name="scheduler",
+        expected_class_name="FlowMatchEulerDiscreteScheduler",
+        context=context,
+    )
+    _require_component_class(
+        model_index,
+        component_name="tokenizer",
+        expected_class_name="Qwen2Tokenizer",
+        context=context,
+    )
+
+    repo_path = Path(repo_dir)
+    transformer_cfg = _read_json(repo_path / "transformer" / "config.json")
+    text_encoder_cfg = _read_json(repo_path / "text_encoder" / "config.json")
+    vae_cfg = _read_json(repo_path / "vae" / "config.json")
+    scheduler_cfg = _read_json(repo_path / "scheduler" / "scheduler_config.json")
+
+    repo_hint, variant = _qwen_image_variant_from_metadata(
+        model_index=model_index,
+        transformer_config=transformer_cfg,
+        repo_dir=repo_dir,
+    )
+    _validate_supported_qwen_image_transformer_config(transformer_cfg, variant=variant, context=context)
+    _validate_qwen_image_text_encoder_config(text_encoder_cfg, context=context)
+    _validate_qwen_image_vae_config(vae_cfg, context=context)
+    _validate_qwen_image_scheduler_config(scheduler_cfg, context=context)
+
+    if variant == QWEN_IMAGE_EDIT_VARIANT:
+        _require_component_class(
+            model_index,
+            component_name="processor",
+            expected_class_name="Qwen2VLProcessor",
+            context=context,
+        )
+    elif _component_class_name(model_index, "processor"):
+        raise RuntimeError("Qwen Image 2512 metadata for %s must not declare an edit processor component." % context)
+
+    signature = _qwen_image_signature_from_hf_metadata(
+        repo_hint=repo_hint,
+        variant=variant,
+        transformer_cfg=transformer_cfg,
+        text_encoder_cfg=text_encoder_cfg,
+        vae_cfg=vae_cfg,
+    )
+    estimated_config = _SimpleEstimated(
+        huggingface_repo=repo_hint,
+        core_config=dict(transformer_cfg),
+        pipeline_class=str(model_index.get("_class_name") or ""),
+        text_encoder_map={"qwen2_5_vl_7b": "text_encoder"},
+    )
+    return _build_diffusion_bundle(
+        model_ref=repo_dir,
+        family=ModelFamily.QWEN_IMAGE,
+        estimated_config=estimated_config,
+        components={},
+        signature=signature,
+        source="diffusers_metadata",
+        metadata={
+            "engine_key": QWEN_IMAGE_ENGINE_ID,
+            "repo_id": repo_hint,
+            QWEN_IMAGE_VARIANT_KEY: variant,
+            "pipeline_class": str(model_index.get("_class_name") or ""),
+            "core_config": dict(transformer_cfg),
+            "text_encoder_config": dict(text_encoder_cfg),
+            "vae_config": dict(vae_cfg),
+            "scheduler_config": dict(scheduler_cfg),
+        },
+    )
 
 
 def _flux2_signature_from_vendored_hf(*, model_path: str) -> ModelSignature:
@@ -2174,6 +2428,7 @@ def _load_huggingface_component(
             _SMART_OFFLOAD_TRANSFORMERS = {
                 "FluxTransformer2DModel",
                 "Flux2Transformer2DModel",
+                "QwenImageTransformer2DModel",
                 "ZImageTransformer2DModel",
                 "ChromaTransformer2DModel",
                 "SD3Transformer2DModel",
@@ -2677,10 +2932,18 @@ def codex_loader(
 
 # ------------------------------ Native diffusers repo loader (no state dict)
 class _SimpleEstimated:
-    def __init__(self, *, huggingface_repo: str, core_config: dict, pipeline_class: str = ""):
+    def __init__(
+        self,
+        *,
+        huggingface_repo: str,
+        core_config: dict,
+        pipeline_class: str = "",
+        text_encoder_map: Mapping[str, str] | None = None,
+    ):
         self.huggingface_repo = huggingface_repo
         self.core_config = core_config
         self.pipeline_class = pipeline_class
+        self.text_encoder_map = dict(text_encoder_map or {})
 
 
 def resolve_sdxl_diffusers_surface(
@@ -2757,6 +3020,8 @@ def _detect_engine_from_config(
     expected_family: ModelFamily | None = None,
 ) -> str:
     pipeline_cls = str(config.get("_class_name") or "").strip().lower()
+    if pipeline_cls in _QWEN_IMAGE_PIPELINE_VARIANTS:
+        return QWEN_IMAGE_ENGINE_ID
     if pipeline_cls == "fluxkontextpipeline":
         return "flux1_kontext"
     if pipeline_cls == "flux2kleinpipeline":
@@ -2776,6 +3041,8 @@ def _detect_engine_from_config(
         return "flux1"
     if cls_by_name.get("transformer") in ("Flux2Transformer2DModel",):
         return "flux2"
+    if cls_by_name.get("transformer") in ("QwenImageTransformer2DModel",):
+        return QWEN_IMAGE_ENGINE_ID
     if cls_by_name.get("transformer") in ("SD3Transformer2DModel",):
         return "sd35"
     if cls_by_name.get("transformer") in ("ChromaTransformer2DModel",):
@@ -2794,6 +3061,12 @@ def load_engine_from_diffusers(
     expected_family: ModelFamily | None = None,
 ) -> DiffusionModelBundle:
     config = _load_diffusers_model_index(repo_dir)
+    if _is_qwen_image_model_index(config):
+        return _qwen_image_bundle_from_diffusers_metadata(
+            repo_dir=repo_dir,
+            model_index=config,
+            expected_family=expected_family,
+        )
     comps = {}
     for name, (lib_name, cls_name) in (
         (k, v) for k, v in config.items() if isinstance(v, list) and len(v) == 2

@@ -1,7 +1,7 @@
 <!-- tags: backend, inventory, scanners, assets -->
 # apps/backend/inventory/scanners Overview
 Date: 2026-01-04
-Last Review: 2026-03-05
+Last Review: 2026-05-17
 Status: Active
 
 ## Purpose
@@ -25,3 +25,4 @@ Status: Active
 - 2026-03-03: `wan22_gguf.py` now scans `wan22_ckpt` directory roots recursively for `.gguf` files (stable order), so nested WAN22 folder layouts from HF/manual extraction still populate `/api/models/inventory`.
 - 2026-03-05: Per-family scanner roots now include Flux.2 keys (`flux2_tenc`, `flux2_vae`, `flux2_loras`) in addition to Flux.1, so discovery contracts are ready for Flux.2 model roots.
 - 2026-03-12: Per-family scanner roots now also include `ltx2_tenc`, `ltx2_vae`, and `ltx2_loras`; generic scanners exclude `mmproj` projector GGUF files from text-encoder inventory and exclude `audio_vae` bundle files from generic VAE inventory.
+- 2026-05-17: Per-family scanner roots include Qwen Image split roots (`qwen_image_tenc`, `qwen_image_vae`); these stay scoped to the `qwen_image` architecture family and do not fall back to generic VAE/text-encoder folders.

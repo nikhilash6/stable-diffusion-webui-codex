@@ -1,6 +1,6 @@
 # apps/backend/infra Overview
 Date: 2025-10-28
-Last Review: 2026-05-02
+Last Review: 2026-05-17
 Status: Active
 
 ## Purpose
@@ -28,6 +28,7 @@ Status: Active
 - 2026-02-15: Added trace/runtime diagnostics bootstrap flags in `config/args.py` (`--trace-contract`, `--trace-profiler`) with env aliases (`CODEX_TRACE_CONTRACT`, `CODEX_TRACE_PROFILER`) and `CODEX_PROFILE -> trace_profiler` mapping.
 - 2026-01-04: Added `config/env_flags.py` as the canonical env-flag parsing helper to keep debug/feature toggle semantics consistent across runtime subsystems.
 - 2026-02-05: `config/paths.py` model directory keyset now includes Anima roots (`anima_ckpt`, `anima_tenc`, `anima_vae`, `anima_loras`) so best-effort provisioning mirrors existing Flux/WAN/ZImage conventions.
+- 2026-05-17: `config/paths.py` model directory keyset includes Qwen Image split roots (`qwen_image_ckpt`, `qwen_image_tenc`, `qwen_image_vae`) for the single `qwen_image` architecture family.
 - 2026-05-02: Unset `--lora-apply-mode` / `CODEX_LORA_APPLY_MODE` resolves to `online` (apply on-the-fly during forward); explicit `merge` remains valid when a run should rewrite weights once at apply-time. Requires restarting the backend process to take effect.
 - 2026-01-02: Added standardized file header docstrings to `infra/__init__.py`, `infra/accelerators/*`, `infra/config/*`, and `infra/registry/*` modules (doc-only change; part of rollout).
 - 2026-02-10: Added global structural-conversion policy reader `config/weight_structural_conversion.py` (`CODEX_WEIGHT_STRUCTURAL_CONVERSION=auto|convert`) so runtime/keymap/parser seams can enforce fail-loud no-conversion behavior in `auto`.

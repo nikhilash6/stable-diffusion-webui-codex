@@ -11,7 +11,8 @@ Defines `SemanticEngine` tags and an `EngineParamSurface` describing which high-
 including explicit masked-img2img/inpaint support, vid2vid discoverability, and native IP-Adapter/SUPIR discoverability, with executable defaults and
 recommendation hints for the live surface (for example SD15 `ddim`/`ddim`, WAN22 `uni-pc bh2`/`simple`, and LTX2 `euler`/`simple` with no sampler fiction
 beyond the live runtime lane).
-Includes Anima (`SemanticEngine.ANIMA`) as a flow-based image engine (txt2img/img2img) requiring sha-selected external assets and exposing
+Includes Qwen Image (`SemanticEngine.QWEN_IMAGE`) as a Qwen2.5-VL-conditioned flow-image engine with txt2img plus single-image edit img2img,
+and Anima (`SemanticEngine.ANIMA`) as a flow-based image engine (txt2img/img2img) requiring sha-selected external assets and exposing
 `er sde` in the recommended sampler surface. FLUX.2 exposes the truthful Klein 4B/base-4B slice here: txt2img plus dedicated
 image-conditioned img2img with hires enabled only after the real backend continuation path landed; LoRA remains off.
 WAN semantic capabilities are bound to explicit WAN22 variant families via primary-family mapping.
@@ -67,6 +68,7 @@ class SemanticEngine(str, Enum):
     SDXL = "sdxl"
     FLUX = "flux1"
     FLUX2 = "flux2"
+    QWEN_IMAGE = "qwen_image"
     ZIMAGE = "zimage"
     ANIMA = "anima"
     CHROMA = "chroma"
@@ -241,6 +243,24 @@ ENGINE_SURFACES: Dict[SemanticEngine, EngineParamSurface] = {
         default_sampler="euler",
         default_scheduler="simple",
     ),
+    # Qwen Image architecture family: 2512 txt2img plus Edit-2511 single-image edit img2img.
+    SemanticEngine.QWEN_IMAGE: EngineParamSurface(
+        supports_txt2img=True,
+        supports_img2img=True,
+        supports_img2img_masking=False,
+        supports_txt2vid=False,
+        supports_img2vid=False,
+        supports_hires=False,
+        supports_refiner=False,
+        supports_lora=False,
+        supports_controlnet=False,
+        supports_ip_adapter=False,
+        supports_supir_mode=False,
+        recommended_samplers=("euler",),
+        recommended_schedulers=("simple",),
+        default_sampler="euler",
+        default_scheduler="simple",
+    ),
     # Z-Image (Turbo/Base variants; flow-based; tuned for simple predictor schedule).
     SemanticEngine.ZIMAGE: EngineParamSurface(
         supports_txt2img=True,
@@ -328,6 +348,7 @@ ENGINE_ID_TO_SEMANTIC_ENGINE: Dict[str, SemanticEngine] = {
     "flux1_kontext": SemanticEngine.FLUX,
     "flux1_fill": SemanticEngine.FLUX,
     "flux2": SemanticEngine.FLUX2,
+    "qwen_image": SemanticEngine.QWEN_IMAGE,
     "flux1_chroma": SemanticEngine.CHROMA,
     "zimage": SemanticEngine.ZIMAGE,
     "anima": SemanticEngine.ANIMA,
@@ -369,6 +390,7 @@ EXACT_ENGINE_INPAINT_MODES: Dict[str, tuple[str, ...]] = {
     "flux1_kontext": (),
     "flux1_fill": (),
     "flux2": _GENERIC_INPAINT_MODES,
+    "qwen_image": (),
     "flux1_chroma": (),
     "zimage": _GENERIC_INPAINT_MODES,
     "anima": (),
@@ -404,6 +426,7 @@ _ENGINE_ID_PRIMARY_FAMILY: Dict[str, ModelFamily] = {
     "flux1": ModelFamily.FLUX,
     "flux1_kontext": ModelFamily.FLUX_KONTEXT,
     "flux2": ModelFamily.FLUX2,
+    "qwen_image": ModelFamily.QWEN_IMAGE,
     "flux1_chroma": ModelFamily.CHROMA,
     "zimage": ModelFamily.ZIMAGE,
     "anima": ModelFamily.ANIMA,

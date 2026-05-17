@@ -11,7 +11,7 @@ Scans configured model roots (via `apps/paths.json` accessors) for checkpoint an
 computes sha256 hashes, and maintains a persistent cache in `models/.hashes.json` (schema v2) for fast UI inventory, backend SHA-based
 resolution, CLIP layout metadata reuse, and checkpoint-scoped metadata forwarding such as the current LTX2 execution-profile/default hints
 and Netflix VOID overlay pairing readiness. Paths config resolution is fail-loud (no silent fallback to defaults on invalid config payloads).
-Family hints and root selection cover SD/Flux/Anima/WAN/ZImage/LTX2/Netflix VOID keyspaces while generic VAE inventory excludes audio-bundle files.
+Family hints and root selection cover SD/Flux/Qwen Image/Anima/WAN/ZImage/LTX2/Netflix VOID keyspaces while generic VAE inventory excludes audio-bundle files.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_default_models_root` (function): Returns the default `models/` directory under `CODEX_ROOT`.
@@ -75,6 +75,7 @@ _CHECKPOINT_ROOT_FAMILY_HINTS: dict[str, str] = {
     "sdxl_ckpt": "sdxl",
     "flux1_ckpt": "flux1",
     "flux2_ckpt": "flux2",
+    "qwen_image_ckpt": "qwen_image",
     "ltx2_ckpt": "ltx2",
     "netflix_void_ckpt": "netflix_void",
     "anima_ckpt": "anima",
@@ -86,6 +87,8 @@ _DEFAULT_CHECKPOINT_ROOTS: tuple[tuple[str, str], ...] = (
     ("sdxl", "sdxl"),
     ("flux", "flux1"),
     ("flux2", "flux2"),
+    ("qwen-image", "qwen_image"),
+    ("qwen_image", "qwen_image"),
     ("ltx2", "ltx2"),
     ("netflix-void", "netflix_void"),
     ("anima", "anima"),
@@ -532,6 +535,8 @@ class ModelRegistry:
                         "flux": "flux1",
                         "flux2": "flux2",
                         "ltx2": "ltx2",
+                        "qwen-image": "qwen_image",
+                        "qwen_image": "qwen_image",
                         "netflix-void": "netflix_void",
                         "netflix_void": "netflix_void",
                         "zimage": "zimage",
@@ -592,7 +597,17 @@ class ModelRegistry:
 
     def _scan_vaes(self) -> Iterable[VAERecord]:
         candidates: List[Path] = []
-        for key in ("sd15_vae", "sdxl_vae", "flux1_vae", "flux2_vae", "ltx2_vae", "anima_vae", "wan22_vae", "zimage_vae"):
+        for key in (
+            "sd15_vae",
+            "sdxl_vae",
+            "flux1_vae",
+            "flux2_vae",
+            "qwen_image_vae",
+            "ltx2_vae",
+            "anima_vae",
+            "wan22_vae",
+            "zimage_vae",
+        ):
             for raw in get_paths_for(key):
                 p = Path(raw)
                 if p not in candidates:
@@ -636,9 +651,9 @@ class ModelRegistry:
         """Iterate over checkpoint files using paths.json overrides + curated defaults.
 
         Resolution order:
-        1) Explicit roots from apps/paths.json per engine (sd15_ckpt, sdxl_ckpt, flux1_ckpt, flux2_ckpt, ltx2_ckpt, wan22_ckpt).
+        1) Explicit roots from apps/paths.json per engine (sd15_ckpt, sdxl_ckpt, flux1_ckpt, flux2_ckpt, qwen_image_ckpt, ltx2_ckpt, wan22_ckpt).
            Entries may be directories (recursive scan) or individual files.
-        2) Built-in defaults under models/: per-engine folders only (sd15, sdxl, flux, flux2, ltx2, anima, wan22, zimage).
+        2) Built-in defaults under models/: per-engine folders only (sd15, sdxl, flux, flux2, qwen-image, ltx2, anima, wan22, zimage).
 
         This replaces the legacy scatter of ad-hoc checkpoint folders ('stable-diffusion', 'sd', 'checkpoints').
         """

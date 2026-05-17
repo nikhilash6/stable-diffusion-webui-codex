@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Qwen Image model detector for the model registry.
-Detects Qwen Image checkpoints (flow transformer + text encoder + VAE) and builds a `ModelSignature` used by the loader/UI inventory.
+Detects Qwen Image checkpoints (flow transformer + Qwen2.5-VL-7B text encoder + VAE) and builds a `ModelSignature` used by the loader/UI inventory.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `QWEN_IMAGE_REQUIRED_KEYS` (constant): Key set used to identify Qwen Image checkpoints.
@@ -89,7 +89,7 @@ class QwenImageDetector(ModelDetector):
             ),
             text_encoders=[
                 TextEncoderSignature(
-                    name="qwen2_5_vl",
+                    name="qwen2_5_vl_7b",
                     key_prefix="text_encoder.",
                     expected_dim=context_dim,
                 )

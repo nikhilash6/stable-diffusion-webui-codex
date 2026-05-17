@@ -9,7 +9,8 @@ Required Notice: see NOTICE
 Purpose: Backend-owned engine dependency check contract for WebUI readiness surfaces.
 Builds deterministic per-engine check rows from backend inventory/model-registry state so the frontend can render a strict
 "Dependency Check" panel and disable generation when required assets are missing. Semantic-engine asset checks resolve through the
-canonical contract owner seam (`contract_owner_for_semantic_engine`) to prevent drift between API surfaces, including the
+canonical contract owner seam (`contract_owner_for_semantic_engine`) to prevent drift between API surfaces, including Qwen Image
+scoped split-asset roots, the
 vendored LTX2 metadata/config readiness required by explicit execution profiles and the explicit Netflix VOID base-bundle +
 literal overlay-pair readiness contract. Mode-scoped rows can now report exact masked-runtime readiness (for example SDXL `fooocus_inpaint`)
 without making the whole semantic engine globally unready.
@@ -96,6 +97,7 @@ _CHECKPOINT_REQUIRED_ENGINES: frozenset[str] = frozenset(
         "sdxl",
         "flux1",
         "flux2",
+        "qwen_image",
         "chroma",
         "zimage",
         "anima",
@@ -114,6 +116,7 @@ _CHECKPOINT_ROOT_KEYS_BY_ENGINE: dict[str, tuple[str, ...]] = {
     "sdxl": ("sdxl_ckpt",),
     "flux1": ("flux1_ckpt",),
     "flux2": ("flux2_ckpt",),
+    "qwen_image": ("qwen_image_ckpt",),
     "chroma": ("flux1_ckpt",),
     "zimage": ("zimage_ckpt",),
     "anima": ("anima_ckpt",),
@@ -127,6 +130,7 @@ _CHECKPOINT_FAMILY_HINTS_BY_ENGINE: dict[str, tuple[str, ...]] = {
     "sdxl": ("sdxl",),
     "flux1": ("flux1",),
     "flux2": ("flux2",),
+    "qwen_image": ("qwen_image",),
     "chroma": ("chroma", "flux1"),
     "zimage": ("zimage",),
     "anima": ("anima",),
@@ -138,6 +142,7 @@ _CHECKPOINT_FAMILY_HINTS_BY_ENGINE: dict[str, tuple[str, ...]] = {
 _VAE_ROOT_KEYS_BY_CONTRACT_OWNER: dict[str, tuple[str, ...]] = {
     "flux1": ("flux1_vae",),
     "flux2": ("flux2_vae",),
+    "qwen_image": ("qwen_image_vae",),
     "zimage": ("zimage_vae", "flux1_vae"),
     "anima": ("anima_vae",),
     "wan22_5b": ("wan22_vae",),
@@ -149,6 +154,7 @@ _VAE_ROOT_KEYS_BY_CONTRACT_OWNER: dict[str, tuple[str, ...]] = {
 _TEXT_ENCODER_ROOT_KEYS_BY_CONTRACT_OWNER: dict[str, tuple[str, ...]] = {
     "flux1": ("flux1_tenc",),
     "flux2": ("flux2_tenc",),
+    "qwen_image": ("qwen_image_tenc",),
     "zimage": ("zimage_tenc",),
     "anima": ("anima_tenc",),
     "wan22_5b": ("wan22_tenc",),
@@ -353,6 +359,8 @@ def _count_checkpoints_for_engine(model_api: Any, semantic_engine: str) -> int:
 
     root_keys = _CHECKPOINT_ROOT_KEYS_BY_ENGINE.get(semantic_engine, ())
     roots = _roots_for_keys(root_keys)
+    if root_keys and not roots:
+        return 0
     if not roots:
         return len(records)
 
@@ -401,6 +409,8 @@ def _records_for_semantic_engine(model_api: Any, semantic_engine: str) -> list[A
 
     root_keys = _CHECKPOINT_ROOT_KEYS_BY_ENGINE.get(semantic_engine, ())
     roots = _roots_for_keys(root_keys)
+    if root_keys and not roots:
+        return []
     if not roots:
         return list(records)
 
@@ -682,16 +692,18 @@ def build_engine_dependency_checks(
                             ),
                         )
                     )
-        scoped_vae_roots = _roots_for_keys(_VAE_ROOT_KEYS_BY_CONTRACT_OWNER.get(contract_engine, ()))
-        scoped_tenc_roots = _roots_for_keys(_TEXT_ENCODER_ROOT_KEYS_BY_CONTRACT_OWNER.get(contract_engine, ()))
+        scoped_vae_root_keys = _VAE_ROOT_KEYS_BY_CONTRACT_OWNER.get(contract_engine, ())
+        scoped_tenc_root_keys = _TEXT_ENCODER_ROOT_KEYS_BY_CONTRACT_OWNER.get(contract_engine, ())
+        scoped_vae_roots = _roots_for_keys(scoped_vae_root_keys)
+        scoped_tenc_roots = _roots_for_keys(scoped_tenc_root_keys)
         scoped_vae_count = (
             _count_assets_in_roots(inventory.get("vaes"), scoped_vae_roots)
-            if scoped_vae_roots
+            if scoped_vae_root_keys
             else vae_count
         )
         scoped_text_encoder_count = (
             _count_assets_in_roots(inventory.get("text_encoders"), scoped_tenc_roots)
-            if scoped_tenc_roots
+            if scoped_tenc_root_keys
             else text_encoder_count
         )
         scoped_text_encoder_slots = (
@@ -702,7 +714,7 @@ def build_engine_dependency_checks(
                 and _path_in_roots(str(item.get("path") or "").strip(), scoped_tenc_roots)
                 and str(item.get("slot") or "").strip()
             }
-            if scoped_tenc_roots
+            if scoped_tenc_root_keys
             else text_encoder_slots
         )
         if contract.requires_vae:

@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Namespace package for model-family runtime implementations.
-Holds runtime code that is specific to a single engine family (e.g. WAN22, Flux, SD, ZImage, Chroma),
+Holds runtime code that is specific to a single engine family (e.g. WAN22, Flux, SD, ZImage, Chroma, Qwen Image),
 separated from generic runtime modules under `apps/backend/runtime/`.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -17,4 +17,3 @@ Symbols (top-level; keep in sync; no ghosts):
 from __future__ import annotations
 
 __all__: list[str] = []
-

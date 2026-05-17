@@ -8,7 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: Canonical per-engine asset requirements (VAE/text encoders) for generation requests.
 Centralizes “what is required” so UI ↔ API ↔ loader can stay in sync and drift cannot reappear via duplicated `engine_id in (...)` logic.
-    Includes sha-selected external-asset engines (e.g., FLUX.2 Klein, LTX2 GGUF core-only, Z-Image, and Anima) where VAE/text-encoder
+    Includes sha-selected external-asset engines (e.g., FLUX.2 Klein, Qwen Image, LTX2 GGUF core-only, Z-Image, and Anima) where VAE/text-encoder
     weights must be provided explicitly.
 WAN22 engine variants (`wan22_5b`, `wan22_14b`, `wan22_14b_animate`) are modeled as explicit engine contracts with strict owner mapping, and
 Netflix VOID uses an explicit base-bundle-owned contract (`netflix_void_base` + `netflix_void_ckpt`) with no external VAE/text-encoder slots.
@@ -181,6 +181,14 @@ _BASE_CONTRACTS: dict[str, EngineAssetContract] = {
         sha_only=True,
         notes="External-assets-first: requires FLUX.2 VAE + 1 Qwen3-4B text encoder via sha selection.",
     ),
+    "qwen_image": EngineAssetContract(
+        requires_vae=True,
+        tenc_slots=("qwen2_5_vl_7b",),
+        tenc_slot_labels=("Qwen2.5-VL-7B",),
+        tenc_kind=TextEncoderKind.QWEN,
+        sha_only=True,
+        notes="External-assets-first: requires Qwen Image VAE + 1 Qwen2.5-VL-7B multimodal text encoder via sha selection.",
+    ),
     "zimage": EngineAssetContract(
         requires_vae=True,
         tenc_slots=("qwen3_4b",),
@@ -277,6 +285,7 @@ _CONTRACT_OWNER_BY_ENGINE_ID: dict[str, str] = {
     "flux1": "flux1",
     "flux1_kontext": "flux1_kontext",
     "flux2": "flux2",
+    "qwen_image": "qwen_image",
     "flux1_chroma": "flux1_chroma",
     "zimage": "zimage",
     "anima": "anima",
@@ -294,6 +303,7 @@ _CONTRACT_OWNER_BY_SEMANTIC_ENGINE: dict[str, str] = {
     "sdxl": "sdxl",
     "flux1": "flux1",
     "flux2": "flux2",
+    "qwen_image": "qwen_image",
     "chroma": "flux1_chroma",
     "zimage": "zimage",
     "anima": "anima",
@@ -347,6 +357,7 @@ def contract_for_core_only(engine_id: str) -> EngineAssetContract:
         "flux1",
         "flux1_kontext",
         "flux2",
+        "qwen_image",
         "zimage",
         "anima",
         "wan22_5b",

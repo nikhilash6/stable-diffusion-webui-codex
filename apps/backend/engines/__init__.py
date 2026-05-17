@@ -8,7 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: Engine package facade and default registration entry points.
 Exposes `register_default_engines(...)` and lazily resolves optional/large engine classes to avoid heavy imports during startup.
-Includes the Anima, FLUX.2, and LTX2 engine facades; parked placeholder families such as `netflix_void`
+Includes the Anima, FLUX.2, LTX2, and Qwen Image engine facades; parked placeholder families such as `netflix_void`
 remain importable by name but are not part of default runtime registration.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from typing import Any as Wan22Animate14BEngine
     from typing import Any as ZImageEngine
     from typing import Any as AnimaEngine
+    from typing import Any as QwenImageEngine
 
 
 def register_default_engines(*, registry: EngineRegistry | None = None, replace: bool = False) -> None:
@@ -107,6 +108,7 @@ def register_default_engines(*, registry: EngineRegistry | None = None, replace:
     _maybe_register("sd20", registration.register_sd20)
     _maybe_register("zimage", registration.register_zimage)
     _maybe_register("anima", registration.register_anima)
+    _maybe_register("qwen_image", registration.register_qwen_image)
     # WAN22 GGUF lanes are explicit and variant-specific.
     _maybe_register("wan22_5b", registration.register_wan22_5b)
     _maybe_register("wan22_14b", registration.register_wan22_14b)
@@ -131,6 +133,7 @@ __all__ = [
     "Chroma",
     "ZImageEngine",
     "AnimaEngine",
+    "QwenImageEngine",
     "Wan22Animate14BEngine",
     "Wan2214BEngine",
     "Wan225BEngine",
@@ -150,6 +153,7 @@ _ENGINE_EXPORTS = {
     "Chroma": ("apps.backend.engines.flux.chroma", "Chroma"),
     "ZImageEngine": ("apps.backend.engines.zimage.zimage", "ZImageEngine"),
     "AnimaEngine": ("apps.backend.engines.anima.anima", "AnimaEngine"),
+    "QwenImageEngine": ("apps.backend.engines.qwen_image.qwen_image", "QwenImageEngine"),
     "Wan22Animate14BEngine": ("apps.backend.engines.wan22.wan22_14b_animate", "Wan22Animate14BEngine"),
     "Wan2214BEngine": ("apps.backend.engines.wan22.wan22_14b", "Wan2214BEngine"),
     "Wan225BEngine": ("apps.backend.engines.wan22.wan22_5b", "Wan225BEngine"),

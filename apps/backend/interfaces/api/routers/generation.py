@@ -8,7 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: Generation API routes (txt2img/img2img/image-automation/txt2vid/img2vid/vid2vid).
 Contains request parsing and payload validation (including hires tile config via `extras.hires.tile` / `img2img_extras.hires.tile`, Z-Image Turbo/Base
-`extras.zimage_variant`, and WAN video export options like `video_return_frames`), and delegates image task workers to
+`extras.zimage_variant`, internal Qwen Image variant derivation, and WAN video export options like `video_return_frames`), and delegates image task workers to
 `apps/backend/interfaces/api/tasks/generation_tasks.py`.
 Also owns the backend-owned `/api/image-automation` envelope (loop/seed/prompt/init-source parsing plus repo-fenced folder and wildcard roots),
 validates nested IP-Adapter selectors/source kinds before delegating runtime application to the shared sampling stage, and preflights native
@@ -30,6 +30,9 @@ Resolves WAN `wan_vae_sha` through VAE inventory ownership and validates VAE con
 Validates `extras.vae_sha` against VAE inventory ownership (rejects non-VAE asset SHAs before runtime load) to keep Flux core-only causality fail-loud at request time.
 Image request selectors are explicit: the router validates `model_sha`, `checkpoint_core_only`, `model_format`, and `vae_source`
 against inventory metadata instead of probing checkpoint families or inferring core-only status from checkpoint names.
+Qwen Image requests keep `qwen_image_variant` internal-only: txt2img derives `2512`, img2img derives `edit_2511`, and stale public variant,
+foreign-family selectors, classic denoise/resize/mask/hires/IP-Adapter/LoRA/SUPIR surfaces fail before task creation.
+Qwen Image VAE SHA selection is scoped to `qwen_image_vae` roots and must expose `AutoencoderKLQwenImage` config metadata before task creation.
 Resolves `extras.lora_sha` / `img2img_extras.lora_sha` into server-side `lora_path` overrides only for engines with `supports_lora=True`
 and when SHA ownership matches LoRA inventory (`inventory.loras`, `.safetensors`), rejecting unsupported-engine/non-LoRA resolution fail-loud.
 Enforces generation settings contracts: top-level `smart_*` payload keys are rejected and `settings_revision` must match persisted options revision.
@@ -132,6 +135,17 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         semantic_engine_for_engine_id,
         supir_support_error,
     )
+    from apps.backend.runtime.families.qwen_image.config import (
+        QWEN_IMAGE_EDIT_VARIANT,
+        QWEN_IMAGE_ENGINE_ID,
+        QWEN_IMAGE_PUBLIC_SAMPLER,
+        QWEN_IMAGE_PUBLIC_SCHEDULER,
+        QWEN_IMAGE_TXT2IMG_VARIANT,
+        QWEN_IMAGE_VARIANT_KEY,
+        qwen_image_edit_condition_dimensions,
+        qwen_image_edit_vae_dimensions,
+        validate_qwen_image_dimensions,
+    )
     from apps.backend.runtime.families.supir.config import parse_supir_mode_config
     from apps.backend.runtime.families.supir.errors import SupirBaseModelError, SupirConfigError, SupirWeightsError
     from apps.backend.runtime.families.supir.loader import resolve_supir_assets
@@ -180,6 +194,57 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
     _IP_ADAPTER_KEYS = {"enabled", "model", "image_encoder", "weight", "start_at", "end_at", "source"}
     _IP_ADAPTER_SOURCE_KEYS = {"kind", "reference_image_data", "folder_path", "selection_mode", "count", "order", "sort_by"}
     _IMG2IMG_PIXEL_RESIZE_MODES = {"just_resize", "crop_and_resize", "resize_and_fill"}
+    _QWEN_IMAGE_ENGINE_ID = QWEN_IMAGE_ENGINE_ID
+    _QWEN_IMAGE_TXT2IMG_VARIANT = QWEN_IMAGE_TXT2IMG_VARIANT
+    _QWEN_IMAGE_EDIT_VARIANT = QWEN_IMAGE_EDIT_VARIANT
+    _QWEN_IMAGE_VARIANT_KEY = QWEN_IMAGE_VARIANT_KEY
+    _QWEN_IMAGE_SAMPLER = QWEN_IMAGE_PUBLIC_SAMPLER
+    _QWEN_IMAGE_SCHEDULER = QWEN_IMAGE_PUBLIC_SCHEDULER
+    _QWEN_IMAGE_ASSET_EXTRAS_KEYS = {
+        "checkpoint_core_only",
+        "model_format",
+        "model_sha",
+        "tenc_sha",
+        "vae_sha",
+        "vae_source",
+    }
+    _QWEN_IMAGE_TXT2IMG_REJECTED_EXTRAS_KEYS = {
+        "batch_count",
+        "batch_size",
+        "er_sde",
+        "guidance",
+        "hires",
+        "ip_adapter",
+        "lora_sha",
+        "refiner",
+        "swap_model",
+        "text_encoder_override",
+        "zimage_variant",
+    }
+    _QWEN_IMAGE_IMG2IMG_REJECTED_TOP_LEVEL_KEYS = {
+        "img2img_clip_skip",
+        "img2img_denoising_strength",
+        "img2img_distilled_cfg_scale",
+        "img2img_eta_noise_seed_delta",
+        "img2img_height",
+        "img2img_image_cfg_scale",
+        "img2img_inpaint_full_res_padding",
+        "img2img_inpainting_fill",
+        "img2img_inpainting_mask_invert",
+        "img2img_inpaint_mode",
+        "img2img_mask",
+        "img2img_mask_blur",
+        "img2img_mask_blur_x",
+        "img2img_mask_blur_y",
+        "img2img_mask_enforcement",
+        "img2img_mask_region_split",
+        "img2img_mask_round",
+        "img2img_noise_source",
+        "img2img_per_step_blend_steps",
+        "img2img_per_step_blend_strength",
+        "img2img_resize_mode",
+        "img2img_width",
+    }
     _IMG2IMG_ALLOWED_KEYS = {
         "device",
         "engine",
@@ -2175,6 +2240,7 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
             return {}, None
         if not isinstance(raw, dict):
             raise HTTPException(status_code=400, detail="'extras' must be an object")
+        _reject_public_qwen_image_variant(raw, context="extras")
         _reject_unknown_keys(raw, _TXT2IMG_EXTRAS_KEYS, "extras")
         if "supir" in raw:
             raise HTTPException(
@@ -2441,6 +2507,20 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
 
     def _validate_pre_task_img2img_payload(payload: Mapping[str, Any]) -> None:
         _reject_removed_img2img_second_pass_keys(payload)
+        _reject_public_qwen_image_variant(payload, context="img2img")
+        if _is_qwen_image_engine(payload.get("engine")):
+            _reject_qwen_image_img2img_surfaces(payload)
+            raw_extras = payload.get("img2img_extras")
+            if isinstance(raw_extras, Mapping):
+                _reject_public_qwen_image_variant(raw_extras, context="img2img_extras")
+                _reject_unknown_keys(raw_extras, _QWEN_IMAGE_ASSET_EXTRAS_KEYS, "img2img_extras")
+            elif raw_extras is not None:
+                raise HTTPException(status_code=400, detail="'img2img_extras' must be an object")
+            _preflight_qwen_image_asset_selector_payload(
+                raw_extras if isinstance(raw_extras, Mapping) else {},
+                field_prefix="img2img_extras",
+            )
+            return
         hires_cfg = _parse_img2img_nested_hires_from_extras(
             payload.get("img2img_extras"),
             default_cfg=1.0,
@@ -2470,6 +2550,28 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                 status_code=400,
                 detail="'img2img_extras.supir' cannot be combined with img2img hires in tranche 1.",
             )
+
+    def _validate_pre_task_txt2img_payload(payload: Mapping[str, Any]) -> None:
+        _reject_public_qwen_image_variant(payload, context="txt2img")
+        if not _is_qwen_image_engine(payload.get("engine")):
+            return
+        _require_qwen_image_txt2img_dimensions(
+            _require_int_field(payload, "width", minimum=8),
+            _require_int_field(payload, "height", minimum=8),
+        )
+        raw_extras = payload.get("extras")
+        if isinstance(raw_extras, Mapping):
+            _reject_qwen_image_txt2img_surfaces(
+                raw_extras=raw_extras,
+                extras={},
+                hires_cfg=raw_extras.get("hires") if "hires" in raw_extras else None,
+            )
+        elif raw_extras is not None:
+            raise HTTPException(status_code=400, detail="'extras' must be an object")
+        _preflight_qwen_image_asset_selector_payload(
+            raw_extras if isinstance(raw_extras, Mapping) else {},
+            field_prefix="extras",
+        )
 
     def _resolve_model_ref_from_sha_or_name(
         *,
@@ -2695,6 +2797,8 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         key = raw.lower()
         if key in {"sd35", "sd3", "sd-3.5"}:
             return "sd35"
+        if key == _QWEN_IMAGE_ENGINE_ID:
+            return _QWEN_IMAGE_ENGINE_ID
         from apps.backend.core.registry import registry as _engine_registry
         try:
             _ensure_default_engines_registered()
@@ -2929,6 +3033,103 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                 ),
             )
 
+    def _is_qwen_image_engine(engine_key: object) -> bool:
+        return str(engine_key or "").strip().lower() == _QWEN_IMAGE_ENGINE_ID
+
+    def _reject_public_qwen_image_variant(payload: Mapping[str, Any], *, context: str) -> None:
+        if _QWEN_IMAGE_VARIANT_KEY in payload:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"'{context}.{_QWEN_IMAGE_VARIANT_KEY}' is internal-only. "
+                    "The API derives the Qwen Image variant from the route."
+                ),
+            )
+
+    def _require_qwen_image_sampling_pair(*, sampler_name: object, scheduler_name: object, sampler_field: str, scheduler_field: str) -> None:
+        sampler = str(sampler_name or "").strip().lower()
+        scheduler = str(scheduler_name or "").strip().lower()
+        if sampler != _QWEN_IMAGE_SAMPLER:
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{sampler_field}' must be '{_QWEN_IMAGE_SAMPLER}' for engine '{_QWEN_IMAGE_ENGINE_ID}'.",
+            )
+        if scheduler != _QWEN_IMAGE_SCHEDULER:
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{scheduler_field}' must be '{_QWEN_IMAGE_SCHEDULER}' for engine '{_QWEN_IMAGE_ENGINE_ID}'.",
+            )
+
+    def _parse_qwen_image_asset_extras(raw: object, *, field_prefix: str) -> Dict[str, Any]:
+        if raw is None:
+            return {}
+        if not isinstance(raw, dict):
+            raise HTTPException(status_code=400, detail=f"'{field_prefix}' must be an object")
+        _reject_public_qwen_image_variant(raw, context=field_prefix)
+        _reject_unknown_keys(raw, _QWEN_IMAGE_ASSET_EXTRAS_KEYS, field_prefix)
+
+        extras: Dict[str, Any] = {}
+        for key in ("model_sha", "tenc_sha", "vae_sha"):
+            if key in raw:
+                value = raw.get(key)
+                if value is not None:
+                    extras[key] = value
+        checkpoint_core_only = _parse_optional_bool_selector(
+            payload=raw,
+            key="checkpoint_core_only",
+            field_name=f"{field_prefix}.checkpoint_core_only",
+        )
+        if checkpoint_core_only is not None:
+            extras["checkpoint_core_only"] = checkpoint_core_only
+        model_format = _parse_optional_model_format_selector(
+            payload=raw,
+            key="model_format",
+            field_name=f"{field_prefix}.model_format",
+        )
+        if model_format is not None:
+            extras["model_format"] = model_format
+        vae_source = _parse_optional_vae_source_selector(
+            payload=raw,
+            key="vae_source",
+            field_name=f"{field_prefix}.vae_source",
+        )
+        if vae_source is not None:
+            extras["vae_source"] = vae_source
+        return extras
+
+    def _reject_qwen_image_txt2img_surfaces(*, raw_extras: object, extras: Mapping[str, Any], hires_cfg: Mapping[str, Any] | None) -> None:
+        if isinstance(raw_extras, Mapping):
+            _reject_public_qwen_image_variant(raw_extras, context="extras")
+            for key in sorted(_QWEN_IMAGE_TXT2IMG_REJECTED_EXTRAS_KEYS):
+                if key in raw_extras:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"'extras.{key}' is unsupported for engine '{_QWEN_IMAGE_ENGINE_ID}'.",
+                    )
+        if hires_cfg is not None:
+            raise HTTPException(status_code=400, detail=f"'extras.hires' is unsupported for engine '{_QWEN_IMAGE_ENGINE_ID}'.")
+        for key in sorted(_QWEN_IMAGE_TXT2IMG_REJECTED_EXTRAS_KEYS):
+            if key in extras:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'extras.{key}' is unsupported for engine '{_QWEN_IMAGE_ENGINE_ID}'.",
+                )
+
+    def _reject_qwen_image_img2img_surfaces(payload: Mapping[str, Any]) -> None:
+        _reject_public_qwen_image_variant(payload, context="img2img")
+        for key in sorted(_QWEN_IMAGE_IMG2IMG_REJECTED_TOP_LEVEL_KEYS):
+            if key in payload and payload.get(key) is not None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'{key}' is unsupported for engine '{_QWEN_IMAGE_ENGINE_ID}' img2img edit.",
+                )
+        batch_count = _require_int_field(payload, "img2img_batch_count", minimum=1) if "img2img_batch_count" in payload else 1
+        batch_size = _require_int_field(payload, "img2img_batch_size", minimum=1) if "img2img_batch_size" in payload else 1
+        if batch_count != 1:
+            raise HTTPException(status_code=400, detail="'img2img_batch_count' must be 1 for Qwen Image Edit.")
+        if batch_size != 1:
+            raise HTTPException(status_code=400, detail="'img2img_batch_size' must be 1 for Qwen Image Edit.")
+
     def _parse_optional_sampler_field(*, value: object, field_name: str) -> str | None:
         if value is None:
             return None
@@ -3062,6 +3263,77 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
             return field_name
         return f"{prefix}.{field_name}"
 
+    def _resolve_qwen_image_vae_sha_to_path(
+        *,
+        vae_sha: str,
+        vae_field: str,
+        resolve_asset_by_sha,  # type: ignore[no-untyped-def]
+        resolve_vae_path_by_sha,  # type: ignore[no-untyped-def]
+    ) -> str:
+        from apps.backend.infra.config.paths import get_paths_for as _get_paths_for
+        from apps.backend.runtime.families.qwen_image.vae import qwen_image_validate_external_vae_path
+
+        vae_path = resolve_vae_path_by_sha(vae_sha)
+        if not vae_path:
+            non_vae_path = resolve_asset_by_sha(vae_sha)
+            if non_vae_path:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"'{vae_field}' resolved to a non-VAE asset path: {non_vae_path}. "
+                        "Select a SHA from inventory.vaes."
+                    ),
+                )
+            raise HTTPException(status_code=409, detail=f"Asset not found for sha: {vae_sha}")
+
+        qwen_image_vae_roots = tuple(_get_paths_for("qwen_image_vae"))
+        if not qwen_image_vae_roots:
+            raise HTTPException(status_code=409, detail="No qwen_image_vae roots are configured.")
+        try:
+            return qwen_image_validate_external_vae_path(
+                vae_path,
+                allowed_roots=qwen_image_vae_roots,
+                context=f"{vae_field} Qwen Image VAE",
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+    def _preflight_qwen_image_asset_selector_payload(raw_extras: Mapping[str, Any], *, field_prefix: str) -> None:
+        from apps.backend.inventory.cache import resolve_asset_by_sha, resolve_vae_path_by_sha
+
+        vae_field = _asset_field_label(field_prefix=field_prefix, field_name="vae_sha")
+        vae_source_field = _asset_field_label(field_prefix=field_prefix, field_name="vae_source")
+        tenc_field = _asset_field_label(field_prefix=field_prefix, field_name="tenc_sha")
+
+        vae_source_raw = raw_extras.get("vae_source")
+        if not isinstance(vae_source_raw, str) or vae_source_raw.strip().lower() != "external":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Engine '{_QWEN_IMAGE_ENGINE_ID}' requires '{vae_source_field}' set to 'external'.",
+            )
+        vae_sha = _normalize_sha_field(raw_extras.get("vae_sha"), field_label=vae_field)
+        if not vae_sha:
+            raise HTTPException(status_code=400, detail=f"Engine '{_QWEN_IMAGE_ENGINE_ID}' requires '{vae_field}' (sha256)")
+        _resolve_qwen_image_vae_sha_to_path(
+            vae_sha=vae_sha,
+            vae_field=vae_field,
+            resolve_asset_by_sha=resolve_asset_by_sha,
+            resolve_vae_path_by_sha=resolve_vae_path_by_sha,
+        )
+
+        tenc_shas = _normalize_sha_list_field(raw_extras.get("tenc_sha"), field_label=tenc_field)
+        if len(tenc_shas) != 1:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Engine '{_QWEN_IMAGE_ENGINE_ID}' requires exactly 1 text encoder via '{tenc_field}'.",
+            )
+
+    def _require_qwen_image_txt2img_dimensions(width: object, height: object) -> tuple[int, int]:
+        try:
+            return validate_qwen_image_dimensions(width, height, context="Qwen Image txt2img dimensions")
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
     def _apply_asset_contract_to_extras(
         *,
         engine_id: str,
@@ -3100,6 +3372,11 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                     f"Do not send {text_encoder_override_field} for SDXL; use explicit "
                     f"{tenc1_field}/{tenc2_field} for core-only checkpoints or {tenc_field} otherwise."
                 ),
+            )
+        if engine_id == _QWEN_IMAGE_ENGINE_ID and "text_encoder_override" in extras:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Do not send {text_encoder_override_field} for Qwen Image; use {tenc_field} only.",
             )
 
         checkpoint_core_only, _model_format = _resolve_checkpoint_contract_from_request(
@@ -3217,18 +3494,26 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                 )
 
         if vae_sha:
-            vae_path = resolve_vae_path_by_sha(vae_sha)
-            if not vae_path:
-                non_vae_path = resolve_asset_by_sha(vae_sha)
-                if non_vae_path:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=(
-                            f"'{vae_field}' resolved to a non-VAE asset path: {non_vae_path}. "
-                            "Select a SHA from inventory.vaes."
-                        ),
-                    )
-                raise HTTPException(status_code=409, detail=f"Asset not found for sha: {vae_sha}")
+            if engine_id == _QWEN_IMAGE_ENGINE_ID:
+                vae_path = _resolve_qwen_image_vae_sha_to_path(
+                    vae_sha=vae_sha,
+                    vae_field=vae_field,
+                    resolve_asset_by_sha=resolve_asset_by_sha,
+                    resolve_vae_path_by_sha=resolve_vae_path_by_sha,
+                )
+            else:
+                vae_path = resolve_vae_path_by_sha(vae_sha)
+                if not vae_path:
+                    non_vae_path = resolve_asset_by_sha(vae_sha)
+                    if non_vae_path:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                f"'{vae_field}' resolved to a non-VAE asset path: {non_vae_path}. "
+                                "Select a SHA from inventory.vaes."
+                            ),
+                        )
+                    raise HTTPException(status_code=409, detail=f"Asset not found for sha: {vae_sha}")
             extras["vae_path"] = vae_path
 
         if tenc_shas:
@@ -3491,6 +3776,7 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         guidance_scale: float
 
     def _parse_txt2img_payload_dto(payload: Dict[str, Any]) -> _Txt2ImgPayloadDTO:
+        _reject_public_qwen_image_variant(payload, context="txt2img")
         _reject_unknown_keys(payload, _TXT2IMG_ALLOWED_KEYS, "txt2img")
         engine_override = payload.get('engine')
         engine_key = _canonical_engine_key(engine_override)
@@ -3721,6 +4007,61 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
             clip_skip=clip_skip,
             noise_source=noise_source,
             ensd_raw=ensd_raw,
+        )
+
+    def _parse_qwen_image_img2img_core_dto(
+        payload: Dict[str, Any],
+        *,
+        init_w: int,
+        init_h: int,
+    ) -> _Img2ImgCoreDTO:
+        engine_key = _canonical_engine_key(payload.get("engine"))
+        if not _is_qwen_image_engine(engine_key):
+            raise HTTPException(status_code=400, detail=f"Engine '{engine_key}' is not a Qwen Image engine.")
+        _reject_qwen_image_img2img_surfaces(payload)
+
+        prompt = _require_str_field(payload, "img2img_prompt", allow_empty=True)
+        negative_prompt = _require_str_field(payload, "img2img_neg_prompt", allow_empty=True)
+        styles = _p.as_list(payload, "img2img_styles") if "img2img_styles" in payload else []
+        steps_val = _require_int_field(payload, "img2img_steps", minimum=1)
+        if "img2img_cfg_scale" not in payload:
+            raise HTTPException(status_code=400, detail="'img2img_cfg_scale' is required for Qwen Image Edit.")
+        cfg_scale = _require_float_field(payload, "img2img_cfg_scale")
+        sampler_name = _require_str_field(payload, "img2img_sampling")
+        scheduler_name = _require_str_field(payload, "img2img_scheduler")
+        _require_qwen_image_sampling_pair(
+            sampler_name=sampler_name,
+            scheduler_name=scheduler_name,
+            sampler_field="img2img_sampling",
+            scheduler_field="img2img_scheduler",
+        )
+        seed_val = _require_int_field(payload, "img2img_seed")
+        try:
+            width_val, height_val = qwen_image_edit_vae_dimensions(init_w, init_h)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+        return _Img2ImgCoreDTO(
+            engine_key=engine_key,
+            model_ref=payload.get("model"),
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            styles=styles,
+            batch_count=1,
+            batch_size=1,
+            steps=steps_val,
+            cfg_scale=cfg_scale,
+            distilled_cfg_scale=None,
+            image_cfg_scale=None,
+            denoise=1.0,
+            width=width_val,
+            height=height_val,
+            sampler_name=sampler_name,
+            scheduler_name=scheduler_name,
+            seed=seed_val,
+            clip_skip=None,
+            noise_source=None,
+            ensd_raw=None,
         )
 
     def _extract_wan22_unipc_solver_hint(sampler_value: str | None) -> str | None:
@@ -4253,6 +4594,21 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         styles = _parse_styles(payload)
         metadata = _parse_metadata(payload)
         extras, hires_cfg = _parse_txt2img_extras(payload)
+        if _is_qwen_image_engine(engine_key):
+            _reject_qwen_image_txt2img_surfaces(
+                raw_extras=payload.get("extras"),
+                extras=extras,
+                hires_cfg=hires_cfg,
+            )
+            _require_qwen_image_sampling_pair(
+                sampler_name=sampler_name,
+                scheduler_name=scheduler_name,
+                sampler_field="sampler",
+                scheduler_field="scheduler",
+            )
+            width, height = _require_qwen_image_txt2img_dimensions(width, height)
+            extras[_QWEN_IMAGE_VARIANT_KEY] = _QWEN_IMAGE_TXT2IMG_VARIANT
+            metadata[_QWEN_IMAGE_VARIANT_KEY] = _QWEN_IMAGE_TXT2IMG_VARIANT
         _enforce_txt2img_ip_adapter_stage_support(
             engine_key=engine_key,
             extras=extras,
@@ -4381,6 +4737,82 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
 
         return req, engine_key, model_override
 
+    def _prepare_qwen_image_img2img(
+        payload: Dict[str, Any],
+        *,
+        init_image: Any,
+        init_w: int,
+        init_h: int,
+        settings_revision: int,
+    ) -> Tuple[Img2ImgRequest, str, Optional[str]]:
+        core = _parse_qwen_image_img2img_core_dto(payload, init_w=init_w, init_h=init_h)
+        engine_key = core.engine_key
+        model_ref = core.model_ref
+        extras = _parse_qwen_image_asset_extras(payload.get("img2img_extras"), field_prefix="img2img_extras")
+        extras[_QWEN_IMAGE_VARIANT_KEY] = _QWEN_IMAGE_EDIT_VARIANT
+
+        from apps.backend.inventory.cache import resolve_asset_by_sha, resolve_vae_path_by_sha
+        from apps.backend.runtime.models import api as _models_api
+
+        model_ref, checkpoint_record = _resolve_checkpoint_selection(
+            model_override=model_ref,
+            extras=extras,
+            field_prefix="img2img_extras",
+            models_api=_models_api,
+        )
+        _apply_asset_contract_to_extras(
+            engine_id=engine_key,
+            checkpoint_record=checkpoint_record,
+            extras=extras,
+            field_prefix="img2img_extras",
+            require_explicit_checkpoint_contract=True,
+            resolve_asset_by_sha=resolve_asset_by_sha,
+            resolve_vae_path_by_sha=resolve_vae_path_by_sha,
+        )
+
+        try:
+            condition_width, condition_height = qwen_image_edit_condition_dimensions(init_w, init_h)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        metadata = {
+            "styles": core.styles,
+            "distilled_cfg_scale": None,
+            "image_cfg_scale": None,
+            "batch_count": 1,
+            "qwen_image_condition_width": condition_width,
+            "qwen_image_condition_height": condition_height,
+            "qwen_image_vae_width": core.width,
+            "qwen_image_vae_height": core.height,
+            _QWEN_IMAGE_VARIANT_KEY: _QWEN_IMAGE_EDIT_VARIANT,
+        }
+        smart_offload, smart_fallback, smart_cache = _resolve_smart_flags()
+        req = Img2ImgRequest(
+            task=TaskType.IMG2IMG,
+            prompt=str(core.prompt),
+            negative_prompt=str(core.negative_prompt),
+            sampler=str(core.sampler_name),
+            scheduler=str(core.scheduler_name),
+            seed=core.seed,
+            guidance_scale=core.cfg_scale,
+            batch_size=1,
+            clip_skip=None,
+            metadata=metadata,
+            init_image=init_image,
+            mask=None,
+            inpaint_mode=None,
+            denoise_strength=1.0,
+            width=core.width,
+            height=core.height,
+            steps=core.steps,
+            extras=extras,
+            hires=None,
+            smart_offload=smart_offload,
+            smart_fallback=smart_fallback,
+            smart_cache=smart_cache,
+            settings_revision=settings_revision,
+        )
+        return req, engine_key, model_ref
+
     def _parse_explicit_device(
         payload: Dict[str, Any],
         *,
@@ -4426,6 +4858,7 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         template = dict(template_raw)
         if mode == "txt2img":
             _validate_txt2img_hires_request_payload(template)
+            _validate_pre_task_txt2img_payload(template)
         _enforce_generation_settings_contract(template)
         _validate_route_engine_capability(
             template,
@@ -4728,6 +5161,7 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
 
     def prepare_img2img(payload: Dict[str, Any]) -> Tuple[Img2ImgRequest, str, Optional[str]]:
         _reject_removed_img2img_second_pass_keys(payload)
+        _reject_public_qwen_image_variant(payload, context="img2img")
         _reject_unknown_keys(payload, _IMG2IMG_ALLOWED_KEYS, "img2img")
         settings_revision = _require_int_field(payload, "settings_revision", minimum=0)
         if "img2img_init_image" not in payload:
@@ -4748,6 +5182,15 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
             init_w, init_h = init_image.size  # type: ignore[attr-defined]
         except Exception:
             init_w, init_h = 0, 0
+        engine_key_for_preflight = _canonical_engine_key(payload.get("engine"))
+        if _is_qwen_image_engine(engine_key_for_preflight):
+            return _prepare_qwen_image_img2img(
+                payload,
+                init_image=init_image,
+                init_w=init_w,
+                init_h=init_h,
+                settings_revision=settings_revision,
+            )
         mask_data = payload.get('img2img_mask')
         mask_image = None
         if mask_data:
@@ -6542,6 +6985,7 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Payload must be JSON object")
         _validate_txt2img_hires_request_payload(payload)
+        _validate_pre_task_txt2img_payload(payload)
         _enforce_generation_settings_contract(payload)
         _validate_route_engine_capability(payload, route_mode=GenerationRouteMode.TXT2IMG)
 

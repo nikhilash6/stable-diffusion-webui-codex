@@ -9,7 +9,7 @@ Required Notice: see NOTICE
 Purpose: Load and normalize the `apps/paths.json` backend paths config.
 Provides cached accessors for model asset roots (checkpoints/text encoders/VAEs/LoRAs/connectors/IP-Adapter assets) and expands repo-relative paths into absolute paths.
 Also provides roots for global modules such as upscalers and SUPIR models.
-Known provisioned keys include SD1.5, SDXL, Flux.1, Flux.2, Anima, WAN22, LTX2, Netflix VOID, ZImage, dedicated IP-Adapter roots, and the SDXL accessory roots `sdxl_fooocus_inpaint` / `sdxl_brushnet`.
+Known provisioned keys include SD1.5, SDXL, Flux.1, Flux.2, Qwen Image, Anima, WAN22, LTX2, Netflix VOID, ZImage, dedicated IP-Adapter roots, and the SDXL accessory roots `sdxl_fooocus_inpaint` / `sdxl_brushnet`.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_MODEL_DIR_KEYS` (constant): Keys in `apps/paths.json` whose missing repo-relative directories are created best-effort.
@@ -62,6 +62,10 @@ _MODEL_DIR_KEYS: tuple[str, ...] = (
     "flux2_tenc",
     "flux2_vae",
     "flux2_loras",
+    # Qwen Image
+    "qwen_image_ckpt",
+    "qwen_image_tenc",
+    "qwen_image_vae",
     # Anima
     "anima_ckpt",
     "anima_tenc",
