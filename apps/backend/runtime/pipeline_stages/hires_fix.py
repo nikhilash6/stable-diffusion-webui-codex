@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Global hires-fix pipeline stage (second pass orchestration helpers).
-Provides family-dispatched helpers to prepare hires inputs (latents/image-conditioning + continuation mode) using the
+Provides executable-family-dispatched helpers to prepare hires inputs (latents/image-conditioning + continuation mode) using the
 global upscalers runtime, and computes correct `start_at_step` semantics from `denoise`. Also computes a Forge-like
 “fill then crop” resize plan when `resize_x/resize_y` change the aspect ratio (avoid stretching).
 
@@ -278,7 +278,7 @@ def _resolve_hires_backend(engine_id: str) -> HiresBackend:
         raise NotImplementedError("Hires preparation requires a non-empty engine id.")
     if normalized_engine_id in {"sd15", "sd20", "sdxl", "sdxl_refiner", "sd35"}:
         return "sd"
-    if normalized_engine_id in {"flux1", "flux1_fill", "flux1_chroma", "zimage", "anima"}:
+    if normalized_engine_id in {"flux1", "flux1_chroma", "zimage", "anima"}:
         return "flow"
     if normalized_engine_id == "flux1_kontext":
         return "kontext"

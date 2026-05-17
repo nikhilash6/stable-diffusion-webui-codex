@@ -1,6 +1,6 @@
 # apps/backend/runtime/pipeline_stages Overview
 Date: 2025-10-30
-Last Review: 2026-04-30
+Last Review: 2026-05-17
 Status: Active
 
 ## Purpose
@@ -65,7 +65,7 @@ Status: Active
 - 2026-02-18: `image_io.py::maybe_decode_for_hr(...)` no longer hardcasts decoded tensors to fp32; decode dtype now follows the engine VAE output so runtime compute/storage policy remains authoritative.
 - 2026-02-21: `image_init.py::prepare_init_bundle(...)` now resizes non-masked img2img init images to `processing.width/height` (when provided) before VAE encode, preventing oversized source images from forcing full-resolution encode memory usage when output dims are smaller.
 - 2026-02-21: `masked_img2img.py::prepare_masked_img2img_bundle(...)` now normalizes init-image + mask dimensions to `processing.width/height` before latent encode, so inpaint/full-res paths no longer require pre-matched source dimensions and avoid oversized encode memory spikes.
-- 2026-03-06: `hires_fix.py` now dispatches hires prep by `sd_model.engine_id` (`sd*` via SD backend; `flux1`/`flux1_fill`/`flux1_chroma`/`zimage`/`anima` via flow-style latent prep; `flux1_kontext` via flow-style prep with `image_latents` continuation mode; `flux2` via the same upscale/crop prep, still returning `image_latents` continuation data for the dedicated FLUX.2 second pass). `HiresPreparation` keeps the typed shared contract (`latents`, optional `image_conditioning`, `continuation_mode`); unknown engines fail loud (no SD fallback).
+- 2026-05-17: `hires_fix.py` dispatches hires prep by executable `sd_model.engine_id` (`sd*` via SD backend; `flux1`/`flux1_chroma`/`zimage`/`anima` via flow-style latent prep; `flux1_kontext` via flow-style prep with `image_latents` continuation mode; `flux2` via the same upscale/crop prep, still returning `image_latents` continuation data for the dedicated FLUX.2 second pass). `HiresPreparation` keeps the typed shared contract (`latents`, optional `image_conditioning`, `continuation_mode`); unknown and capability-only engines fail loud (no SD fallback).
 - 2026-03-02: `sampling_execute.execute_sampling(...)` now exposes explicit `allow_txt2img_conditioning_fallback` control (default `True`), so callers that intentionally clear `image_conditioning` (Kontext/image-latents continuation) can disable implicit txt2img `c_concat` injection without changing default behavior for legacy callsites.
 - 2026-03-08: `sampling_plan.py::resolve_sampler_scheduler_override(...)` rejects legacy `use same*` sentinel strings (`use same sampler`, `use same scheduler`, `use same`); inheritance is represented only by omission or empty overrides.
 - 2026-04-29: `sampling_plan.py::resolve_sampler_scheduler_override(...)` must not synthesize executable schedulers from sampler registry `default_scheduler` metadata. Hires sampler overrides require an explicit scheduler override; scheduler-only overrides still validate against the base sampler.

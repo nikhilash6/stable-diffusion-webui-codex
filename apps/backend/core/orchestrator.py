@@ -7,7 +7,8 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Backend inference orchestrator (engine routing + caching + event streaming).
-Resolves engines from the registry, loads/unloads per request, fingerprints load-affecting options, purges VRAM on model swaps, and yields typed progress events back to API callers.
+Resolves engines from the registry, canonicalizes aliases to descriptor keys before cache/fingerprint ownership, loads/unloads per request,
+fingerprints load-affecting options, purges VRAM on model swaps, and yields typed progress events back to API callers.
 On load/execution failures, performs a best-effort purge to release VRAM/RAM so the backend can recover without restart.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -171,12 +172,18 @@ class InferenceOrchestrator:
         model_ref: str,
         engine_options: Mapping[str, object],
     ) -> object:
+        canonical_key = self._canonical_engine_key(engine_key)
         relevant = {
-            "engine_key": engine_key,
+            "engine_key": canonical_key,
             "model_ref": model_ref,
             "reload_fingerprint": self._reload_fingerprint(engine_options),
         }
         return InferenceOrchestrator._freeze_engine_options(relevant)
+
+    def _canonical_engine_key(self, engine_key: str) -> str:
+        """Return the registry descriptor key for an exact key or alias."""
+
+        return self._registry.get_descriptor(engine_key.strip().lower()).key
 
     @staticmethod
     def _guarded_engine_load(engine: BaseInferenceEngine, model_ref: str, engine_opts: Mapping[str, object]) -> None:
@@ -390,12 +397,12 @@ class InferenceOrchestrator:
         engine_options: Optional[Mapping[str, object]] = None,
     ) -> Iterator[InferenceEvent]:
         start = time.perf_counter()
-        normalized_key = engine_key.strip().lower()
+        canonical_key = self._canonical_engine_key(engine_key)
         engine_opts = engine_options or {}
         if model_ref is not None:
             try:
                 self._maybe_purge_vram_for_generation(
-                    engine_key=normalized_key,
+                    engine_key=canonical_key,
                     model_ref=str(model_ref),
                     engine_options=engine_opts,
                 )
@@ -403,10 +410,14 @@ class InferenceOrchestrator:
                 raise EngineLoadError(
                     f"Failed load preflight for engine '{engine_key}' with model '{model_ref}': {exc}"
                 ) from exc
-        engine = self._resolve_engine(engine_key, engine_opts)
+        engine = self._resolve_engine(canonical_key, engine_opts)
 
         logger.info(
-            "Orchestrator dispatch: task=%s engine=%s model=%s", task.value, engine_key, model_ref or "default"
+            "Orchestrator dispatch: task=%s engine=%s requested_engine=%s model=%s",
+            task.value,
+            canonical_key,
+            engine_key,
+            model_ref or "default",
         )
 
         capabilities = engine.capabilities()
@@ -431,7 +442,7 @@ class InferenceOrchestrator:
                 except Exception:
                     needs_load = True
                 # Reload when load-affecting engine options changed.
-                prev = self._engine_options_fingerprint.get(normalized_key)
+                prev = self._engine_options_fingerprint.get(canonical_key)
                 if prev is not None and prev != reload_fingerprint:
                     needs_load = True
                 # Reload if the primary device changed since last load
@@ -464,7 +475,7 @@ class InferenceOrchestrator:
                             self._purge_vram(reason="engine unload/load transition barrier")
                         self._guarded_engine_load(engine, model_ref, engine_opts)
                         engine.mark_loaded()
-                        self._engine_options_fingerprint[normalized_key] = reload_fingerprint
+                        self._engine_options_fingerprint[canonical_key] = reload_fingerprint
                 except LoadAuthorityViolationError:
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -568,28 +579,31 @@ class InferenceOrchestrator:
 
     # ------------------------------------------------------------------
     def _resolve_engine(self, engine_key: str, engine_options: Mapping[str, object]) -> BaseInferenceEngine:
-        normalized_key = engine_key.strip().lower()
-        if self._enable_cache and normalized_key in self._engine_cache:
-            return self._engine_cache[normalized_key]
+        canonical_key = self._canonical_engine_key(engine_key)
+        if self._enable_cache and canonical_key in self._engine_cache:
+            return self._engine_cache[canonical_key]
 
         try:
             # Do not pass engine_options to constructor: options are applied on load()
-            engine = self._registry.create(normalized_key)
+            engine = self._registry.create(canonical_key)
         except EngineNotFoundError:
             raise
         except Exception as exc:  # noqa: BLE001
             raise EngineExecutionError(f"Failed to create engine '{engine_key}': {exc}") from exc
 
         if self._enable_cache:
-            self._engine_cache[normalized_key] = engine
+            self._engine_cache[canonical_key] = engine
 
         return engine
 
     # ------------------------------------------------------------------
     def evict(self, engine_key: str) -> None:
-        normalized_key = engine_key.strip().lower()
-        engine = self._engine_cache.pop(normalized_key, None)
-        self._engine_options_fingerprint.pop(normalized_key, None)
+        try:
+            canonical_key = self._canonical_engine_key(engine_key)
+        except EngineNotFoundError:
+            canonical_key = engine_key.strip().lower()
+        engine = self._engine_cache.pop(canonical_key, None)
+        self._engine_options_fingerprint.pop(canonical_key, None)
         if engine is None:
             return
         with coordinator_load_permit(
@@ -600,7 +614,7 @@ class InferenceOrchestrator:
                 engine,
                 source="core.orchestrator.evict",
             )
-        logger.info("Evicted engine '%s'", normalized_key)
+        logger.info("Evicted engine '%s'", canonical_key)
 
     def clear_cache(self) -> None:
         for key in list(self._engine_cache.keys()):

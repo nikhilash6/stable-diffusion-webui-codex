@@ -8,11 +8,12 @@ Required Notice: see NOTICE
 
 Purpose: Shared Flow-family VAE utilities (Flow16 + FLUX.2 32-channel AutoencoderKL variants).
 Defines the canonical Flow16 config parity used by diffusers (no quant/post-quant conv) plus the FLUX.2 AutoencoderKLFlux2 config contract,
-with helpers to locate and load those VAEs from either a diffusers directory or a single weights file with device-aware checkpoint loading paths.
+with helpers to locate and load those VAEs from either a diffusers directory or a single weights file with strict device-aware checkpoint loading paths.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `FLOW16_VAE_CONFIG` (constant): Canonical diffusers-like config dict for Flow16 VAEs (16 latent channels, scaling/shift factors).
 - `FLUX2_VAE_CONFIG` (constant): Canonical diffusers-like config dict for FLUX.2 AutoencoderKLFlux2 (32 latent channels + patch BN).
+- `_raise_vae_state_dict_mismatch` (function): Raises on missing/unexpected VAE state-dict keys after strict single-file load.
 - `prepare_external_vae_override_state_dict` (function): Validates incoming VAE key names plus allowed SDXL/Flow16 metadata before engine-side override lane handling.
 - `load_flow16_vae` (function): Loads a Flow16 VAE from a directory or weights file with strict latent-channel validation and device-aware state-dict ingestion.
 - `load_flux2_vae` (function): Loads a FLUX.2 AutoencoderKLFlux2 from a directory or weights file with strict 32-channel + BN contract validation.
@@ -37,6 +38,7 @@ from apps.backend.runtime.common.vae_lane_policy import (
 )
 from apps.backend.runtime.common.vae_ldm import AutoencoderKL_LDM, sanitize_ldm_vae_config
 from apps.backend.runtime.model_registry.specs import ModelFamily
+from apps.backend.runtime.models.state_dict import safe_load_state_dict
 
 logger = get_backend_logger("backend.runtime.common.vae")
 
@@ -137,6 +139,27 @@ def _validate_flux2_vae_contract(vae: object, *, vae_path: str) -> None:
         )
 
 
+def _raise_vae_state_dict_mismatch(
+    *,
+    label: str,
+    vae_path: str,
+    expected_total: int,
+    missing: list[str],
+    unexpected: list[str],
+) -> None:
+    if not missing and not unexpected:
+        return
+    details: list[str] = []
+    if missing:
+        details.append(f"missing {len(missing)}/{max(int(expected_total), 1)} keys sample={missing[:10]}")
+    if unexpected:
+        details.append(f"unexpected {len(unexpected)} keys sample={unexpected[:10]}")
+    raise ValueError(
+        f"Incompatible {label} VAE at {vae_path}: {'; '.join(details)}. "
+        f"Please supply a matching {label} weights file."
+    )
+
+
 def prepare_external_vae_override_state_dict(
     *,
     state_dict: dict[str, object],
@@ -197,18 +220,14 @@ def load_flux2_vae(
             state_dict = validate_vae_key_names(state_dict)
             vae = AutoencoderKLFlux2.from_config(FLUX2_VAE_CONFIG)
             expected_total = len(vae.state_dict())
-            missing, unexpected = vae.load_state_dict(state_dict, strict=False)
-
-            if missing:
-                ratio = len(missing) / max(expected_total, 1)
-                if ratio > 0.05:
-                    raise ValueError(
-                        f"Incompatible FLUX.2 VAE at {vae_path}: missing {len(missing)}/{expected_total} keys. "
-                        "Please supply a matching AutoencoderKLFlux2 weights file."
-                    )
-                logger.warning("FLUX.2 VAE missing keys (%d): %s", len(missing), missing[:5])
-            if unexpected:
-                logger.debug("FLUX.2 VAE unexpected keys (%d): %s", len(unexpected), unexpected[:5])
+            missing, unexpected = safe_load_state_dict(vae, state_dict, log_name="FLUX.2 VAE")
+            _raise_vae_state_dict_mismatch(
+                label="FLUX.2",
+                vae_path=vae_path,
+                expected_total=expected_total,
+                missing=missing,
+                unexpected=unexpected,
+            )
 
             vae = vae.to(dtype=dtype)
 
@@ -276,6 +295,12 @@ def load_flow16_vae(
                 state_dict = load_torch_file(vae_path, device=device)
 
             state_dict = validate_vae_key_names(state_dict)
+            from apps.backend.runtime.state_dict.keymap_sdxl_vae import (
+                resolve_sdxl_vae_keyspace,
+                strip_known_sdxl_vae_metadata,
+            )
+
+            state_dict = strip_known_sdxl_vae_metadata(state_dict)  # type: ignore[arg-type]
             vae_layout = detect_vae_layout(state_dict)
             vae_lane = resolve_vae_layout_lane(family=family, layout=vae_layout)
             using_ldm_native = uses_ldm_native_lane(vae_lane)
@@ -284,28 +309,18 @@ def load_flow16_vae(
                 vae = AutoencoderKL_LDM.from_config(sanitize_ldm_vae_config(FLOW16_VAE_CONFIG))
             else:
                 # Resolve LDM-style Flow16 VAE keyspace into diffusers lookup semantics when diffusers lane is active.
-                from apps.backend.runtime.state_dict.keymap_sdxl_vae import resolve_sdxl_vae_keyspace
-
                 state_dict = resolve_sdxl_vae_keyspace(state_dict).view
                 vae = AutoencoderKL.from_config(FLOW16_VAE_CONFIG)
 
             expected_total = len(vae.state_dict())
-            missing, unexpected = vae.load_state_dict(state_dict, strict=False)
-            
-            if missing:
-                logger.warning("VAE missing keys (%d): %s", len(missing), missing[:5])
-            if unexpected:
-                logger.debug("VAE unexpected keys (%d): %s", len(unexpected), unexpected[:5])
-
-            # Fail loudly if this is not actually a Flow16 VAE.
-            # A mismatched 4-channel VAE will otherwise decode pure noise.
-            if missing:
-                ratio = len(missing) / max(expected_total, 1)
-                if ratio > 0.05:
-                    raise ValueError(
-                        f"Incompatible Flow16 VAE at {vae_path}: missing {len(missing)}/{expected_total} keys "
-                        f"(lane={vae_lane.value}, layout={vae_layout}). Please supply a matching 16-channel Flow VAE."
-                    )
+            missing, unexpected = safe_load_state_dict(vae, state_dict, log_name="Flow16 VAE")
+            _raise_vae_state_dict_mismatch(
+                label="Flow16",
+                vae_path=vae_path,
+                expected_total=expected_total,
+                missing=missing,
+                unexpected=unexpected,
+            )
             
             vae = vae.to(dtype=dtype)
         

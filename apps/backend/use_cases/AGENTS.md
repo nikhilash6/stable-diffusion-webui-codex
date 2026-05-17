@@ -1,6 +1,6 @@
 # apps/backend/use_cases Overview
 Date: 2025-10-30
-Last Review: 2026-04-08
+Last Review: 2026-05-17
 Status: Active
 
 ## Purpose
@@ -77,7 +77,7 @@ Status: Active
 - 2026-03-26: classic `img2img.py` now treats prompt parsing as LoRA-only on both base and hires paths, delegates masked hook selection to `resolve_mask_enforcer_hooks(...)`, and uses proportional non-flow denoise-step semantics by default while hires second passes explicitly opt into the internal fixed-step continuation seam.
 - 2026-03-26: hires prompt contexts in `img2img.py`, `txt2img_pipeline/runner.py`, and the dedicated FLUX.2 img2img seam must inherit base/request LoRAs from the base `PromptContext` when the hires prompt does not restate them; prompt-local hires tags only override same-path weights, they do not clear inherited LoRAs by omission.
 - 2026-03-25: txt2img now has three distinct latent-stage owners: top-level `swap_model` for the first-pass mid-generation engine switch, `hires.swap_model` for whole-second-pass engine replacement, and `refiner` / `hires.refiner` for SDXL-native refiner stages. The first-pass swap persists its engine forward; refiner stages do not.
-- 2026-03-31: classic `img2img.py` now dispatches base image conditioning by family: SD-family engines keep `img2img_conditioning(...)`, flow-family classics (`flux1`, `flux1_fill`, `flux1_chroma`, `zimage`, `anima`) leave `image_conditioning=None` so the shared txt2img zero-conditioning fallback owns the no-`c_concat` path. Masked classic flow-family img2img remains fail-loud by default, but `zimage` is an explicit live exception that stays on the canonical masked owner path (`prepare_masked_img2img_bundle(...) -> execute_sampling(...)`) instead of being lumped into the generic reject.
+- 2026-05-17: classic `img2img.py` dispatches base image conditioning by executable family: SD-family engines keep `img2img_conditioning(...)`, flow-family classics (`flux1`, `flux1_chroma`, `zimage`, `anima`) leave `image_conditioning=None` so the shared txt2img zero-conditioning fallback owns the no-`c_concat` path. Masked classic flow-family img2img remains fail-loud by default, but `zimage` is an explicit live exception that stays on the canonical masked owner path (`prepare_masked_img2img_bundle(...) -> execute_sampling(...)`) instead of being lumped into the generic reject. Capability-only exact ids such as `flux1_fill` are not runtime dispatch owners here.
 - 2026-04-05: `img2img.py` masked prep and `mask_region_split` now read only `processing.mask` / `processing.mask_round`. The use-case must not keep a second `image_mask` / `round_image_mask` owner alive after adapter normalization.
 - 2026-03-31: `img2img.py` now owns zimage hires target normalization in `_resolve_hires_target_dimensions(...)` before the second-pass plan/event handoff. Keep `CodexHiresConfig.resolve_target_dimensions(...)` shared-helper semantics unchanged for other callers; this zimage `%16` correction is use-case-local, not a generic hires-helper rewrite.
 - 2026-03-31: shared image progress shaping now lives in `_image_streaming.py`, and the WAN22 GGUF `dict -> ProgressEvent` mapper now lives in `_video_streaming.py`; task workers/registry still forward/persist those events without becoming new progress owners.

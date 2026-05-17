@@ -1,6 +1,6 @@
 # apps/backend/runtime/common Overview
 Date: 2025-10-28
-Last Review: 2026-03-21
+Last Review: 2026-05-17
 Status: Active
 
 ## Purpose
@@ -12,6 +12,7 @@ Status: Active
 ## Notes
 - 2026-03-21: `vae_lane_policy.py` now exposes `validate_vae_key_names(...)` as a fail-loud guard instead of stripping wrapper prefixes; `vae.py` load paths now reject any attempt to rewrite stored VAE keys before lane resolution or keyspace interpretation.
 - 2026-03-20: `vae.py` now prepares external VAE overrides by enforcing the stored-key contract first and then filtering only the known SDXL/Flow bookkeeping metadata before lane-specific keyspace resolution, so SDXL override loads stay strict without model-class heuristics.
+- 2026-05-17: `vae.load_flow16_vae(...)` and `vae.load_flux2_vae(...)` single-file paths load through `safe_load_state_dict(...)` and fail on any remaining missing or unexpected keys after the owned key-name, metadata, layout, and keyspace steps. Flow16 known training metadata filtering remains allowed; ratio-tolerant VAE acceptance is not allowed on these native/common VAE paths.
 - Add reusable building blocks here to avoid duplication across model-specific runtimes.
 - `vae.py` now validates Flow16 VAE source keys without wrapper rewrites, reuses strict SDXL/Flux LDM→diffusers keyspace resolution for Z Image, and fails fast on incompatible (non-16-channel) VAEs to avoid noisy decodes.
   - Flow16 config parity: includes `use_quant_conv=false` / `use_post_quant_conv=false` (HF Flux/Z-Image configs) so missing quant conv weights do not trigger false drift warnings.

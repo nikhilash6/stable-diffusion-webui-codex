@@ -1,6 +1,6 @@
 # apps/backend/runtime/sampling Overview
 <!-- tags: runtime, sampling, sigma, scheduler -->
-Last Review: 2026-03-28
+Last Review: 2026-05-17
 Status: Active
 
 ## Purpose
@@ -9,7 +9,7 @@ Status: Active
 ## Key Components
 - `sigma_schedules.py`
   - `SchedulerName` enum: canonical scheduler identifiers for sigma-ladder construction.
-  - `build_sigma_schedule(...)`: builds sigma ladders for all exposed schedulers.
+  - `build_sigma_schedule(...)`: builds sigma ladders for all exposed schedulers and validates every returned schedule at the builder boundary.
   - Predictor-backed schedulers (`simple`, `uniform`, `normal`, `beta`, `ddim`, `sgm_uniform`, `turbo`) require predictor data.
   - `beta` uses a predictor-ladder contract: Beta inverse-CDF over timestep probabilities, rounded ladder indices (duplicates preserved), exact requested non-terminal step count, and one terminal zero.
 - `flow_shift_resolver.py`
@@ -59,6 +59,11 @@ Status: Active
   - Empty or unknown sampler/scheduler names fail fast.
 - Sigma ladder precision is fp32:
   - Schedules are built and consumed in fp32 to protect timestep/sigma mapping stability.
+- Sigma ladder shape is builder-enforced:
+  - `build_sigma_schedule(...)` must return a 1D, finite, non-negative, `steps + 1` schedule with terminal zero and a non-increasing non-terminal body.
+  - `uniform` consumes predictor ladders as `sigma_min -> sigma_max` source data and selects high-to-low sampling sigmas before appending terminal zero.
+  - `ddim` / `ddim_uniform` fail loud when requested steps exceed the useful predictor ladder instead of returning a short schedule.
+  - `linear_quadratic` intentionally follows the Comfy/Mochi parity shape scaled by `sigma_max`; `sigma_min` is not a range endpoint for that scheduler.
 - `ddpm + beta` seam:
   - `ddpm` executes natively in `driver.py`.
   - `beta` is predictor-ladder based and no longer uses continuous sigma interpolation.

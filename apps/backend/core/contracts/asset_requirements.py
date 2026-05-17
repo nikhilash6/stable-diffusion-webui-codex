@@ -12,6 +12,7 @@ Centralizes “what is required” so UI ↔ API ↔ loader can stay in sync and
     weights must be provided explicitly.
 WAN22 engine variants (`wan22_5b`, `wan22_14b`, `wan22_14b_animate`) are modeled as explicit engine contracts with strict owner mapping, and
 Netflix VOID uses an explicit base-bundle-owned contract (`netflix_void_base` + `netflix_void_ckpt`) with no external VAE/text-encoder slots.
+Capability-only exact ids are intentionally absent from asset-contract owner maps so dependency lookup fails loud for non-executable ids.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `TextEncoderKind` (enum): UI-friendly label for the expected text encoder selection kind.
@@ -275,7 +276,6 @@ _CONTRACT_OWNER_BY_ENGINE_ID: dict[str, str] = {
     "sd35": "sd35",
     "flux1": "flux1",
     "flux1_kontext": "flux1_kontext",
-    "flux1_fill": "flux1",
     "flux2": "flux2",
     "flux1_chroma": "flux1_chroma",
     "zimage": "zimage",

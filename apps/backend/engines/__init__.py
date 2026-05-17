@@ -14,6 +14,7 @@ remain importable by name but are not part of default runtime registration.
 Symbols (top-level; keep in sync; no ghosts):
 - `EngineLoadError` (class): Error raised when an engine fails to load required resources.
 - `EngineExecutionError` (class): Error raised when an engine fails during inference execution.
+- `EngineRegistrationError` (class): Error raised when default engine registration would leave an invalid partial group.
 - `register_default_engines` (function): Registers the canonical engine set into the registry.
 - `_ENGINE_EXPORTS` (constant): Lazy export map `{name: (module_path, attr)}` for engine class exports.
 - `__getattr__` (function): Lazy import hook for engine class exports.
@@ -27,7 +28,7 @@ from __future__ import annotations
 from importlib import import_module
 from typing import TYPE_CHECKING
 
-from apps.backend.core.exceptions import EngineExecutionError, EngineLoadError
+from apps.backend.core.exceptions import EngineExecutionError, EngineLoadError, EngineNotFoundError, EngineRegistrationError
 from apps.backend.core.registry import EngineRegistry
 
 if TYPE_CHECKING:
@@ -60,18 +61,44 @@ def register_default_engines(*, registry: EngineRegistry | None = None, replace:
 
     target = registry or _global_registry
 
+    def _has_descriptor(key: str) -> bool:
+        try:
+            target.get_descriptor(key)
+        except EngineNotFoundError:
+            return False
+        return True
+
+    def _preflight_group(keys: tuple[str, ...]) -> None:
+        present = tuple(key for key in keys if _has_descriptor(key))
+        if present and len(present) != len(keys):
+            missing = tuple(key for key in keys if key not in present)
+            raise EngineRegistrationError(
+                "Partial default engine group registration is invalid; "
+                f"present={present} missing={missing}."
+            )
+
     def _maybe_register(key: str, fn) -> None:  # type: ignore[no-untyped-def]
         if replace:
             fn(registry=target, replace=True)
             return
-        try:
-            target.get_descriptor(key)
+        if _has_descriptor(key):
             return
-        except Exception:
-            fn(registry=target, replace=False)
+        fn(registry=target, replace=False)
+
+    def _maybe_register_group(keys: tuple[str, ...], fn) -> None:  # type: ignore[no-untyped-def]
+        if replace:
+            fn(registry=target, replace=True)
+            return
+        _preflight_group(keys)
+        if all(_has_descriptor(key) for key in keys):
+            return
+        fn(registry=target, replace=False)
+
+    if not replace:
+        _preflight_group(("sdxl", "sdxl_refiner"))
 
     _maybe_register("sd15", registration.register_sd15)
-    _maybe_register("sdxl", registration.register_sdxl)
+    _maybe_register_group(("sdxl", "sdxl_refiner"), registration.register_sdxl)
     _maybe_register("flux1", registration.register_flux)
     _maybe_register("flux2", registration.register_flux2)
     _maybe_register("ltx2", registration.register_ltx2)
@@ -89,6 +116,7 @@ def register_default_engines(*, registry: EngineRegistry | None = None, replace:
 __all__ = [
     "EngineLoadError",
     "EngineExecutionError",
+    "EngineRegistrationError",
     "register_default_engines",
     "StableDiffusion",
     "StableDiffusion2",

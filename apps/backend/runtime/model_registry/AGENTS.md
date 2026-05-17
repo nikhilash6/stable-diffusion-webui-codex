@@ -1,6 +1,6 @@
 # Model Registry (Work in Progress)
 Date: 2025-10-28
-Last Review: 2026-04-06
+Last Review: 2026-05-17
 Status: Draft
 
 ## Purpose
@@ -11,6 +11,7 @@ Status: Draft
 - Core dataclasses/enums (now `CodexCoreSignature`/`CodexCoreArchitecture`) in place with manifest-driven metadata harvesting.
 - Detectors implemented for SD1.x, SDXL (base/refiner), Flux.1 (dev/schnell), FLUX.2 Klein 4B/base-4B core-only SafeTensors, LTX2 monolithic combined checkpoints, AuraFlow, SD3 / SD3.5 (medium & large families), Stable Cascade (B/C), Wan2.2 (T2V/I2V), Chroma, Qwen Image, and Anima (Cosmos Predict2 core `net.*` format).
 - `capabilities.py` defines `SemanticEngine` and an `EngineParamSurface` describing which high-level UI parameter sections (txt2img/img2img/video/hires/refiner/LoRA/ControlNet/masked-img2img) are expected to be used for each semantic engine tag; exposed to the API for frontend gating.
+- `capabilities.py` also owns `CAPABILITY_ONLY_EXACT_ENGINES`. Capability-only exact ids may appear only in capability/taxonomy maps and must not become registered engines, parked engines, aliases, facades, asset-contract ids, live-preview ids, runtime-family ids, or runtime dispatch ids.
 - 2025-12-14: `ModelSignature` gained a legacy `unet` alias for `core`, keeping older call sites working while the new contract stays `signature.core`.
 - 2025-12-14: Qwen Image detector reintroduced (`detectors/qwen_image.py`) and enums extended (`ModelFamily.QWEN_IMAGE`, `LatentFormat.QWEN_IMAGE`).
 - 2025-12-12: Z Image runtime metadata was corrected (`context_dim=2560`, `flow_shift=3.0`) to match the canonical HF assets for Z-Image Turbo.

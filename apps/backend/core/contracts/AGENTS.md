@@ -1,7 +1,7 @@
 # apps/backend/core/contracts Overview
 <!-- tags: backend, core, contracts, assets, drift -->
 Date: 2026-01-18
-Last Review: 2026-03-12
+Last Review: 2026-05-17
 Status: Active
 
 ## Purpose
@@ -15,7 +15,7 @@ Status: Active
 - Contracts here must be deterministic and fail loudly when an engine key is missing (prevents drift).
 - Keep these modules lightweight: no heavy model imports at module import time.
 - 2026-02-05: Added Anima engine asset contract (`anima`) and Qwen3-0.6B text encoder slot (`qwen3_06b`) for sha-selected TE resolution.
-- 2026-02-10: Added explicit contract-ownership maps (`engine_id -> owner`, `semantic_engine -> owner`) so capability aliases (`flux1_fill`) and optional video semantics (`svd`, `hunyuan_video`) remain fail-loud and contract-complete.
+- 2026-05-17: Explicit contract-ownership maps (`engine_id -> owner`, `semantic_engine -> owner`) cover executable and parked asset-contract ids only. Capability-only exact ids such as `flux1_fill` are intentionally absent so dependency/asset lookup fails loud instead of treating them as runtime aliases.
 - 2026-02-16: WAN22 video engines now have explicit per-engine owners/contracts (`wan22_5b`, `wan22_14b`, `wan22_14b_animate`) with no owner alias fallback across model variants.
 - 2026-02-20: Removed `wan22_14b_native` owner alias; stale engine id usage now fails loud at contract lookup.
 - 2026-02-21: Semantic `wan22` contract owner baseline is now `wan22_14b` (instead of `wan22_5b`) to avoid stale 5B-default drift in semantic-only capability/contract surfaces.

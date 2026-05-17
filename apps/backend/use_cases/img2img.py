@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Image-to-image use case orchestration and canonical streaming wrapper (init image + optional hires pass).
-Builds prompt/sampling plans from `CodexProcessingImg2Img`, prepares init-image bundles/latents, dispatches classic img2img conditioning by family, runs the sampler loop, optionally routes SDXL img2img/inpaint through native SUPIR mode, and optionally performs a hires second pass with family-specific continuation semantics.
+Builds prompt/sampling plans from `CodexProcessingImg2Img`, prepares init-image bundles/latents, dispatches classic img2img conditioning by executable family, runs the sampler loop, optionally routes SDXL img2img/inpaint through native SUPIR mode, and optionally performs a hires second pass with family-specific continuation semantics.
 Masked img2img (“inpaint”) uses Forge/A1111 “Only masked” semantics and supports optional ADetailer-style multi-region passes for disconnected masks.
 Exact-engine SDXL `fooocus_inpaint` and `brushnet` stay on request-scoped family helper seams while the shared masked stage remains generic-only; the canonical sampling stage now enters those exact-engine sessions after LoRA activation instead of mutating only the pre-sampling active snapshot.
 The hires pass init is prepared via the global family-dispatched hires-fix stage (`apps/backend/runtime/pipeline_stages/hires_fix.py`).
@@ -117,7 +117,7 @@ logger = get_backend_logger(__name__)
 
 _KONTEXT_MULTIPLE_OF = 16
 _CLASSIC_SD_IMG2IMG_ENGINES = {"sd15", "sd20", "sdxl", "sdxl_refiner", "sd35"}
-_CLASSIC_FLOW_IMG2IMG_ENGINES = {"flux1", "flux1_fill", "flux1_chroma", "zimage", "anima"}
+_CLASSIC_FLOW_IMG2IMG_ENGINES = {"flux1", "flux1_chroma", "zimage", "anima"}
 _CLASSIC_FLOW_MASKED_IMG2IMG_ENGINES = {"zimage"}
 _GENERIC_POST_SAMPLE_BLEND_INPAINT_MODE = "post_sample_blend"
 _FOOOCUS_INPAINT_MODE = "fooocus_inpaint"
@@ -332,7 +332,7 @@ def _smart_cache_buckets_for_engine(sd_model: Any) -> tuple[str, ...]:
         return ("sdxl.base.text", "sdxl.base.embed")
     if engine_id == "sdxl_refiner":
         return ("sdxl.refiner.text", "sdxl.refiner.embed")
-    if engine_id in {"flux1", "flux1_kontext", "flux1_fill", "flux1_chroma"}:
+    if engine_id in {"flux1", "flux1_kontext", "flux1_chroma"}:
         return ("flux.conditioning",)
     if engine_id == "zimage":
         return ("zimage.conditioning",)

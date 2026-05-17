@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Live preview helpers (decode strategies + preview-factor fitting/logging).
-Provides live preview decoding (full VAE vs cheap approximation) and an optional least-squares fitting tool to derive latent→RGB factors for
+Provides family/executable-engine-keyed live preview decoding (full VAE vs cheap approximation) and an optional least-squares fitting tool to derive latent→RGB factors for
 debugging preview quality.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -109,7 +109,6 @@ _PREVIEW_PROFILE_BY_FAMILY_OR_ENGINE_ID: dict[str, str] = {
     ModelFamily.QWEN_IMAGE.value: _PREVIEW_PROFILE_FLOW16,
     ModelFamily.HUNYUAN.value: _PREVIEW_PROFILE_FLOW16,
     ModelFamily.SVD.value: _PREVIEW_PROFILE_FLOW16,
-    "flux1_fill": _PREVIEW_PROFILE_FLOW16,
     "flux1_chroma": _PREVIEW_PROFILE_FLOW16,
     "hunyuan_video": _PREVIEW_PROFILE_FLOW16,
 }

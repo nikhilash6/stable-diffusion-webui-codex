@@ -9,11 +9,13 @@ Required Notice: see NOTICE
 Purpose: Sigma schedule construction utilities for diffusion samplers.
 Defines canonical scheduler names and builds sigma schedules (Karras, exponential, DDIM, beta, align-your-steps, etc.).
 SIMPLE schedules are predictor-aware and support explicit mode selection (legacy shifted-linspace vs tail-downsample sigma selection), and
-`linear_quadratic` now follows the parity-target piecewise shape with strict input guards.
+all builder branches now pass through a central shape/finiteness/monotonicity validator. `linear_quadratic` follows the parity-target
+piecewise shape with strict input guards and intentionally ignores `sigma_min`.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `SchedulerName` (enum): Canonical scheduler names for sigma schedule construction (strict, no silent fallback).
 - `_append_zero` (function): Appends a terminal sigma=0 to a sigma schedule tensor.
+- `_validate_sigma_schedule` (function): Validates built sigma schedules before they leave the builder.
 - `_karras_schedule` (function): Builds a Karras sigma schedule.
 - `_polyexponential_schedule` (function): Builds a polyexponential sigma schedule.
 - `_exponential_schedule` (function): Builds an exponential sigma schedule.
@@ -92,6 +94,29 @@ def _append_zero(sigmas: torch.Tensor, *, device: torch.device, dtype: torch.dty
     return torch.cat([sigmas.to(device=device, dtype=dtype), terminal])
 
 
+def _validate_sigma_schedule(sigmas: torch.Tensor, *, steps: int, scheduler_name: str) -> torch.Tensor:
+    """Validate the sampler-owned high-to-low sigma schedule invariant."""
+
+    if sigmas.ndim != 1:
+        raise ValueError(f"{scheduler_name}: sigma schedule must be 1D; got shape={tuple(sigmas.shape)}.")
+    expected = int(steps) + 1
+    if int(sigmas.numel()) != expected:
+        raise ValueError(
+            f"{scheduler_name}: expected {expected} sigmas for {int(steps)} steps; got {int(sigmas.numel())}."
+        )
+    if not torch.isfinite(sigmas).all().item():
+        raise ValueError(f"{scheduler_name}: sigma schedule contains NaN/Inf values.")
+    if (sigmas < 0).any().item():
+        raise ValueError(f"{scheduler_name}: sigma schedule contains negative values.")
+    if not torch.allclose(sigmas[-1], sigmas.new_tensor(0.0)):
+        raise ValueError(f"{scheduler_name}: final sigma must be zero; got {float(sigmas[-1])}.")
+
+    body = sigmas[:-1]
+    if body.numel() > 1 and (body[1:] > body[:-1]).any().item():
+        raise ValueError(f"{scheduler_name}: sigma schedule body must be non-increasing.")
+    return sigmas
+
+
 def _karras_schedule(
     steps: int,
     sigma_min: float,
@@ -136,17 +161,16 @@ def _exponential_schedule(
 
 
 def _uniform_schedule_from_predictor(steps: int, predictor, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    sigmas = getattr(predictor, "sigmas", None)
-    if sigmas is None:
-        raise RuntimeError("predictor does not expose 'sigmas' needed for uniform schedule")
-    sigmas = torch.as_tensor(sigmas, device=device, dtype=dtype)
-    # Evenly sample sigmas from the predictor ladder (skip sigma=inf at index 0)
-    stride = max(int(math.floor(len(sigmas) / max(steps, 1))), 1)
-    ladder = sigmas[1::stride][:steps]
+    sigmas = _predictor_sigma_ladder(predictor, device=device, dtype=dtype, schedule_label="uniform")
+    # Predictor ladders are sigma_min -> sigma_max. Sampling consumes high -> low and skips the min endpoint.
+    ladder = sigmas[1:].flip(0)
     if ladder.numel() < steps:
         ladder = torch.nn.functional.interpolate(
-            ladder.view(1, 1, -1), size=steps, mode="linear", align_corners=False
+            ladder.view(1, 1, -1), size=steps, mode="linear", align_corners=True
         ).view(-1)
+    else:
+        idx = torch.linspace(0, int(ladder.numel()) - 1, int(steps), device=device)
+        ladder = ladder[idx.round().long()]
     return _append_zero(ladder, device=device, dtype=dtype)
 
 
@@ -279,12 +303,20 @@ def _sgm_uniform_schedule(steps: int, predictor, *, device: torch.device, dtype:
 
 
 def _ddim_uniform_schedule(steps: int, predictor, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    sigmas = torch.as_tensor(getattr(predictor, "sigmas", []), device=device, dtype=dtype)
-    if sigmas.numel() == 0:
-        raise RuntimeError("predictor is missing sigmas ladder required for DDIM uniform schedule")
-    stride = max(len(sigmas) // max(steps, 1), 1)
-    ladder = sigmas[1::stride]
-    ladder = ladder.flip(0)[:steps]
+    sigmas = _predictor_sigma_ladder(predictor, device=device, dtype=dtype, schedule_label="DDIM uniform")
+    usable = sigmas[1:]
+    if int(steps) > int(usable.numel()):
+        raise ValueError(
+            "DDIM uniform schedule requires steps <= useful predictor sigma count; "
+            f"requested={int(steps)} available={int(usable.numel())}."
+        )
+    stride = max(int(sigmas.numel()) // max(int(steps), 1), 1)
+    ladder = usable[::stride].flip(0)[:steps]
+    if int(ladder.numel()) != int(steps):
+        raise ValueError(
+            "DDIM uniform schedule failed to produce the requested sigma count; "
+            f"requested={int(steps)} produced={int(ladder.numel())}."
+        )
     return _append_zero(ladder, device=device, dtype=dtype)
 
 
@@ -507,6 +539,8 @@ def _linear_quadratic_schedule(
     threshold_noise: float = 0.025,
     linear_steps: int | None = None,
 ) -> torch.Tensor:
+    # Parity target (Comfy/Mochi/LTX) is a normalized piecewise curve scaled only by sigma_max.
+    del sigma_min
     if steps == 1:
         sigmas = torch.tensor([sigma_max], device=device, dtype=dtype)
         return _append_zero(sigmas, device=device, dtype=dtype)
@@ -583,56 +617,58 @@ def build_sigma_schedule(
 
     kind = SchedulerName.from_string(scheduler_name)
 
+    def _finalize(schedule: torch.Tensor) -> torch.Tensor:
+        return _validate_sigma_schedule(schedule, steps=steps, scheduler_name=kind.value)
+
     if kind is SchedulerName.SIMPLE:
         if predictor is None:
             raise RuntimeError("predictor required for simple scheduler")
-        return _simple_schedule_from_predictor(steps, predictor, device=device, dtype=dtype, flow_shift=flow_shift)
+        return _finalize(_simple_schedule_from_predictor(steps, predictor, device=device, dtype=dtype, flow_shift=flow_shift))
     if kind in (SchedulerName.KARRAS, SchedulerName.EULER_DISCRETE):
-        return _karras_schedule(steps, sigma_min, sigma_max, device=device, dtype=dtype)
+        return _finalize(_karras_schedule(steps, sigma_min, sigma_max, device=device, dtype=dtype))
     if kind is SchedulerName.EXPONENTIAL:
-        return _exponential_schedule(steps, sigma_min, sigma_max, device=device, dtype=dtype)
+        return _finalize(_exponential_schedule(steps, sigma_min, sigma_max, device=device, dtype=dtype))
     if kind is SchedulerName.POLYEXPONENTIAL:
-        return _polyexponential_schedule(steps, sigma_min, sigma_max, device=device, dtype=dtype)
+        return _finalize(_polyexponential_schedule(steps, sigma_min, sigma_max, device=device, dtype=dtype))
     if kind is SchedulerName.UNIFORM:
         if predictor is None:
             raise RuntimeError("predictor required for uniform scheduler")
-        return _uniform_schedule_from_predictor(steps, predictor, device=device, dtype=dtype)
+        return _finalize(_uniform_schedule_from_predictor(steps, predictor, device=device, dtype=dtype))
     if kind is SchedulerName.SGM_UNIFORM:
         if predictor is None:
             raise RuntimeError("predictor required for sgm_uniform scheduler")
-        return _sgm_uniform_schedule(steps, predictor, device=device, dtype=dtype)
+        return _finalize(_sgm_uniform_schedule(steps, predictor, device=device, dtype=dtype))
     if kind is SchedulerName.DDIM:
         if predictor is None:
             raise RuntimeError("predictor required for ddim scheduler")
-        sigs = _ddim_uniform_schedule(steps, predictor, device=device, dtype=dtype)
-        return sigs
+        return _finalize(_ddim_uniform_schedule(steps, predictor, device=device, dtype=dtype))
     if kind is SchedulerName.DDIM_UNIFORM:
         if predictor is None:
             raise RuntimeError("predictor required for ddim_uniform scheduler")
-        return _ddim_uniform_schedule(steps, predictor, device=device, dtype=dtype)
+        return _finalize(_ddim_uniform_schedule(steps, predictor, device=device, dtype=dtype))
     if kind is SchedulerName.NORMAL:
         if predictor is None:
             raise RuntimeError("predictor required for normal scheduler")
-        return _normal_schedule(steps, predictor, device=device, dtype=dtype, sgm=False)
+        return _finalize(_normal_schedule(steps, predictor, device=device, dtype=dtype, sgm=False))
     if kind is SchedulerName.BETA:
         if predictor is None:
             raise RuntimeError("predictor required for beta scheduler")
-        return _beta_schedule(steps, predictor, device=device, dtype=dtype)
+        return _finalize(_beta_schedule(steps, predictor, device=device, dtype=dtype))
     if kind is SchedulerName.LINEAR_QUADRATIC:
-        return _linear_quadratic_schedule(steps, sigma_min, sigma_max, device=device, dtype=dtype)
+        return _finalize(_linear_quadratic_schedule(steps, sigma_min, sigma_max, device=device, dtype=dtype))
     if kind is SchedulerName.KL_OPTIMAL:
-        return _kl_optimal_schedule(steps, sigma_min, sigma_max, device=device, dtype=dtype)
+        return _finalize(_kl_optimal_schedule(steps, sigma_min, sigma_max, device=device, dtype=dtype))
     if kind in {
         SchedulerName.ALIGN_YOUR_STEPS,
         SchedulerName.ALIGN_YOUR_STEPS_GITS,
         SchedulerName.ALIGN_YOUR_STEPS_11,
         SchedulerName.ALIGN_YOUR_STEPS_32,
     }:
-        return _align_your_steps_schedule(kind, steps, is_sdxl=is_sdxl, device=device, dtype=dtype)
+        return _finalize(_align_your_steps_schedule(kind, steps, is_sdxl=is_sdxl, device=device, dtype=dtype))
     if kind is SchedulerName.TURBO:
         if predictor is None:
             raise RuntimeError("predictor required for turbo scheduler")
-        return _turbo_schedule(steps, predictor, device=device, dtype=dtype)
+        return _finalize(_turbo_schedule(steps, predictor, device=device, dtype=dtype))
 
     raise ValueError(f"Unsupported scheduler '{scheduler_name}' after normalization")
 

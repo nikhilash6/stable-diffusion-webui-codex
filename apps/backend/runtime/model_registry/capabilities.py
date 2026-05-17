@@ -6,7 +6,7 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Semantic engine capability surfaces, exact-engine inpaint-mode truth, and explicit parked exact-engine stubs exposed to the UI layer.
+Purpose: Semantic engine capability surfaces, exact-engine inpaint-mode truth, explicit capability-only exact ids, and parked exact-engine stubs exposed to the UI layer.
 Defines `SemanticEngine` tags and an `EngineParamSurface` describing which high-level UI sections and tasks are expected to be used for each engine,
 including explicit masked-img2img/inpaint support, vid2vid discoverability, and native IP-Adapter/SUPIR discoverability, with executable defaults and
 recommendation hints for the live surface (for example SD15 `ddim`/`ddim`, WAN22 `uni-pc bh2`/`simple`, and LTX2 `euler`/`simple` with no sampler fiction
@@ -24,6 +24,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `ENGINE_SURFACES` (constant): Mapping of semantic engine tag to `EngineParamSurface`.
 - `ENGINE_ID_TO_SEMANTIC_ENGINE` (constant): Canonical mapping from API engine ids to semantic engine tags.
 - `PARKED_EXACT_ENGINES` (constant): Mapping of exact engine ids that remain public only as parked placeholders.
+- `CAPABILITY_ONLY_EXACT_ENGINES` (constant): Exact ids exposed only for capability/taxonomy accounting, never runtime execution.
 - `EXACT_ENGINE_INPAINT_MODES` (constant): Mapping of exact engine ids to supported public img2img inpaint modes.
 - `ip_adapter_support_error` (function): Return the fail-loud exact-engine/semantic-engine support error for IP-Adapter, or `None` when supported.
 - `supports_ip_adapter_engine_id` (function): Return whether the exact engine id is allowed to run IP-Adapter in tranche 1.
@@ -355,6 +356,8 @@ PARKED_EXACT_ENGINES: Dict[str, ParkedExactEngineStub] = {
     ),
 }
 
+CAPABILITY_ONLY_EXACT_ENGINES: frozenset[str] = frozenset({"flux1_fill"})
+
 _GENERIC_INPAINT_MODES: tuple[str, ...] = ("per_step_blend", "post_sample_blend")
 
 EXACT_ENGINE_INPAINT_MODES: Dict[str, tuple[str, ...]] = {
@@ -400,7 +403,6 @@ _ENGINE_ID_PRIMARY_FAMILY: Dict[str, ModelFamily] = {
     "sd35": ModelFamily.SD35,
     "flux1": ModelFamily.FLUX,
     "flux1_kontext": ModelFamily.FLUX_KONTEXT,
-    "flux1_fill": ModelFamily.FLUX,
     "flux2": ModelFamily.FLUX2,
     "flux1_chroma": ModelFamily.CHROMA,
     "zimage": ModelFamily.ZIMAGE,
@@ -563,6 +565,7 @@ __all__ = [
     "ENGINE_SURFACES",
     "ENGINE_ID_TO_SEMANTIC_ENGINE",
     "PARKED_EXACT_ENGINES",
+    "CAPABILITY_ONLY_EXACT_ENGINES",
     "EXACT_ENGINE_INPAINT_MODES",
     "ip_adapter_support_error",
     "supports_ip_adapter_engine_id",
