@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Hugging Face asset allowlist helpers for offline/strict execution.
-Ensures minimal diffusers repository files (configs/tokenizers/schedulers, optional weights) exist under a local mirror, downloading only
+Ensures minimal diffusers repository files (configs/tokenizers/processors/schedulers, optional weights) exist under a local mirror, downloading only
 allowlisted lightweight assets when permitted.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -170,6 +170,8 @@ def ensure_repo_minimal_files(
             "text_encoder_2/config.json",
             "image_encoder/config.json",
             "image_processor/preprocessor_config.json",
+            "processor/preprocessor_config.json",
+            "processor/video_preprocessor_config.json",
             "feature_extractor/preprocessor_config.json",
             "unet/config.json",
             "transformer/config.json",
@@ -185,6 +187,7 @@ def ensure_repo_minimal_files(
                 "tokenizer/tokenizer.model",
                 "tokenizer/*.json",
                 "tokenizer/*.txt",
+                "tokenizer/*.jinja",
                 "tokenizer/*.model",
                 "tokenizer_2/tokenizer.json",
                 "tokenizer_2/vocab.json",
@@ -192,12 +195,20 @@ def ensure_repo_minimal_files(
                 "tokenizer_2/tokenizer.model",
                 "tokenizer_2/*.json",
                 "tokenizer_2/*.txt",
+                "tokenizer_2/*.jinja",
                 "tokenizer_2/*.model",
-                # Some pipelines (e.g. WanAnimatePipeline) rely on CLIP-style tokenizer assets
-                # under image_processor/ instead of tokenizer/.
+                # Some pipelines rely on CLIP/VL-style processor assets under
+                # image_processor/ or processor/ instead of tokenizer/. Template
+                # sidecars are copied when present, but tokenizer presence is still
+                # proven only by `_has_tokenizer(...)`.
                 "image_processor/*.json",
                 "image_processor/*.txt",
+                "image_processor/*.jinja",
                 "image_processor/*.model",
+                "processor/*.json",
+                "processor/*.txt",
+                "processor/*.jinja",
+                "processor/*.model",
             }
         )
     # Optional: include VAE weights when explicitly requested by caller (e.g., GGUF runtime)
