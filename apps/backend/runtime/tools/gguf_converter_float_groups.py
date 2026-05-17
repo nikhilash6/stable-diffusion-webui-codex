@@ -8,7 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: Float dtype override groups for the GGUF converter.
 Defines stable, profile-scoped “groups” of tensor-name patterns that the UI can expose as simple FP16/FP32 knobs
-without requiring users to type regex overrides. Groups match the source/native tensor names emitted by the converter.
+without requiring users to type regex overrides. Groups match the source/native tensor names emitted by each converter profile.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `FloatDtypeGroup` (dataclass): Named group of tensor-name regex patterns (applies to destination names).
@@ -36,6 +36,18 @@ _FLOAT_GROUPS: dict[str, tuple[FloatDtypeGroup, ...]] = {
                 r"^context_embedder\.weight$",
                 r"^time_text_embed\.(?:timestep_embedder|text_embedder|guidance_embedder)\.linear_2\.weight$",
                 r"^norm_out\.linear\.weight$",
+            ),
+        ),
+    ),
+    "qwen_image_transformer": (
+        FloatDtypeGroup(
+            id="sensitive_weights",
+            label="Sensitive weights (IO + timestep + final head)",
+            patterns=(
+                r"^(?:img_in|txt_in)\.weight$",
+                r"^time_text_embed\.timestep_embedder\.linear_[12]\.weight$",
+                r"^norm_out\.linear\.weight$",
+                r"^proj_out\.weight$",
             ),
         ),
     ),

@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Typed “profile + policy” specs for the GGUF converter.
-Defines converter profile ids, metadata normalizers, key mappings, and per-model tensor dtype rules for the source/native tooling surface.
+Defines converter architecture buckets, profile ids, metadata normalizers, key mappings, and per-model tensor dtype rules for the source/native tooling surface.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `GGUFArch` (enum): High-level GGUF architecture buckets used by conversion profiles.
@@ -39,6 +39,7 @@ class GGUFArch(str, Enum):
     LLAMA = "llama"
     GEMMA3 = "gemma3"
     FLUX = "flux"
+    QWEN_IMAGE = "qwen_image"
     ZIMAGE = "zimage"
     WAN22 = "wan22"
     LTX2 = "ltx2"
@@ -62,6 +63,7 @@ class TensorNameTarget(str, Enum):
 
 class ConverterProfileId(str, Enum):
     FLUX_TRANSFORMER = "flux_transformer"
+    QWEN_IMAGE_TRANSFORMER = "qwen_image_transformer"
     ZIMAGE_TRANSFORMER = "zimage_transformer"
     WAN22_TRANSFORMER = "wan22_transformer"
     LTX2_TRANSFORMER = "ltx2_transformer"

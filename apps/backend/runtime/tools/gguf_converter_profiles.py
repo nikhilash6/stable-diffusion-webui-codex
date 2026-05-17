@@ -11,15 +11,19 @@ Selects source/native metadata normalizers, key mappings, and per-model dtype po
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_is_flux` (function): Detect whether a config.json describes a Flux transformer.
+- `_is_qwen_image` (function): Detect whether a config.json describes a Qwen Image transformer.
 - `_is_zimage` (function): Detect whether a config.json describes a ZImage transformer.
 - `_is_wan22` (function): Detect whether a config.json describes a WAN22 transformer.
 - `_is_ltx2` (function): Detect whether a config.json describes an LTX2 transformer.
 - `_is_gemma3_tenc` (function): Detect whether a config.json describes a Gemma3 text encoder export.
+- `_is_llama_hf_to_gguf` (function): Detect explicit Llama-family HF configs accepted by the Llama key mapping profile.
 - `_build_llama_mapping` (function): Build a Llama HF→GGUF key mapping from the model config.
 - `_COND_QUANTIZED` (constant): Condition helper matching any quantized preset (non-F16/F32).
 - `_COND_FLUX_MIXED` (constant): Condition helper matching Flux mixed presets (`Q5_K_M`/`Q4_K_M`).
+- `_COND_QWEN_IMAGE_MIXED` (constant): Condition helper matching Qwen Image mixed presets (`Q5_K_M`/`Q4_K_M`).
 - `_COND_WAN22_MIXED` (constant): Condition helper matching WAN22 mixed presets (`Q5_K_M`/`Q4_K_M`).
 - `FLUX_QUANT_POLICY` (constant): Flux per-tensor dtype policy (mixed presets keep more IO weights in float32).
+- `QWEN_IMAGE_QUANT_POLICY` (constant): Qwen Image per-tensor dtype policy (required stability tensors stay float32).
 - `WAN22_QUANT_POLICY` (constant): WAN22 per-tensor dtype policy (mixed presets keep sensitive weights in float32).
 - `LTX2_QUANT_POLICY` (constant): LTX2 per-tensor dtype policy (stability-sensitive tensors stay float).
 - `ZIMAGE_QUANT_POLICY` (constant): ZImage per-tensor dtype policy (pad tokens must remain float).
@@ -54,6 +58,10 @@ def _is_flux(config: Mapping[str, Any]) -> bool:
     return _tensor_planner.is_flux_transformer_config(config)
 
 
+def _is_qwen_image(config: Mapping[str, Any]) -> bool:
+    return _tensor_planner.is_qwen_image_transformer_config(config)
+
+
 def _is_zimage(config: Mapping[str, Any]) -> bool:
     return _tensor_planner.is_zimage_transformer_config(config)
 
@@ -70,6 +78,46 @@ def _is_gemma3_tenc(config: Mapping[str, Any]) -> bool:
     return _tensor_planner.is_gemma3_text_encoder_config(config)
 
 
+_LLAMA_FAMILY_MODEL_TYPES: frozenset[str] = frozenset(
+    {
+        "llama",
+        "mistral",
+        "qwen2",
+        "qwen2_moe",
+        "qwen3",
+        "qwen3_moe",
+    }
+)
+_LLAMA_FAMILY_ARCHITECTURES: frozenset[str] = frozenset(
+    {
+        "LlamaForCausalLM",
+        "MistralForCausalLM",
+        "Qwen2ForCausalLM",
+        "Qwen2MoeForCausalLM",
+        "Qwen3ForCausalLM",
+        "Qwen3MoeForCausalLM",
+    }
+)
+
+
+def _is_llama_hf_to_gguf(config: Mapping[str, Any]) -> bool:
+    if str(config.get("_class_name") or "").strip():
+        return False
+
+    model_type = str(config.get("model_type") or "").strip().lower()
+    if model_type in _LLAMA_FAMILY_MODEL_TYPES:
+        return True
+
+    raw_architectures = config.get("architectures")
+    if isinstance(raw_architectures, str):
+        architectures = (raw_architectures,)
+    elif isinstance(raw_architectures, list):
+        architectures = tuple(str(value) for value in raw_architectures)
+    else:
+        architectures = ()
+    return any(architecture in _LLAMA_FAMILY_ARCHITECTURES for architecture in architectures)
+
+
 def _build_llama_mapping(config: Mapping[str, Any]) -> dict[str, str]:
     num_layers = int(config.get("num_hidden_layers", 32))
     return _key_mapping.build_key_mapping(num_layers)
@@ -77,6 +125,7 @@ def _build_llama_mapping(config: Mapping[str, Any]) -> dict[str, str]:
 
 _COND_QUANTIZED = QuantizationCondition(exclude=frozenset({QuantizationType.F16, QuantizationType.F32}))
 _COND_FLUX_MIXED = QuantizationCondition(include=frozenset({QuantizationType.Q5_K_M, QuantizationType.Q4_K_M}))
+_COND_QWEN_IMAGE_MIXED = QuantizationCondition(include=frozenset({QuantizationType.Q5_K_M, QuantizationType.Q4_K_M}))
 _COND_WAN22_MIXED = QuantizationCondition(include=frozenset({QuantizationType.Q5_K_M, QuantizationType.Q4_K_M}))
 
 
@@ -188,6 +237,56 @@ FLUX_QUANT_POLICY = QuantizationPolicySpec(
         ),
     ),
 )
+
+
+QWEN_IMAGE_QUANT_POLICY = QuantizationPolicySpec(
+    id="qwen_image",
+    required_rules=(
+        TensorTypeRule(
+            pattern=r".*\.bias$",
+            ggml_type=GGMLQuantizationType.F32,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            reason="Qwen Image biases stay float32 for stability",
+        ),
+        TensorTypeRule(
+            pattern=r"^transformer_blocks\.\d+\.attn\.(?:norm_[qk]|norm_added_[qk])\.weight$",
+            ggml_type=GGMLQuantizationType.F32,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            reason="Qwen Image q/k norm scales stay float32 for stability",
+        ),
+        TensorTypeRule(
+            pattern=r"^transformer_blocks\.\d+\.(?:img_mod|txt_mod)\.1\.(?:weight|bias)$",
+            ggml_type=GGMLQuantizationType.F32,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            reason="Qwen Image modulation tensors stay float32 for stability",
+        ),
+        TensorTypeRule(
+            pattern=r"^(?:proj_out|norm_out\.linear)\.(?:weight|bias)$",
+            ggml_type=GGMLQuantizationType.F32,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            reason="Qwen Image final head tensors stay float32 for stability",
+        ),
+        TensorTypeRule(
+            pattern=r"^(?:img_in|txt_in)\.weight$",
+            ggml_type=GGMLQuantizationType.F32,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QWEN_IMAGE_MIXED,
+            reason="Qwen Image mixed preset: keep input projections float32 for higher quality",
+        ),
+        TensorTypeRule(
+            pattern=r"^time_text_embed\.timestep_embedder\.linear_[12]\.weight$",
+            ggml_type=GGMLQuantizationType.F32,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QWEN_IMAGE_MIXED,
+            reason="Qwen Image mixed preset: keep timestep embedder weights float32 for higher quality",
+        ),
+    ),
+)
+
 
 WAN22_QUANT_POLICY = QuantizationPolicySpec(
     id="wan22",
@@ -476,6 +575,13 @@ PROFILE_REGISTRY: tuple[ConverterProfileSpec, ...] = (
         metadata_normalizer=_tensor_planner.normalize_flux_transformer_metadata_config,
     ),
     ConverterProfileSpec(
+        id=ConverterProfileId.QWEN_IMAGE_TRANSFORMER,
+        arch=GGUFArch.QWEN_IMAGE,
+        detect=_is_qwen_image,
+        quant_policy=QWEN_IMAGE_QUANT_POLICY,
+        metadata_normalizer=_tensor_planner.normalize_qwen_image_transformer_metadata_config,
+    ),
+    ConverterProfileSpec(
         id=ConverterProfileId.ZIMAGE_TRANSFORMER,
         arch=GGUFArch.ZIMAGE,
         detect=_is_zimage,
@@ -506,11 +612,7 @@ PROFILE_REGISTRY: tuple[ConverterProfileSpec, ...] = (
     ConverterProfileSpec(
         id=ConverterProfileId.LLAMA_HF_TO_GGUF,
         arch=GGUFArch.LLAMA,
-        detect=lambda cfg: not _is_flux(cfg)
-        and not _is_zimage(cfg)
-        and not _is_wan22(cfg)
-        and not _is_ltx2(cfg)
-        and not _is_gemma3_tenc(cfg),
+        detect=_is_llama_hf_to_gguf,
         quant_policy=LLAMA_QUANT_POLICY,
         key_mapping=_LLAMA_KEY_MAPPING,
     ),

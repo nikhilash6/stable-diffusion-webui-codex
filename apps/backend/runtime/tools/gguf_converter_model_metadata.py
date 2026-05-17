@@ -8,13 +8,13 @@ Required Notice: see NOTICE
 
 Purpose: Vendored model metadata for the GGUF converter UI.
 Scans the local Hugging Face mirror under `apps/backend/huggingface/**` and exposes “model metadata” entries (org/repo)
-with supported conversion components (Flux/ZImage/WAN22/LTX2 denoisers plus Gemma3 text encoders).
+with supported conversion components (Flux/Qwen Image/ZImage/WAN22/LTX2 denoisers plus Gemma3 text encoders).
 
 Symbols (top-level; keep in sync; no ghosts):
 - `GGUFConverterModelComponent` (dataclass): Convertible component entry (config dir + one truthful profile id).
 - `GGUFConverterModelMetadata` (dataclass): Model entry (org/repo + components).
 - `_iter_candidate_config_dirs` (function): Iterates candidate config directories within a repo (root + subdirs).
-- `_has_weights_index` (function): Returns True when a config dir contains weights files or a sharded weights index.
+- `_has_resolvable_safetensors_source` (function): Returns True when a config dir has a resolvable single/sharded SafeTensors source.
 - `_classify_config` (function): Classifies a config.json into a converter component kind + profile id.
 - `list_vendored_gguf_converter_model_metadata` (function): Lists supported model metadata from the vendored HF mirror.
 """
@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from apps.backend.inventory.scanners.vendored_hf import iter_vendored_hf_repos
+from apps.backend.runtime.tools import gguf_converter_tensor_planner as _tensor_planner
+from apps.backend.runtime.tools.gguf_converter_safetensors_source import resolve_safetensors_source
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,17 +62,12 @@ def _iter_candidate_config_dirs(repo_dir: str) -> Iterable[tuple[str, str]]:
             yield name, full
 
 
-def _has_weights_index(dir_path: str) -> bool:
+def _has_resolvable_safetensors_source(dir_path: str) -> bool:
     try:
-        for name in os.listdir(dir_path):
-            lower = name.lower()
-            if lower.endswith(".safetensors.index.json"):
-                return True
-            if lower.endswith(".safetensors"):
-                return True
+        resolve_safetensors_source(dir_path)
     except Exception:
         return False
-    return False
+    return True
 
 
 def _classify_config(cfg: dict[str, Any]) -> tuple[str, str | None]:
@@ -80,6 +77,8 @@ def _classify_config(cfg: dict[str, Any]) -> tuple[str, str | None]:
     text_model_type = str(text_cfg.get("model_type") or "").strip() if isinstance(text_cfg, dict) else ""
     if class_name == "FluxTransformer2DModel":
         return ("flux_transformer", "flux_transformer")
+    if _tensor_planner.is_qwen_image_transformer_config(cfg):
+        return ("qwen_image_transformer", "qwen_image_transformer")
     if class_name == "ZImageTransformer2DModel":
         return ("zimage_transformer", "zimage_transformer")
     if class_name in {"WanTransformer3DModel", "WanModel"}:
@@ -102,7 +101,7 @@ def list_vendored_gguf_converter_model_metadata(*, codex_root: Path) -> list[GGU
         wan_two_stage = False
         for low_stage_dir in ("transformer_2", "low_noise_model"):
             candidate = os.path.join(repo_dir, low_stage_dir)
-            if os.path.isfile(os.path.join(candidate, "config.json")) and _has_weights_index(candidate):
+            if os.path.isfile(os.path.join(candidate, "config.json")) and _has_resolvable_safetensors_source(candidate):
                 wan_two_stage = True
                 break
 
@@ -111,7 +110,7 @@ def list_vendored_gguf_converter_model_metadata(*, codex_root: Path) -> list[GGU
             cfg_path = os.path.join(config_dir, "config.json")
             if not os.path.isfile(cfg_path):
                 continue
-            if not _has_weights_index(config_dir):
+            if not _has_resolvable_safetensors_source(config_dir):
                 continue
 
             try:
@@ -125,7 +124,7 @@ def list_vendored_gguf_converter_model_metadata(*, codex_root: Path) -> list[GGU
 
             component_id = subdir or "root"
             component_label = subdir or "root"
-            if kind in {"flux_transformer", "zimage_transformer", "ltx2_transformer"}:
+            if kind in {"flux_transformer", "qwen_image_transformer", "zimage_transformer", "ltx2_transformer"}:
                 component_label = "denoiser"
             if kind == "gemma3_tenc":
                 component_label = "text_encoder"
@@ -149,6 +148,7 @@ def list_vendored_gguf_converter_model_metadata(*, codex_root: Path) -> list[GGU
 
         kind_priority = {
             "flux_transformer": 0,
+            "qwen_image_transformer": 0,
             "zimage_transformer": 0,
             "wan22_transformer": 0,
             "ltx2_transformer": 0,

@@ -7,7 +7,8 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: GGUF metadata injection helpers for the converter.
-Adds provenance/source metadata and minimal architecture keys required by loader tooling (including `codex.zimage.variant` when detectable from scheduler configs).
+Adds provenance/source metadata and minimal architecture keys required by loader tooling
+(including Qwen Image transformer metadata and `codex.zimage.variant` when detectable from scheduler configs).
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_is_hf_repo_id` (function): Returns True when a string looks like a Hugging Face repo id (`org/repo`).
@@ -76,6 +77,20 @@ def add_basic_metadata(
     writer.add_uint32("model.attention.head_count_kv", int(config.get("num_key_value_heads", 8)))
     writer.add_float32("model.rope.freq_base", float(config.get("rope_theta", 10000.0)))
     writer.add_float32("model.attention.layer_norm_rms_epsilon", float(config.get("rms_norm_eps", 1e-6)))
+
+    qwen_variant = str(config.get("codex.qwen_image.variant") or "").strip()
+    if qwen_variant:
+        axes_raw = config.get("codex.qwen_image.axes_dims_rope")
+        if not isinstance(axes_raw, (list, tuple)) or not axes_raw:
+            raise RuntimeError("Qwen Image GGUF metadata requires codex.qwen_image.axes_dims_rope")
+        axes_dims_rope = [int(value) for value in axes_raw]
+        writer.add_string("codex.qwen_image.variant", qwen_variant)
+        writer.add_bool("codex.qwen_image.zero_cond_t", bool(config.get("codex.qwen_image.zero_cond_t")))
+        writer.add_uint32("codex.qwen_image.joint_attention_dim", int(config.get("codex.qwen_image.joint_attention_dim", 0)))
+        writer.add_uint32("codex.qwen_image.in_channels", int(config.get("codex.qwen_image.in_channels", 0)))
+        writer.add_uint32("codex.qwen_image.out_channels", int(config.get("codex.qwen_image.out_channels", 0)))
+        writer.add_uint32("codex.qwen_image.patch_size", int(config.get("codex.qwen_image.patch_size", 0)))
+        writer.add_array("codex.qwen_image.axes_dims_rope", axes_dims_rope)
 
     writer.add_string("gguf.quantized_at_utc", _dt.datetime.now(tz=_dt.timezone.utc).isoformat())
     writer.add_string("gguf.quantization", str(quant.value))

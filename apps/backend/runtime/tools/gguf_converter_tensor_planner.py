@@ -18,6 +18,12 @@ Symbols (top-level; keep in sync; no ghosts):
 - `normalize_zimage_transformer_metadata_config` (function): Adapts Z-Image transformer config fields to metadata helper inputs (variant-neutral; no Turbo defaulting).
 - `is_flux_transformer_config` (function): Returns True when a config.json represents a Flux transformer export.
 - `normalize_flux_transformer_metadata_config` (function): Adapts Flux transformer config fields to metadata helper inputs.
+- `_qwen_image_variant_from_transformer_config` (function): Derives the internal Qwen Image variant from transformer metadata.
+- `_is_qwen_image_canonical_repo_id` (function): Returns True when a model-name candidate is the canonical Qwen Image repo id for the variant.
+- `_is_path_like_model_name` (function): Returns True when a model-name candidate looks like a local filesystem path.
+- `_safe_qwen_image_model_name` (function): Selects a stable Qwen model name without leaking local filesystem paths.
+- `is_qwen_image_transformer_config` (function): Returns True when a config.json represents a Qwen Image transformer export.
+- `normalize_qwen_image_transformer_metadata_config` (function): Adapts Qwen Image transformer config fields to metadata helper inputs.
 - `is_wan22_transformer_config` (function): Returns True when a config.json represents a WAN22 transformer export.
 - `normalize_wan22_transformer_metadata_config` (function): Adapts WAN22 transformer config fields to metadata helper inputs.
 - `is_ltx2_transformer_config` (function): Returns True when a config.json represents an LTX2 transformer export.
@@ -28,6 +34,7 @@ Symbols (top-level; keep in sync; no ghosts):
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -35,6 +42,8 @@ import numpy as np
 
 from apps.backend.quantization.gguf import GGMLQuantizationType
 from apps.backend.quantization.gguf.quant_shapes import quant_shape_to_byte_shape
+from apps.backend.runtime.families.qwen_image.config import QWEN_IMAGE_EDIT_VARIANT, QWEN_IMAGE_TXT2IMG_VARIANT
+from apps.backend.runtime.families.qwen_image.transformer import qwen_image_transformer_config_from_mapping
 from apps.backend.runtime.tools.gguf_converter_quantization import select_tensor_ggml_type
 from apps.backend.runtime.tools.gguf_converter_specs import CompiledTensorTypeRule
 
@@ -137,6 +146,50 @@ def is_flux_transformer_config(config: Mapping[str, Any]) -> bool:
     return str(config.get("_class_name") or "") == "FluxTransformer2DModel"
 
 
+def _qwen_image_variant_from_transformer_config(config: Mapping[str, Any]) -> str:
+    return QWEN_IMAGE_EDIT_VARIANT if config.get("zero_cond_t") is True else QWEN_IMAGE_TXT2IMG_VARIANT
+
+
+def _is_qwen_image_canonical_repo_id(value: str, *, fallback: str) -> bool:
+    return str(value or "").strip() == fallback
+
+
+def _is_path_like_model_name(value: str, *, fallback: str) -> bool:
+    candidate = str(value or "").strip()
+    if not candidate:
+        return False
+    if candidate.startswith(("/", "\\", ".", "~")):
+        return True
+    if re.match(r"^[A-Za-z]:", candidate):
+        return True
+    if "/" in candidate or "\\" in candidate:
+        return not _is_qwen_image_canonical_repo_id(candidate, fallback=fallback)
+    return False
+
+
+def _safe_qwen_image_model_name(config: Mapping[str, Any], *, fallback: str) -> str:
+    for key in ("_name_or_path", "name"):
+        value = str(config.get(key) or "").strip()
+        if not value or _is_path_like_model_name(value, fallback=fallback):
+            continue
+        return value
+    return fallback
+
+
+def is_qwen_image_transformer_config(config: Mapping[str, Any]) -> bool:
+    if str(config.get("_class_name") or "") != "QwenImageTransformer2DModel":
+        return False
+    try:
+        qwen_image_transformer_config_from_mapping(
+            config,
+            variant=_qwen_image_variant_from_transformer_config(config),
+            context="Qwen Image GGUF converter profile detection",
+        )
+    except RuntimeError:
+        return False
+    return True
+
+
 def is_wan22_transformer_config(config: Mapping[str, Any]) -> bool:
     return str(config.get("_class_name") or "") in {"WanTransformer3DModel", "WanModel"}
 
@@ -177,6 +230,43 @@ def normalize_flux_transformer_metadata_config(config: Mapping[str, Any]) -> dic
         "_name_or_path": str(
             config.get("_name_or_path") or config.get("name") or "black-forest-labs/FLUX.1-Kontext-dev"
         ),
+    }
+
+
+def normalize_qwen_image_transformer_metadata_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Adapt Qwen Image transformer config keys into the metadata helper's expected fields."""
+
+    variant = _qwen_image_variant_from_transformer_config(config)
+    qwen_config = qwen_image_transformer_config_from_mapping(
+        config,
+        variant=variant,
+        context="Qwen Image GGUF converter metadata",
+    )
+    hidden = int(qwen_config.num_attention_heads * qwen_config.attention_head_dim)
+    fallback_name = (
+        "Qwen/Qwen-Image-Edit-2511"
+        if qwen_config.variant == QWEN_IMAGE_EDIT_VARIANT
+        else "Qwen/Qwen-Image-2512"
+    )
+    name = _safe_qwen_image_model_name(config, fallback=fallback_name)
+
+    return {
+        "model_type": "qwen_image",
+        "num_hidden_layers": qwen_config.num_layers,
+        "hidden_size": hidden,
+        "num_attention_heads": qwen_config.num_attention_heads,
+        "num_key_value_heads": qwen_config.num_attention_heads,
+        "max_position_embeddings": 4096,
+        "rope_theta": 10000.0,
+        "rms_norm_eps": 1e-6,
+        "_name_or_path": name,
+        "codex.qwen_image.variant": qwen_config.variant,
+        "codex.qwen_image.zero_cond_t": bool(qwen_config.zero_cond_t),
+        "codex.qwen_image.joint_attention_dim": qwen_config.joint_attention_dim,
+        "codex.qwen_image.in_channels": qwen_config.in_channels,
+        "codex.qwen_image.out_channels": qwen_config.out_channels,
+        "codex.qwen_image.patch_size": qwen_config.patch_size,
+        "codex.qwen_image.axes_dims_rope": list(qwen_config.axes_dims_rope),
     }
 
 
@@ -379,11 +469,13 @@ __all__ = [
     "is_flux_transformer_config",
     "is_gemma3_text_encoder_config",
     "is_ltx2_transformer_config",
+    "is_qwen_image_transformer_config",
     "is_wan22_transformer_config",
     "is_zimage_transformer_config",
     "normalize_flux_transformer_metadata_config",
     "normalize_gemma3_text_encoder_metadata_config",
     "normalize_ltx2_transformer_metadata_config",
+    "normalize_qwen_image_transformer_metadata_config",
     "normalize_wan22_transformer_metadata_config",
     "normalize_zimage_transformer_metadata_config",
     "plan_tensors",

@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: GGUF converter tool (SafeTensors → GGUF) with optional quantization, metadata injection, and verification.
-Used primarily for text encoders and other components that need GGUF artifacts (e.g. ZImage Qwen3 variants), including sharded HF-style weights.
+Uses explicit converter profiles for supported text encoders and transformer/denoiser components, including sharded HF-style weights.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `QuantizationType` (enum): Supported “human” quantization selectors for conversion (maps to `GGMLQuantizationType`).
@@ -51,6 +51,7 @@ from apps.backend.runtime.tools import gguf_converter_verify as _verify
 from apps.backend.runtime.tools.gguf_converter_float_groups import float_groups_for_profile_id
 from apps.backend.runtime.tools.gguf_converter_specs import (
     CompiledTensorTypeRule,
+    ConverterProfileId,
     GGUFArch,
     TensorNameTarget,
 )
@@ -76,6 +77,9 @@ _FLOAT_GGML_TYPES: set[GGMLQuantizationType] = {
     GGMLQuantizationType.F32,
 }
 _ZIMAGE_PAD_TOKENS: set[str] = {"x_pad_token", "cap_pad_token"}
+_QWEN_IMAGE_FULL_DTYPE_DOWNGRADE_MODES: frozenset[PrecisionMode] = frozenset(
+    {PrecisionMode.FULL_FP16, PrecisionMode.FULL_BF16}
+)
 
 
 def _parse_mixed_float_override_choice(value: object) -> GGMLQuantizationType | None:
@@ -279,23 +283,31 @@ def convert_safetensors_to_gguf(
 
     if plus_mode_overrides and getattr(config, "float_group_overrides", None):
         raise RuntimeError("precision_mode PLUS options cannot be combined with float_group_overrides")
+    if profile.id is ConverterProfileId.QWEN_IMAGE_TRANSFORMER and precision_mode in _QWEN_IMAGE_FULL_DTYPE_DOWNGRADE_MODES:
+        raise RuntimeError(
+            f"{profile.id.value} required F32 tensors cannot be downgraded by {precision_mode.value}; "
+            "use FULL_FP32, a quantized preset, or Qwen float-group controls instead."
+        )
 
-    plus_mode_rules: list[CompiledTensorTypeRule] = []
+    pre_required_rules: list[CompiledTensorTypeRule] = []
     if plus_mode_overrides:
-        plus_mode_rules = _compile_float_group_override_rules(
+        pre_required_rules = _compile_float_group_override_rules(
             profile_id=profile.id.value,
             overrides=plus_mode_overrides,
             reason_prefix="precision_mode plus override",
+        )
+    else:
+        pre_required_rules = _compile_float_group_override_rules(
+            profile_id=profile.id.value,
+            overrides=getattr(config, "float_group_overrides", None),
         )
 
     requested_type = _quantization.requested_ggml_type(config.quantization)
     dtype_rules = profile.quant_policy.compile(
         quant=config.quantization,
         user_rules=config.tensor_type_overrides,
-        extra_rules_before_required=plus_mode_rules,
+        extra_rules_before_required=pre_required_rules,
     )
-    if not plus_mode_overrides:
-        _apply_float_group_overrides(dtype_rules, config=config, profile_id=profile.id.value)
 
     if profile.arch is GGUFArch.LLAMA:
         arch = str(model_config.get("model_type") or "llama")

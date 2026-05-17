@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: SafeTensors source helpers for the GGUF converter (single-file and sharded weights).
-Supports opening `.safetensors` files, `*.safetensors.index.json` sharded indexes, and directories containing either layout.
+Supports opening `.safetensors` files, `*.safetensors.index.json` sharded indexes, and directories containing either layout with fail-loud shard validation.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `ResolvedSafetensorsSource` (dataclass): Concrete safetensors source layout selected from a file/dir/index path.
@@ -70,14 +70,21 @@ def _load_sharded_safetensors_index(index_path: Path) -> _ShardedSafetensorsInde
 
     base = index_path.parent
     out: dict[str, Path] = {}
+    shard_paths: dict[str, Path] = {}
     for k, v in weight_map.items():
         if not isinstance(k, str) or not isinstance(v, str):
             raise ValueError(f"Invalid safetensors index (non-string weight_map entry): {index_path}")
-        shard = (base / v).resolve()
+        shard = shard_paths.get(v)
+        if shard is None:
+            candidate = base / v
+            if candidate.suffix.lower() != ".safetensors":
+                raise ValueError(f"Unsupported shard type in {index_path}: {v!r} (expected .safetensors)")
+            if not candidate.is_file():
+                raise FileNotFoundError(f"Shard referenced by {index_path} is missing: {candidate}")
+            shard = candidate.resolve()
+            shard_paths[v] = shard
         if shard.suffix.lower() != ".safetensors":
             raise ValueError(f"Unsupported shard type in {index_path}: {v!r} (expected .safetensors)")
-        if not shard.is_file():
-            raise FileNotFoundError(f"Shard referenced by {index_path} is missing: {shard}")
         out[k] = shard
 
     return _ShardedSafetensorsIndex(index_path=index_path.resolve(), tensor_to_shard=out)
