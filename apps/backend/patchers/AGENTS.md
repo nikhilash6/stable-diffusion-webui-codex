@@ -1,6 +1,6 @@
 # apps/backend/patchers Overview
 Date: 2025-10-30
-Last Review: 2026-05-02
+Last Review: 2026-05-18
 Status: Active
 
 ## Purpose
@@ -35,6 +35,7 @@ Status: Active
 - 2026-01-02: Added standardized file header docstrings to patcher modules (doc-only change; part of rollout).
 - 2026-01-04: Added `DenoiserPatcher` for Flux/Z-Image/WAN runtimes; `UnetPatcher` remains UNet/ControlNet-specific.
 - 2026-05-02: Global LoRA apply mode resolves unset config to `online` (patch during forward); explicit `merge` remains available to rewrite weights once via `CODEX_LORA_APPLY_MODE` / `--lora-apply-mode`.
+- 2026-05-18: `vae.py` tensor statistics are opt-in only (`CODEX_VAE_TENSOR_STATS=1` plus DEBUG logging) so default decode/encode paths do not run reduction + `.item()` diagnostics. Regular non-tiled decode now stores clamped `[-1,1]` output directly; tiled decode and CPU fallback retain their `[0,1]` internal buffers and convert once at the shared `decode_inner` finalization boundary.
 - 2026-02-18: VAE decode/encode runtime now resolves a compute-preferred forward dtype and casts VAE residency to that effective forward dtype before execution/memory sizing to avoid mixed-dtype forward failures.
 - 2026-02-18: Tiled VAE fallback was rewritten to a native context-padding + center-crop stitching flow (SUPIR-inspired, no fast/approximate path, no external tiled-scale dependency).
 - 2026-02-18: Tiled encode/decode crop/index math now uses deterministic integer mapping (decode multiply, encode floor-div) to avoid border mismatch on odd image dimensions.

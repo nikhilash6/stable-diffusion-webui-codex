@@ -14,7 +14,7 @@ Also emits canonical smart-offload INFO audit events for model load/unload trans
 Smart-offload action payloads include best-effort memory windows (`memory_before_*`/`memory_after_*`) to provide global per-action residency telemetry.
 `unload_model(...)` now treats manager-level `offload_device` as authoritative and fail-loud: explicit unload must route to the configured offload target (no legacy CPU-force override path).
 Generic smart-offload action emission (`load`/`unload`/`unload_noop`) is centralized here, with optional caller context fields (`source`/`stage`/`component_hint`/`event_reason`).
-Per-item load telemetry (signed deltas + post-load counters) is captured best-effort per load target device and exposed in `memory_snapshot()['models']`.
+Per-item load telemetry keys remain exposed in `memory_snapshot()['models']`; expensive per-load counter probes are captured only when memory-debug diagnostics are enabled.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_PrecisionState` (dataclass): Internal precision selection state (derived from hardware + configured flags) used to choose dtypes.
@@ -1048,6 +1048,9 @@ class CodexMemoryManager:
     def pytorch_attention_enabled(self) -> bool:
         return self._attention.backend == AttentionBackend.PYTORCH
 
+    def _memory_debug_enabled(self) -> bool:
+        return os.environ.get("CODEX_MEMORY_DEBUG", "0").strip() == "1" or logger.isEnabledFor(logging.DEBUG)
+
     # --------------------------------------------------------------------- cache helpers
     def soft_empty_cache(self, force: bool = False) -> None:
         if self._primary_device.type == DeviceBackend.CUDA.value:
@@ -1234,9 +1237,9 @@ class CodexMemoryManager:
         memory_budget = max(self.minimum_inference_memory(), memory_required) + hard_memory_preservation
         models_to_load: List[_LoadedModelRecord] = []
         already_loaded: List[_LoadedModelRecord] = []
+        memory_debug_enabled = self._memory_debug_enabled()
 
-        # DEBUG: Log memory state before loading
-        if self._primary_device.type == DeviceBackend.CUDA.value:
+        if memory_debug_enabled and self._primary_device.type == DeviceBackend.CUDA.value:
             free_bytes, total_bytes = torch.cuda.mem_get_info(self._primary_device)
             allocated = torch.cuda.memory_allocated(self._primary_device)
             reserved = torch.cuda.memory_reserved(self._primary_device)
@@ -1696,112 +1699,117 @@ class CodexMemoryManager:
         record.load_total_after_bytes = None
 
         before_load_counters: Dict[str, int] | None = None
+        after_load_counters: Dict[str, int] | None = None
         action_memory_before: Dict[str, object] = {}
         if smart_offload_enabled():
             action_memory_before = self._smart_offload_memory_fields(prefix="memory_before")
+        memory_debug_enabled = self._memory_debug_enabled()
 
-        # DEBUG: Log module size before loading
-        module_size_bytes = self.module_size(module)
-        logger.info(
-            "[memory-debug] _load_record: module=%s size=%.2f GB target_device=%s",
-            target_name, module_size_bytes / 1e9, record.load_device,
-        )
+        if memory_debug_enabled:
+            module_size_bytes = self.module_size(module)
+            logger.info(
+                "[memory-debug] _load_record: module=%s size=%.2f GB target_device=%s",
+                target_name, module_size_bytes / 1e9, record.load_device,
+            )
 
-        # DEBUG: Log current device of module parameters
-        try:
-            first_param = next(module.parameters(), None)
-            if first_param is not None:
-                logger.info(
-                    "[memory-debug] module %s current device: %s dtype=%s",
-                    target_name, first_param.device, first_param.dtype,
-                )
-        except Exception:
-            pass
+            try:
+                first_param = next(module.parameters(), None)
+                if first_param is not None:
+                    logger.info(
+                        "[memory-debug] module %s current device: %s dtype=%s",
+                        target_name, first_param.device, first_param.dtype,
+                    )
+            except Exception:
+                logger.debug("[memory-debug] failed to inspect module parameter state", exc_info=True)
 
         try:
             if smart_offload_enabled() and getattr(record.load_device, "type", "") == DeviceBackend.CUDA.value:
                 torch.cuda.empty_cache()
-                # DEBUG: Log after empty_cache
-                if self._primary_device.type == DeviceBackend.CUDA.value:
+                if memory_debug_enabled and self._primary_device.type == DeviceBackend.CUDA.value:
                     free_bytes, _ = torch.cuda.mem_get_info(self._primary_device)
                     logger.info("[memory-debug] AFTER empty_cache: free=%.2f GB", free_bytes / 1e9)
 
-            before_load_counters = self._read_device_memory_counters_bytes(record.load_device)
+            if memory_debug_enabled:
+                before_load_counters = self._read_device_memory_counters_bytes(record.load_device)
 
             compute_dtype = self._module_compute_dtype(module, fallback=record.storage_dtype)
 
             if hasattr(loader, "model_patches_to"):
-                logger.info("[memory-debug] calling model_patches_to(%s)", record.load_device)
+                if memory_debug_enabled:
+                    logger.info("[memory-debug] calling model_patches_to(%s)", record.load_device)
                 loader.model_patches_to(record.load_device)
                 if compute_dtype is not None:
-                    logger.info("[memory-debug] calling model_patches_to(%s)", compute_dtype)
+                    if memory_debug_enabled:
+                        logger.info("[memory-debug] calling model_patches_to(%s)", compute_dtype)
                     loader.model_patches_to(compute_dtype)
             elif hasattr(loader, "to"):
-                logger.info("[memory-debug] calling loader.to(device=%s)", record.load_device)
+                if memory_debug_enabled:
+                    logger.info("[memory-debug] calling loader.to(device=%s)", record.load_device)
                 loader.to(device=record.load_device)
                 if record.storage_dtype is not None:
                     loader.to(dtype=record.storage_dtype)
             if hasattr(loader, "codex_patch_model"):
-                logger.info("[memory-debug] calling codex_patch_model(%s)", record.load_device)
+                if memory_debug_enabled:
+                    logger.info("[memory-debug] calling codex_patch_model(%s)", record.load_device)
                 loader.codex_patch_model(record.load_device)
             if hasattr(loader, "current_device"):
                 setattr(loader, "current_device", record.load_device)
             record.inclusive_memory = self.module_size(module)
             record.exclusive_memory = record.inclusive_memory
             record.model_accelerated = True
-            # DEBUG: Log memory after load
-            if self._primary_device.type == DeviceBackend.CUDA.value:
+            if memory_debug_enabled and self._primary_device.type == DeviceBackend.CUDA.value:
                 free_bytes, _ = torch.cuda.mem_get_info(self._primary_device)
                 logger.info("[memory-debug] AFTER load %s: free=%.2f GB", target_name, free_bytes / 1e9)
 
-            after_load_counters = self._read_device_memory_counters_bytes(record.load_device)
-            if after_load_counters is not None:
-                record.load_alloc_after_bytes = after_load_counters["allocated_bytes"]
-                record.load_reserved_after_bytes = after_load_counters["reserved_bytes"]
-                record.load_free_after_bytes = after_load_counters["free_bytes"]
-                record.load_total_after_bytes = after_load_counters["total_bytes"]
+            if memory_debug_enabled:
+                after_load_counters = self._read_device_memory_counters_bytes(record.load_device)
+                if after_load_counters is not None:
+                    record.load_alloc_after_bytes = after_load_counters["allocated_bytes"]
+                    record.load_reserved_after_bytes = after_load_counters["reserved_bytes"]
+                    record.load_free_after_bytes = after_load_counters["free_bytes"]
+                    record.load_total_after_bytes = after_load_counters["total_bytes"]
 
-            if before_load_counters is not None and after_load_counters is not None:
-                record.load_alloc_delta_bytes = (
-                    after_load_counters["allocated_bytes"] - before_load_counters["allocated_bytes"]
-                )
-                record.load_reserved_delta_bytes = (
-                    after_load_counters["reserved_bytes"] - before_load_counters["reserved_bytes"]
-                )
-                record.load_free_delta_bytes = (
-                    after_load_counters["free_bytes"] - before_load_counters["free_bytes"]
-                )
+                if before_load_counters is not None and after_load_counters is not None:
+                    record.load_alloc_delta_bytes = (
+                        after_load_counters["allocated_bytes"] - before_load_counters["allocated_bytes"]
+                    )
+                    record.load_reserved_delta_bytes = (
+                        after_load_counters["reserved_bytes"] - before_load_counters["reserved_bytes"]
+                    )
+                    record.load_free_delta_bytes = (
+                        after_load_counters["free_bytes"] - before_load_counters["free_bytes"]
+                    )
 
-            if after_load_counters is not None:
-                alloc_delta_mib = "n/a"
-                reserved_delta_mib = "n/a"
-                free_delta_mib = "n/a"
-                if record.load_alloc_delta_bytes is not None:
-                    alloc_delta_mib = f"{self._signed_bytes_to_mib(record.load_alloc_delta_bytes):.2f}"
-                if record.load_reserved_delta_bytes is not None:
-                    reserved_delta_mib = f"{self._signed_bytes_to_mib(record.load_reserved_delta_bytes):.2f}"
-                if record.load_free_delta_bytes is not None:
-                    free_delta_mib = f"{self._signed_bytes_to_mib(record.load_free_delta_bytes):.2f}"
+                if after_load_counters is not None:
+                    alloc_delta_mib = "n/a"
+                    reserved_delta_mib = "n/a"
+                    free_delta_mib = "n/a"
+                    if record.load_alloc_delta_bytes is not None:
+                        alloc_delta_mib = f"{self._signed_bytes_to_mib(record.load_alloc_delta_bytes):.2f}"
+                    if record.load_reserved_delta_bytes is not None:
+                        reserved_delta_mib = f"{self._signed_bytes_to_mib(record.load_reserved_delta_bytes):.2f}"
+                    if record.load_free_delta_bytes is not None:
+                        free_delta_mib = f"{self._signed_bytes_to_mib(record.load_free_delta_bytes):.2f}"
 
-                logger.info(
-                    "[memory-debug] ITEM load module=%s device=%s alloc_delta_mib=%s reserved_delta_mib=%s "
-                    "free_delta_mib=%s alloc_after_mib=%.2f reserved_after_mib=%.2f free_after_mib=%.2f total_after_mib=%.2f",
-                    target_name,
-                    record.load_telemetry_device,
-                    alloc_delta_mib,
-                    reserved_delta_mib,
-                    free_delta_mib,
-                    self._bytes_to_mib(record.load_alloc_after_bytes or 0),
-                    self._bytes_to_mib(record.load_reserved_after_bytes or 0),
-                    self._bytes_to_mib(record.load_free_after_bytes or 0),
-                    self._bytes_to_mib(record.load_total_after_bytes or 0),
-                )
-            else:
-                logger.debug(
-                    "[memory-debug] ITEM load telemetry unavailable module=%s device=%s",
-                    target_name,
-                    record.load_telemetry_device,
-                )
+                    logger.info(
+                        "[memory-debug] ITEM load module=%s device=%s alloc_delta_mib=%s reserved_delta_mib=%s "
+                        "free_delta_mib=%s alloc_after_mib=%.2f reserved_after_mib=%.2f free_after_mib=%.2f total_after_mib=%.2f",
+                        target_name,
+                        record.load_telemetry_device,
+                        alloc_delta_mib,
+                        reserved_delta_mib,
+                        free_delta_mib,
+                        self._bytes_to_mib(record.load_alloc_after_bytes or 0),
+                        self._bytes_to_mib(record.load_reserved_after_bytes or 0),
+                        self._bytes_to_mib(record.load_free_after_bytes or 0),
+                        self._bytes_to_mib(record.load_total_after_bytes or 0),
+                    )
+                else:
+                    logger.debug(
+                        "[memory-debug] ITEM load telemetry unavailable module=%s device=%s",
+                        target_name,
+                        record.load_telemetry_device,
+                    )
 
             logger.info(
                 "[memory] loaded %s to device=%s storage=%s compute=%s mem=%d",

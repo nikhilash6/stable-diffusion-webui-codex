@@ -1,6 +1,6 @@
 # apps/backend/runtime/memory Overview
 Date: 2025-10-28
-Last Review: 2026-02-23
+Last Review: 2026-05-18
 Status: Active
 
 ## Purpose
@@ -35,6 +35,6 @@ Status: Active
 - 2026-02-21: `smart_offload.py` smart flag readers now enforce strict bool contracts for both thread overrides and options snapshot values (`codex_smart_offload`/`codex_smart_fallback`/`codex_smart_cache`) via shared strict parser (no permissive truthiness fallback).
 - 2026-02-22: `CodexMemoryManager._unload_record(...)` now honors `avoid_model_moving=True` for patcher-backed loaders by calling `codex_unpatch_model(None)` (no device migration). This avoids cleanup-time GPU→CPU moves in unload-all paths after runtime OOM boundaries.
 - 2026-02-22: `CodexMemoryManager.unload_model(...)` and `soft_empty_cache(...)` now suppress `torch.cuda.empty_cache()` exceptions (including CUDA OOM in poisoned contexts) at debug level, preventing cleanup-only cache calls from cascading into secondary hard failures.
-- 2026-02-23: `CodexMemoryManager` now captures per-item load telemetry (`load_*_delta_bytes` and `load_*_after_bytes`) with deterministic load-window boundaries (post-`empty_cache` pre-sample -> post-load sample), emits a canonical `[memory-debug] ITEM load ...` line, and exposes additive nullable per-item telemetry fields under `memory_snapshot()['models']`.
+- 2026-05-18: `CodexMemoryManager` exposes additive nullable per-item telemetry fields under `memory_snapshot()['models']`; expensive `[memory-debug]` load diagnostics and per-load counter probes are opt-in via `CODEX_MEMORY_DEBUG=1` or DEBUG logging. Debug-disabled loads keep required allocation accounting and stable snapshot keys, but optional per-load counter values may remain `None`.
 - 2026-02-23: Device memory counter reads were consolidated in `CodexMemoryManager._read_device_memory_counters_bytes(...)` and reused by `memory_snapshot()` and `_smart_offload_memory_fields(...)` to avoid backend-branch drift (CUDA/XPU/MPS best-effort).
 - 2026-03-30: Patch modules must follow the live module computation lane when a loader exposes `model_patches_to(...)`. Device moves still target `load_device`, but dtype moves must use the module `computation_dtype` when available instead of blindly recasting patches to storage dtype.

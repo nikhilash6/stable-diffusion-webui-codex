@@ -15,7 +15,7 @@ including family-aware decode fallback geometry resolution.
 Regular-path OOM fallback notices are emitted through structured backend logger warnings.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `_tensor_stats` (function): Logs tensor shape/dtype/device and basic statistics for debugging VAE behavior.
+- `_tensor_stats` (function): Opt-in VAE tensor diagnostics for shape/dtype/device and basic statistics (`CODEX_VAE_TENSOR_STATS=1` plus DEBUG logging).
 - `_unwrap_decode_output` (function): Normalizes diffusers decode outputs to a plain tensor (`DecoderOutput.sample` or passthrough).
 - `_new_encode_generator` (function): Builds a device-local seeded generator for deterministic VAE posterior sampling when img2img requests supply an encode seed.
 - `_unwrap_encode_output` (function): Normalizes diffusers encode outputs to a latent tensor (handles `latent_dist`, `.sample()`, `.mean`, etc.).
@@ -31,7 +31,9 @@ Symbols (top-level; keep in sync; no ghosts):
 
 import contextlib
 import gc
+import logging
 import math
+import os
 
 import torch
 
@@ -63,13 +65,15 @@ logger = get_backend_logger(__name__)
 
 
 def _tensor_stats(label: str, tensor: torch.Tensor) -> None:
+    if os.environ.get("CODEX_VAE_TENSOR_STATS", "0").strip() != "1" or not logger.isEnabledFor(logging.DEBUG):
+        return
     if tensor is None:
-        logger.info("[vae] %s: <none>", label)
+        logger.debug("[vae] %s: <none>", label)
         return
     with torch.no_grad():
         data = tensor.detach()
         stats_tensor = data
-        logger.info(
+        logger.debug(
             "[vae] %s: shape=%s dtype=%s device=%s min=%.6f max=%.6f mean=%.6f std=%.6f",
             label,
             tuple(data.shape),
@@ -909,6 +913,7 @@ class VAE:
         progress_phase = "decode"
         decode_total_blocks = 1
         while True:
+            pixel_samples_are_minus_one_to_one = False
             desired_storage, desired_compute = self._resolve_dtypes()
             forward_dtype = self._active_forward_dtype(
                 storage_dtype=desired_storage,
@@ -951,6 +956,7 @@ class VAE:
                         overlap=decode_geometry.overlap,
                         progress_callback=_decode_progress,
                     )
+                    pixel_samples_are_minus_one_to_one = False
                 else:
                     memory_used = self.memory_used_decode(samples_in.shape, forward_dtype)
                     memory_management.manager.load_models([self.patcher], memory_required=memory_used)
@@ -977,7 +983,8 @@ class VAE:
                     for batch_idx, x in enumerate(range(0, samples_in.shape[0], batch_number), start=1):
                         samples = samples_in[x:x + batch_number]
                         decoded = self._decode_forward(samples, forward_dtype=forward_dtype)
-                        pixel_samples[x:x + batch_number] = torch.clamp((decoded + 1.0) / 2.0, min=0.0, max=1.0)
+                        pixel_samples[x:x + batch_number] = torch.clamp(decoded, min=-1.0, max=1.0)
+                        pixel_samples_are_minus_one_to_one = True
                         _tensor_stats("decode_inner.batch_decoded", decoded)
                         _report_vae_progress(
                             phase=progress_phase,
@@ -993,6 +1000,7 @@ class VAE:
                     )
                     _report_vae_progress(phase=progress_phase, block_index=0, total_blocks=1)
                     pixel_samples = self._decode_cpu_fallback(samples_in)
+                    pixel_samples_are_minus_one_to_one = False
                     decode_total_blocks = 1
                     _report_vae_progress(phase=progress_phase, block_index=1, total_blocks=1)
                 else:
@@ -1047,11 +1055,13 @@ class VAE:
                         overlap=decode_geometry.overlap,
                         progress_callback=_decode_retry_progress,
                     )
+                    pixel_samples_are_minus_one_to_one = False
 
             # Return BCHW format in [-1, 1] range directly
             # This is what sampling pipelines expect - no conversion needed in engines
             result = pixel_samples.to(self.output_device)
-            result = result * 2.0 - 1.0  # [0,1] → [-1,1]
+            if not pixel_samples_are_minus_one_to_one:
+                result = result * 2.0 - 1.0  # [0,1] -> [-1,1]
             _tensor_stats("decode_inner.result", result)
             if torch.isnan(result).any():
                 logger.warning(
