@@ -7,14 +7,14 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Runtime settings tab for the Tk launcher.
-Edits bootstrap-critical main-device defaults and global runtime/task knobs that must exist before the API starts (main/mount/offload devices, GGUF/LoRA, task single-flight,
-task cancel default mode, task SSE buffer caps, upscaler safeweights). Offload device defaults to CPU on missing/invalid values to preserve explicit de-residency semantics.
+Edits bootstrap-critical main-device defaults and global runtime/task knobs that must exist before the API starts (main/mount/offload devices, CFG batching, GGUF/LoRA,
+task single-flight, task cancel default mode, task SSE buffer caps, upscaler safeweights). Offload device defaults to CPU on missing/invalid values to preserve explicit de-residency semantics.
 LoRA apply mode resolves missing launcher values to `online` while preserving explicit `merge` selections.
 Allocator defaults are managed through `PYTORCH_CUDA_ALLOC_CONF` and `CODEX_ENABLE_DEFAULT_PYTORCH_CUDA_ALLOC_CONF`.
 API-only manual env overlay ownership lives in `Manual Env Vars`, not in runtime selectors.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `RuntimeTab` (class): Runtime settings tab (device defaults + attention mode + LoRA + `PYTORCH_CUDA_ALLOC_CONF`/cuda-malloc toggles).
+- `RuntimeTab` (class): Runtime settings tab (device defaults + attention/CFG batch mode + LoRA + `PYTORCH_CUDA_ALLOC_CONF`/cuda-malloc toggles).
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from apps.launcher.profiles import (
 )
 from apps.launcher.settings import (
     BoolSetting,
+    CFG_BATCH_MODE_CHOICES,
     ChoiceSetting,
     DEVICE_CHOICES,
     IntSetting,
@@ -88,6 +89,7 @@ class RuntimeTab:
         self._var_offload_device = tk.StringVar()
         self._var_attention_mode = tk.StringVar()
 
+        self._var_cfg_batch_mode = tk.StringVar()
         self._var_lora_apply_mode = tk.StringVar()
         self._var_gguf_dequant_cache = tk.StringVar()
         self._var_wan_chunk_buffer_mode = tk.StringVar()
@@ -201,8 +203,24 @@ class RuntimeTab:
         if self._section == "engine":
             return [
                 FormSectionDescriptor(
-                    title="GGUF / LoRA / PyTorch",
+                    title="Sampling / GGUF / LoRA / PyTorch",
                     fields=[
+                        FormFieldDescriptor(
+                            field_id="cfg_batch_mode",
+                            kind=FieldKind.CHOICE,
+                            label="CFG Cond+Uncond batch mode (requires API restart):",
+                            variable=self._var_cfg_batch_mode,
+                            choices=list(CFG_BATCH_MODE_CHOICES),
+                            on_change=lambda: self._sync_runtime_deps(mark_changed=True),
+                            width=12,
+                            help_mode=HelpMode.DIALOG,
+                            help_title="CFG Cond+Uncond batch mode",
+                            help_text=(
+                                "Env var: CODEX_CFG_BATCH_MODE\n"
+                                "fused: allows compatible cond+uncond CFG work to run in one model batch when memory allows (default).\n"
+                                "split: keeps cond and uncond work in separate model calls to lower peak VRAM."
+                            ),
+                        ),
                         FormFieldDescriptor(
                             field_id="lora_apply_mode",
                             kind=FieldKind.CHOICE,
@@ -445,11 +463,29 @@ class RuntimeTab:
         attention_mode = backend_policy_to_attention_mode(attn_backend, attn_sdpa_policy)
         self._var_attention_mode.set(_ATTENTION_MODE_TO_LABEL.get(attention_mode, "SDPA - Auto"))
 
+        runtime_settings_sanitized = False
+
+        if self._section == "engine":
+            cfg_batch_setting = ChoiceSetting(
+                "CODEX_CFG_BATCH_MODE",
+                default="fused",
+                choices=CFG_BATCH_MODE_CHOICES,
+            )
+            try:
+                cfg_batch_mode = cfg_batch_setting.get(env)
+            except SettingValidationError as exc:
+                cfg_batch_mode = "fused"
+                env["CODEX_CFG_BATCH_MODE"] = cfg_batch_mode
+                messagebox.showerror("Invalid runtime setting", str(exc))
+                runtime_settings_sanitized = True
+            self._var_cfg_batch_mode.set(cfg_batch_mode)
+        else:
+            self._var_cfg_batch_mode.set(str(env.get("CODEX_CFG_BATCH_MODE", "fused") or "fused").strip().lower())
+
         self._var_lora_apply_mode.set(_get("CODEX_LORA_APPLY_MODE", "online"))
         self._var_gguf_dequant_cache.set(_get("CODEX_GGUF_DEQUANT_CACHE", "off"))
         self._var_wan_chunk_buffer_mode.set(_get("CODEX_WAN22_IMG2VID_CHUNK_BUFFER_MODE", "hybrid"))
         self._var_lora_online_math.set(_get("CODEX_LORA_ONLINE_MATH", "weight_merge"))
-        runtime_settings_sanitized = False
 
         default_alloc_setting = BoolSetting(ENABLE_DEFAULT_PYTORCH_CUDA_ALLOC_CONF_KEY, default=True)
         try:
@@ -725,6 +761,22 @@ class RuntimeTab:
 
     def _sync_runtime_deps(self, *, mark_changed: bool) -> None:
         env = self._controller.store.env
+        if self._section == "engine":
+            env["CODEX_CFG_BATCH_MODE"] = (
+                str(self._var_cfg_batch_mode.get() or "").strip().lower() or "fused"
+            )
+            try:
+                cfg_batch_mode = ChoiceSetting(
+                    "CODEX_CFG_BATCH_MODE",
+                    default="fused",
+                    choices=CFG_BATCH_MODE_CHOICES,
+                ).get(env)
+            except SettingValidationError as exc:
+                env["CODEX_CFG_BATCH_MODE"] = "fused"
+                cfg_batch_mode = "fused"
+                messagebox.showerror("Invalid runtime setting", str(exc))
+                mark_changed = True
+            self._var_cfg_batch_mode.set(cfg_batch_mode)
         env.pop("CODEX_GGUF_EXEC", None)
         env["CODEX_GGUF_DEQUANT_CACHE"] = str(self._var_gguf_dequant_cache.get() or "").strip().lower() or "off"
         env.pop("CODEX_GGUF_DEQUANT_CACHE_RATIO", None)

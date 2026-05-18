@@ -7,10 +7,10 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Diagnostics tab for the Tk launcher.
-Shows launcher environment preflight checks plus backend debug, trace, profiler, and log-level controls grouped by troubleshooting purpose.
+Shows launcher environment preflight checks plus backend debug, runtime-diagnostics, trace, profiler, and log-level controls grouped by troubleshooting purpose.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `DiagnosticsTab` (class): Diagnostics tab controller for checks and debug/logging/profiling settings.
+- `DiagnosticsTab` (class): Diagnostics tab controller for checks and debug/runtime-diagnostics/logging/profiling settings.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from tkinter import ttk
 from typing import Callable, Dict, Iterable, List, Tuple
 
 from apps.launcher.checks import CodexLaunchCheck
-from apps.launcher.settings import BoolSetting, ChoiceSetting, CFG_BATCH_MODE_CHOICES, IntSetting, SettingValidationError
+from apps.launcher.settings import BoolSetting, IntSetting, SettingValidationError
 
 from ..controller import LauncherController
 from ..widgets import ScrollableFrame
@@ -51,7 +51,6 @@ class DiagnosticsTab:
         self._log_levels: Dict[str, tk.BooleanVar] = {}
 
         self._var_cfg_delta_n = tk.StringVar()
-        self._var_cfg_batch_mode = tk.StringVar()
         self._var_trace_max = tk.StringVar()
         self._var_dump_path = tk.StringVar()
         self._var_profile_top_n = tk.StringVar()
@@ -105,15 +104,19 @@ class DiagnosticsTab:
         sampling_box.columnconfigure(0, weight=1)
 
         trace_box = ttk.LabelFrame(body, text="  Deep Traces + Contract  ", padding=14)
-        trace_box.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 8))
+        trace_box.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 8))
         trace_box.columnconfigure(0, weight=1)
 
+        runtime_diag_box = ttk.LabelFrame(body, text="  Runtime Diagnostics  ", padding=14)
+        runtime_diag_box.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 8))
+        runtime_diag_box.columnconfigure(0, weight=1)
+
         profiler_box = ttk.LabelFrame(body, text="  Profiler  ", padding=14)
-        profiler_box.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 8))
+        profiler_box.grid(row=4, column=0, sticky="ew", padx=8, pady=(0, 8))
         profiler_box.columnconfigure(0, weight=1)
 
         logging_box = ttk.LabelFrame(body, text="  Logging  ", padding=14)
-        logging_box.grid(row=4, column=0, sticky="ew", padx=8, pady=(0, 8))
+        logging_box.grid(row=5, column=0, sticky="ew", padx=8, pady=(0, 8))
         logging_box.columnconfigure(0, weight=1)
 
         sampling_flags = [
@@ -136,15 +139,14 @@ class DiagnosticsTab:
             width=10,
             on_change=lambda: self._set_text("CODEX_LOG_CFG_DELTA_N", self._var_cfg_delta_n.get()),
         )
-        _ = self._add_choice(
-            sampling_box,
-            row,
-            label="CFG Cond+Uncond Batch Mode:",
-            var=self._var_cfg_batch_mode,
-            choices=CFG_BATCH_MODE_CHOICES,
-            on_change=lambda: self._set_text("CODEX_CFG_BATCH_MODE", self._var_cfg_batch_mode.get()),
-            advanced=True,
-        )
+        runtime_diag_flags = [
+            ("CODEX_VAE_TENSOR_STATS", "VAE Tensor Stats (requires DEBUG logging)"),
+            ("CODEX_MEMORY_DEBUG", "Memory Debug (also enabled by DEBUG logging)"),
+        ]
+        self._register_advanced(runtime_diag_box)
+        row = 0
+        for key, label in runtime_diag_flags:
+            row = self._add_flag_toggle(runtime_diag_box, row, key=key, label=label, advanced=True)
 
         trace_flags = [
             ("CODEX_TRACE_INFERENCE_DEBUG", "Trace Debug: Inference"),
@@ -260,7 +262,6 @@ class DiagnosticsTab:
             var.set(BoolSetting(key, default=bool(log_defaults.get(key, True))).get(env))
 
         self._var_cfg_delta_n.set(str(env.get("CODEX_LOG_CFG_DELTA_N", "2") or "2"))
-        self._var_cfg_batch_mode.set(ChoiceSetting("CODEX_CFG_BATCH_MODE", default="fused", choices=CFG_BATCH_MODE_CHOICES).get(env))
         self._var_trace_max.set(str(env.get("CODEX_TRACE_CALL_DEBUG_MAX_PER_FUNC", TRACE_DEBUG_DEFAULT) or TRACE_DEBUG_DEFAULT))
         self._var_dump_path.set(str(env.get("CODEX_DUMP_LATENTS_PATH", "") or ""))
         self._var_profile_top_n.set(str(env.get("CODEX_PROFILE_TOP_N", "25") or "25"))
@@ -320,27 +321,6 @@ class DiagnosticsTab:
         entry.bind("<KeyRelease>", lambda _e: on_change())
         if advanced:
             self._register_advanced(label_widget, entry)
-        return row + 1
-
-    def _add_choice(
-        self,
-        parent: ttk.LabelFrame,
-        row: int,
-        *,
-        label: str,
-        var: tk.StringVar,
-        choices: tuple[str, ...],
-        on_change: Callable[[], None],
-        advanced: bool = False,
-    ) -> int:
-        label_widget = ttk.Label(parent, text=label)
-        label_widget.grid(row=row, column=0, sticky="w", pady=8)
-        combo = ttk.Combobox(parent, textvariable=var, width=20, state="readonly")
-        combo["values"] = list(choices)
-        combo.grid(row=row, column=1, sticky="w", padx=(10, 0), pady=8)
-        combo.bind("<<ComboboxSelected>>", lambda _e: on_change())
-        if advanced:
-            self._register_advanced(label_widget, combo)
         return row + 1
 
     def _register_advanced(self, *widgets: tk.Widget) -> None:

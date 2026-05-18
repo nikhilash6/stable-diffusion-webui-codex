@@ -9,14 +9,14 @@ Required Notice: see NOTICE
 Purpose: Launcher profile persistence (meta + env areas + per-model env overlays).
 Implements the profile store used by the TUI/GUI launchers to load/save settings under `.sangoi/launcher/` (meta/areas/models) and to
 expose a mapping-like interface for editing environment variables with per-area routing and migrations.
-Defines defaults for performance-related env keys (GGUF dequant-cache/LoRA knobs, CFG batching, profiling flags) and task/runtime safety knobs (single-flight,
+Defines defaults for performance-related env keys (GGUF dequant-cache/LoRA knobs, CFG batching, hot-path diagnostics, profiling flags) and task/runtime safety knobs (single-flight,
 task cancel mode, task SSE buffer caps, safeweights), plus attention/bootstrap device policy keys (`CODEX_MAIN_DEVICE`, `CODEX_MOUNT_DEVICE`, `CODEX_OFFLOAD_DEVICE`) with CPU offload default, so runs are reproducible.
 LoRA apply-mode profile defaults resolve unset launcher config to `online` while preserving explicit `merge` values.
 Also stores API-only manual env overlay settings (`manual_api_env_enabled`, `manual_api_env_text`) plus launcher-owned frontend dev boot policy, and
 validates overlay text parsing for fail-loud startup.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `_default_area_env` (function): Builds default per-area env maps (debug/log/profiling flags + device defaults + GGUF dequant-cache/LoRA runtime knobs; default offload target is CPU).
+- `_default_area_env` (function): Builds default per-area env maps (debug/log/profiling/hot-path diagnostic flags + device defaults + GGUF dequant-cache/LoRA runtime knobs; default offload target is CPU).
 - `_default_external_terminal_enabled` (function): Canonical default provider for launcher "external terminal" preference (enabled on Windows, disabled elsewhere).
 - `_BOOTSTRAP_DEVICE_KEYS` (constant): Runtime-global launcher device keys that must stay scoped to `areas/core` (never model/non-core overlays).
 - `DEFAULT_PYTORCH_CUDA_ALLOC_CONF` (constant): Default `PYTORCH_CUDA_ALLOC_CONF` applied by launchers when unset.
@@ -83,6 +83,8 @@ def _default_area_env() -> Dict[str, Dict[str, str]]:
     core = {
         "CODEX_PIPELINE_DEBUG": os.getenv("CODEX_PIPELINE_DEBUG", "0"),
         "CODEX_CFG_BATCH_MODE": os.getenv("CODEX_CFG_BATCH_MODE", "fused"),
+        "CODEX_VAE_TENSOR_STATS": os.getenv("CODEX_VAE_TENSOR_STATS", "0"),
+        "CODEX_MEMORY_DEBUG": os.getenv("CODEX_MEMORY_DEBUG", "0"),
         "CODEX_SINGLE_FLIGHT": os.getenv("CODEX_SINGLE_FLIGHT", "1"),
         "CODEX_TASK_EVENT_BUFFER_MAX_EVENTS": os.getenv("CODEX_TASK_EVENT_BUFFER_MAX_EVENTS", "5000"),
         "CODEX_TASK_EVENT_BUFFER_MAX_MB": os.getenv("CODEX_TASK_EVENT_BUFFER_MAX_MB", "64"),
