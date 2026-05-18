@@ -12,7 +12,8 @@ so UI selections resolve to backend SHA-based assets (no raw-path inputs). It al
 owns the global runtime-device override plus component storage/compute dtype overrides applied via options, and reads the current `/api/options` revision through the shared
 API-client monotonic cache for generation payload contracts (`settings_revision`) plus bounded conditional option writes that must fail loud instead of overwriting newer owner state.
 Text-encoder choices are sourced from inventory files constrained by `*_tenc` roots (not folder roots), and stale root-label overrides are
-sanitized so `tenc_sha` resolution remains deterministic across families (including Anima and LTX2). Inventory slot metadata is cached alongside
+sanitized so `tenc_sha` resolution remains deterministic across families (including Qwen Image, Anima, and LTX2). Qwen Image text-encoder labels
+resolve only through `qwen_image_tenc` root-scoped inventory rows, never through global basename or prefix fanout. Inventory slot metadata is cached alongside
 SHA mappings so SDXL core-only requests can emit explicit `tenc1_sha` / `tenc2_sha` selectors without guessing label order. VAE state defaults to canonical `built-in`
 when no persisted value exists, request preflight can enforce fail-loud non-empty selection via `requireVaeSelection`, and LoRA SHA mappings
 are refreshed through the store-owned inventory flow (`fetchInventoryWithLoraHydration` + `hydrateLoraShaMap`). Workflow/history restore can also
@@ -56,7 +57,7 @@ const VAE_BY_FAMILY_STORAGE_KEY = 'codex.quicksettings.vae_by_family'
 const VAE_BY_FAMILY_OPTION_KEY = 'codex_vae_by_family'
 const DEFAULT_VAE_SELECTION = 'built-in'
 const NONE_VAE_SELECTION = 'none'
-const VAE_FAMILIES = ['sd15', 'sdxl', 'flux1', 'flux2', 'chroma', 'zimage', 'anima', 'ltx2'] as const
+const VAE_FAMILIES = ['sd15', 'sdxl', 'flux1', 'flux2', 'chroma', 'zimage', 'qwen_image', 'anima', 'ltx2'] as const
 type VaeFamily = (typeof VAE_FAMILIES)[number]
 type WanGgufVariant = NonNullable<InventoryResponse['wan22']['gguf'][number]['variant']>
 
@@ -65,6 +66,7 @@ const TEXT_ENCODER_FAMILY_KEYS: Array<[string, string]> = [
   ['sdxl', 'sdxl_tenc'],
   ['flux1', 'flux1_tenc'],
   ['flux2', 'flux2_tenc'],
+  ['qwen_image', 'qwen_image_tenc'],
   ['anima', 'anima_tenc'],
   ['ltx2', 'ltx2_tenc'],
   ['wan22', 'wan22_tenc'],
@@ -865,6 +867,9 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
       if (normPath) mapKeys.add(normPath)
       if (basename) mapKeys.add(basename)
       if (normPath) {
+        for (const family of matchedFamilies) {
+          mapKeys.add(`${family}/${normPath}`)
+        }
         for (const prefix of TEXT_ENCODER_PREFIXES) {
           mapKeys.add(`${prefix}/${normPath}`)
         }
@@ -949,6 +954,9 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
     if (lower.length === 64 && /^[0-9a-f]+$/.test(lower)) {
       return lower
     }
+    if (normalized.startsWith('qwen_image/')) {
+      return textEncoderShaMap.value.get(normalized)
+    }
 
     return lookupTextEncoderShaFromMap(textEncoderShaMap.value, normalized)
   }
@@ -956,6 +964,9 @@ export const useQuicksettingsStore = defineStore('quicksettings', () => {
   function resolveTextEncoderSlot(label: string | null | undefined): string | undefined {
     if (!label) return undefined
     const normalized = label.replace(/\\+/g, '/')
+    if (normalized.startsWith('qwen_image/')) {
+      return textEncoderSlotMap.value.get(normalized)
+    }
     return textEncoderSlotMap.value.get(normalized)
   }
 

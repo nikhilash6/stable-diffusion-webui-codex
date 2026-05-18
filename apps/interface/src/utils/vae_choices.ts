@@ -8,7 +8,8 @@ Required Notice: see NOTICE
 
 Purpose: Shared family-scoped VAE choice filtering and canonicalization helpers.
 Used by frontend restore/quicksettings owners to validate family-compatible VAE selections, build family-scoped VAE choice lists, and
-canonicalize saved selections through exact/sentinel/SHA matches without silently laundering unavailable assets.
+canonicalize saved selections through exact/sentinel/SHA matches without silently laundering unavailable assets. Qwen Image VAE choices are
+root-only external selections and do not expose the `built-in` sentinel.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `InventoryVaeChoice` / `VaePathsConfig` / `VaeCanonicalizationReason` / `VaeCanonicalizationResult` (types): Shared VAE inventory/path/canonicalization contracts.
@@ -55,6 +56,7 @@ export function isVaeChoiceForFamily(entry: Pick<InventoryVaeChoice, 'name' | 'p
   if (family === 'chroma') return pathBelongsToKey(path, 'flux1_vae', pathsConfig)
   if (family === 'ltx2') return pathBelongsToKey(path, 'ltx2_vae', pathsConfig)
   if (family === 'zimage') return pathBelongsToKey(path, 'zimage_vae', pathsConfig) || pathBelongsToKey(path, 'flux1_vae', pathsConfig)
+  if (family === 'qwen_image') return pathBelongsToKey(path, 'qwen_image_vae', pathsConfig)
   if (family === 'anima') return pathBelongsToKey(path, 'anima_vae', pathsConfig)
   return true
 }
@@ -67,6 +69,21 @@ export function withBuiltInVaeChoice(values: string[]): string[] {
     if (!trimmed) continue
     const lower = trimmed.toLowerCase()
     if (lower === 'automatic' || lower === 'built in' || lower === 'built-in') continue
+    if (seen.has(trimmed)) continue
+    seen.add(trimmed)
+    out.push(trimmed)
+  }
+  return out
+}
+
+function uniqueExternalVaeChoices(values: string[]): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const value of values) {
+    const trimmed = String(value || '').trim()
+    if (!trimmed) continue
+    const lower = trimmed.toLowerCase()
+    if (lower === 'automatic' || lower === 'built in' || lower === 'built-in' || lower === 'none') continue
     if (seen.has(trimmed)) continue
     seen.add(trimmed)
     out.push(trimmed)
@@ -95,6 +112,13 @@ export function buildFamilyVaeChoices(
           pathBelongsToKey(entry.path, 'zimage_vae', pathsConfig)
           || pathBelongsToKey(entry.path, 'flux1_vae', pathsConfig)
         ))
+        .map((entry) => String(entry.path || '')),
+    )
+  }
+  if (family === 'qwen_image') {
+    return uniqueExternalVaeChoices(
+      inventoryVaes
+        .filter((entry) => typeof entry.path === 'string' && pathBelongsToKey(entry.path, 'qwen_image_vae', pathsConfig))
         .map((entry) => String(entry.path || '')),
     )
   }
@@ -132,6 +156,13 @@ export function buildFamilyVaeValidationChoices(
         ))
         .map((entry) => String(entry.path || '').trim())
         .filter((value) => value.length > 0),
+    )
+  }
+  if (family === 'qwen_image') {
+    return uniqueExternalVaeChoices(
+      inventoryVaes
+        .filter((entry) => typeof entry.path === 'string' && pathBelongsToKey(entry.path, 'qwen_image_vae', pathsConfig))
+        .map((entry) => String(entry.path || '').trim()),
     )
   }
 

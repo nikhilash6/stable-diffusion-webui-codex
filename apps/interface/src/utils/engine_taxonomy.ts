@@ -9,8 +9,7 @@ Required Notice: see NOTICE
 Purpose: Canonical frontend engine/tab taxonomy helpers.
 Centralizes tab-family aliases, exact video-lane detection, image request engine-id resolution, exact backend engine-id -> semantic-engine resolution,
 and semantic/tab conversion so stores/composables stop duplicating mapping tables. FLUX.2 stays first-class in frontend taxonomy (no FLUX.1
-aliasing), while backend-only semantic engines such as `qwen_image` and `netflix_void` remain valid semantic ids but intentionally resolve to no UI
-tab family.
+aliasing), and Qwen Image is a first-class capability-gated image tab using the single canonical `qwen_image` id.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `TabFamily` (type): Canonical model tab families used by the UI.
@@ -26,7 +25,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `resolveSemanticEngineForEngineId` (function): Resolves engine id to semantic id using only the backend capability map.
 */
 
-export type TabFamily = 'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'chroma' | 'wan22_14b' | 'wan22_5b' | 'zimage' | 'anima' | 'ltx2'
+export type TabFamily = 'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'chroma' | 'qwen_image' | 'wan22_14b' | 'wan22_5b' | 'zimage' | 'anima' | 'ltx2'
 export type VideoTabFamily = Extract<TabFamily, 'wan22_14b' | 'wan22_5b' | 'ltx2'>
 
 export type SemanticEngine =
@@ -53,6 +52,7 @@ export type EngineRequestId =
   | 'flux1_kontext'
   | 'flux1_fill'
   | 'flux2'
+  | 'qwen_image'
   | 'flux1_chroma'
   | 'zimage'
   | 'anima'
@@ -67,6 +67,7 @@ const TAB_FAMILY_ALIASES: Readonly<Record<string, TabFamily>> = Object.freeze({
   flux1: 'flux1',
   flux2: 'flux2',
   chroma: 'chroma',
+  qwen_image: 'qwen_image',
   zimage: 'zimage',
   anima: 'anima',
   ltx2: 'ltx2',
@@ -119,7 +120,7 @@ export function tabFamilyFromSemanticEngine(value: unknown): TabFamily | null {
   const semantic = normalizeSemanticEngine(value)
   if (!semantic) return null
   if (semantic === 'wan22') return null
-  if (semantic === 'qwen_image' || semantic === 'hunyuan_video' || semantic === 'svd' || semantic === 'netflix_void') return null
+  if (semantic === 'hunyuan_video' || semantic === 'svd' || semantic === 'netflix_void') return null
   return semantic
 }
 

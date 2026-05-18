@@ -12,7 +12,7 @@ Variant-dependent engines (for example Z-Image Turbo/Base and FLUX.2 Klein disti
 in views/payload builders, not by these static flags.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `EngineType` (type): Known engine identifiers used by the UI config (includes `flux2`, `anima`, and `ltx2`).
+- `EngineType` (type): Known engine identifiers used by the UI config (includes `flux2`, `qwen_image`, `anima`, and `ltx2`).
 - `TaskType` (type): Supported task identifiers (txt2img/img2img/txt2vid/img2vid).
 - `EngineCapabilities` (interface): Capability flags used to gate UI controls (CFG/negative prompt/etc.).
 - `EngineDefaults` (interface): Default generation parameters (width/height/steps/cfg/etc.).
@@ -30,6 +30,7 @@ export type EngineType =
   | 'sdxl' 
   | 'flux1' 
   | 'flux2'
+  | 'qwen_image'
   | 'zimage' 
   | 'chroma'
   | 'anima'
@@ -143,6 +144,24 @@ const ENGINE_CONFIGS: Record<EngineType, EngineConfig> = {
       steps: 20,
       cfg: 4,
       distilledCfg: 4,
+    },
+  },
+
+  qwen_image: {
+    id: 'qwen_image',
+    label: 'Qwen Image',
+    capabilities: {
+      tasks: ['txt2img', 'img2img'],
+      usesCfg: true,
+      usesDistilledCfg: false,
+      usesNegativePrompt: true,
+      isVideoEngine: false,
+    },
+    defaults: {
+      width: 1328,
+      height: 1328,
+      steps: 50,
+      cfg: 4,
     },
   },
   

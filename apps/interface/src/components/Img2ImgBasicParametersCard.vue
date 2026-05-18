@@ -7,11 +7,12 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Img2img-focused Basic Parameters card with hires-like structure.
-Renders sampler/scheduler/steps, dimensions, optional resize-mode + upscaler controls, and seed/CFG with optional denoise
+Renders sampler/scheduler/steps, optional dimensions, optional resize-mode + upscaler controls, and seed/CFG with optional denoise
 for init-image mode without hires-only prompt/checkpoint swap controls, backend recommendation-aware sampler/scheduler selector grouping, plus optional advanced CFG/APG controls
 gated by per-engine capabilities. When native SDXL SUPIR mode is enabled, the card swaps the generic sampler/scheduler row for the truthful SUPIR sampler surface
 and shows the locked native scheduler derived from backend SUPIR diagnostics, while the SUPIR-specific knobs stay on the dedicated `SupirModeCard.vue`.
 The resize-type selector can now receive an engine-scoped truthful option subset and hides the upscaler field when the active engine does not expose an upscaler-backed resize mode.
+Callers can hide dimensions with a derived-size hint when a backend edit lane derives output size from the init image.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `Img2ImgBasicParametersCard` (component): Img2img parameters card used when init image mode is active.
@@ -121,7 +122,7 @@ Symbols (top-level; keep in sync; no ghosts):
       </div>
       <p v-if="supirEnabled && supirBlockingReason" class="hr-hint">{{ supirBlockingReason }}</p>
 
-      <div class="gc-row">
+      <div v-if="props.showDimensions !== false" class="gc-row">
         <SliderField
           class="gc-col"
           label="Width"
@@ -187,6 +188,7 @@ Symbols (top-level; keep in sync; no ghosts):
           @update:modelValue="onHeightDimensionChange"
         />
       </div>
+      <p v-else-if="dimensionsHiddenHint" class="hr-hint">{{ dimensionsHiddenHint }}</p>
 
       <div v-if="props.showResizeMode !== false" class="gc-row">
         <div class="gc-col field">
@@ -601,6 +603,8 @@ const props = withDefaults(defineProps<{
   widthInputStep?: number
   heightStep?: number
   heightInputStep?: number
+  showDimensions?: boolean
+  dimensionsHiddenHint?: string
   showInitImageDims?: boolean
   showClipSkip?: boolean
   clipSkip?: number
@@ -632,6 +636,8 @@ const props = withDefaults(defineProps<{
   widthInputStep: 8,
   heightStep: 64,
   heightInputStep: 8,
+  showDimensions: true,
+  dimensionsHiddenHint: '',
   showInitImageDims: false,
   showClipSkip: false,
   clipSkip: 0,
@@ -694,6 +700,7 @@ const widthStep = computed(() => Number.isFinite(props.widthStep) ? Math.trunc(N
 const widthInputStep = computed(() => Number.isFinite(props.widthInputStep) ? Math.trunc(Number(props.widthInputStep)) : 8)
 const heightStep = computed(() => Number.isFinite(props.heightStep) ? Math.trunc(Number(props.heightStep)) : 64)
 const heightInputStep = computed(() => Number.isFinite(props.heightInputStep) ? Math.trunc(Number(props.heightInputStep)) : 8)
+const dimensionsHiddenHint = computed(() => String(props.dimensionsHiddenHint || '').trim())
 const minClipSkip = computed(() => Number.isFinite(props.minClipSkip) ? Math.trunc(Number(props.minClipSkip)) : 0)
 const maxClipSkip = computed(() => Number.isFinite(props.maxClipSkip) ? Math.trunc(Number(props.maxClipSkip)) : 12)
 const showClipSkip = computed(() => props.showClipSkip === true)

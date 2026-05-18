@@ -10,7 +10,8 @@ Purpose: Options API routes for reading, updating, and validating settings.
 Exposes the JSON-backed options store and registry-driven validation helpers. Enforces finite numeric values for number/slider settings
 and emits apply metadata on `POST /api/options`. Conditional writes require `X-Codex-Expected-Revision` so stale clients fail loud instead
 of silently overwriting newer option state. Memory-manager backend and dtype changes are persisted but require a backend restart
-(launcher-owned) to take effect; this endpoint does not hot-apply memory reconfiguration.
+(launcher-owned) to take effect; this endpoint does not hot-apply memory reconfiguration. Family-scoped VAE persistence includes Qwen Image's
+external VAE owner.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `build_router` (function): Build the APIRouter for options endpoints.
@@ -37,7 +38,7 @@ def build_router(
 ) -> APIRouter:
     router = APIRouter()
     VAE_BY_FAMILY_OPTION_KEY = "codex_vae_by_family"
-    VAE_FAMILIES = ("sd15", "sdxl", "flux1", "flux2", "chroma", "zimage", "anima")
+    VAE_FAMILIES = ("sd15", "sdxl", "flux1", "flux2", "chroma", "zimage", "qwen_image", "anima")
     hot_apply_reasons: Dict[str, str] = {
         "codex_smart_offload": "hot-applied immediately (effective for the next generation request).",
         "codex_smart_fallback": "hot-applied immediately (effective for the next generation request).",

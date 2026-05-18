@@ -8,20 +8,25 @@ Required Notice: see NOTICE
 
 Purpose: Pure helper for explicit frontend image request contract resolution.
 Resolves checkpoint metadata, FLUX.2 guidance mode, asset-contract-backed text-encoder/VAE selectors, and canonical image `extras`
-without importing Pinia/Vue stores directly. Callers inject store-backed resolver callbacks and remain responsible for translating thrown
-contract `Error`s into UI state.
+without importing Pinia/Vue stores directly. Qwen Image text encoders are accepted only as `qwen_image/<path>` labels that resolve through
+the Qwen Image text-encoder root, so raw/global/basename labels cannot cross into `tenc_sha`. Callers inject store-backed resolver callbacks
+and remain responsible for translating thrown contract `Error`s into UI state.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `ImageRequestGuidanceMode` (type): Canonical frontend guidance mode for image payloads (`cfg` or `distilled_cfg`).
 - `ImageRequestContractResolvers` (interface): Injected pure resolver surface used by `buildExplicitImageRequestContract(...)`.
 - `BuildExplicitImageRequestContractArgs` (interface): Input contract for explicit image selector resolution + `extras` assembly.
 - `ExplicitImageRequestContract` (interface): Resolved guidance mode + canonical `extras` payload for one image request.
+- `normalizeQwenImageTextEncoderLabel` / `resolveQwenImageTextEncoderSha` (function): Fail-loud Qwen Image text-encoder label/root contract helpers.
 - `buildExplicitImageRequestContract` (function): Resolves fail-loud image request selectors and required asset SHAs into canonical `extras`.
 */
 
 import type { EngineAssetContract, ModelInfo } from '../api/types'
 
 export type ImageRequestGuidanceMode = 'cfg' | 'distilled_cfg'
+
+const QWEN_IMAGE_ENGINE_ID = 'qwen_image'
+const QWEN_IMAGE_TEXT_ENCODER_LABEL_PREFIX = 'qwen_image/'
 
 export interface ImageRequestContractResolvers {
   requireModelInfo: (label: string) => ModelInfo
@@ -65,6 +70,46 @@ function usesExplicitSdxlTextEncoderSelectors(
   checkpointCoreOnly: boolean,
 ): boolean {
   return checkpointCoreOnly && (engineKey === 'sdxl' || engineKey === 'sdxl_refiner')
+}
+
+function normalizeQwenImageTextEncoderLabel(label: string): string {
+  const normalized = label.replace(/\\+/g, '/').trim()
+  if (
+    !normalized.startsWith(QWEN_IMAGE_TEXT_ENCODER_LABEL_PREFIX)
+    || normalized.length <= QWEN_IMAGE_TEXT_ENCODER_LABEL_PREFIX.length
+  ) {
+    throw new Error('Qwen Image text encoder selection must use qwen_image/<path> labels from qwen_image_tenc roots.')
+  }
+  return normalized
+}
+
+function resolveQwenImageTextEncoderSha(
+  label: string,
+  assetContract: EngineAssetContract,
+  resolvers: ImageRequestContractResolvers,
+): string {
+  const normalized = normalizeQwenImageTextEncoderLabel(label)
+  const sha = resolvers.resolveTextEncoderSha(normalized)
+  if (!sha) {
+    throw new Error(`Qwen Image text encoder SHA not found for '${normalized}'. Re-select a qwen_image_tenc text encoder.`)
+  }
+
+  const expectedSlots = Array.isArray(assetContract.tenc_slots)
+    ? assetContract.tenc_slots
+        .map((value) => String(value || '').trim())
+        .filter((value) => value.length > 0)
+    : []
+  if (expectedSlots.length > 0) {
+    const slot = String(resolvers.resolveTextEncoderSlot(normalized) || '').trim()
+    if (!slot) {
+      throw new Error(`Qwen Image text encoder slot metadata not found for '${normalized}'. Refresh inventory and retry.`)
+    }
+    if (!expectedSlots.includes(slot)) {
+      throw new Error(`Qwen Image text encoder slot mismatch: got '${slot}', expected '${expectedSlots.join('|')}'.`)
+    }
+  }
+
+  return sha
 }
 
 export function buildExplicitImageRequestContract(
@@ -123,7 +168,12 @@ export function buildExplicitImageRequestContract(
     if (textEncoderLabels.length === 0) {
       throw new Error(requiredTextEncoderMessage(assetContract))
     }
-    if (usesExplicitSdxlTextEncoderSelectors(args.engineKey, checkpointCoreOnly)) {
+    if (args.engineKey === QWEN_IMAGE_ENGINE_ID) {
+      if (requiredTencCount !== 1 || textEncoderLabels.length !== 1) {
+        throw new Error(requiredTextEncoderMessage(assetContract))
+      }
+      extras.tenc_sha = resolveQwenImageTextEncoderSha(textEncoderLabels[0], assetContract, args.resolvers)
+    } else if (usesExplicitSdxlTextEncoderSelectors(args.engineKey, checkpointCoreOnly)) {
       const expectedSlots = Array.isArray(assetContract.tenc_slots)
         ? assetContract.tenc_slots
             .map((value) => String(value || '').trim())

@@ -12,7 +12,8 @@ apply engine-agnostic request normalization/validation (including required `sett
 by callers (`cfg` for base-4B, `distilled_cfg` for distilled 4B) instead of being hard-coded by engine id, and hires normalization feeds the
 nested hires owners used by txt2img and img2img payload builders. The canonical txt2img schema now requires the explicit
 image selectors carried in `extras` (`model_sha`, `checkpoint_core_only`, `model_format`, `vae_source`) so local validation matches the
-backend image contract.
+backend image contract. Qwen Image txt2img uses the dedicated backend preflight contract: 16px dimension multiples, no top-level clip-skip, no generic batch/hires/refiner/swap extras,
+and only root-resolved Qwen asset selectors in `extras`.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `DISTILLED_CFG_ENGINES` (const): Engine ids treated as distilled-guidance engines (use `distilled_cfg`; CFG/negative prompt omitted).
@@ -50,6 +51,30 @@ const DISTILLED_CFG_ENGINES = ['flux1', 'flux1_kontext', 'flux1_chroma'] as cons
 const DEVICE_VALUES = ['cuda', 'cpu', 'mps', 'xpu', 'directml'] as const
 const DeviceEnum = z.enum(DEVICE_VALUES)
 const FLUX2_BASE_VARIANT_MARKERS = ['flux.2-klein-base-4b', 'flux2-klein-base-4b', 'base-4b', 'base_4b', '/base/'] as const
+const QWEN_IMAGE_ENGINE_ID = 'qwen_image'
+const QWEN_IMAGE_DIMENSION_MULTIPLE = 16
+const QWEN_IMAGE_ASSET_EXTRA_KEYS = new Set([
+  'checkpoint_core_only',
+  'model_format',
+  'model_sha',
+  'tenc_sha',
+  'vae_sha',
+  'vae_source',
+])
+const QWEN_IMAGE_UNSUPPORTED_EXTRA_KEYS = new Set([
+  'batch_count',
+  'batch_size',
+  'er_sde',
+  'guidance',
+  'hires',
+  'ip_adapter',
+  'lora_sha',
+  'qwen_image_variant',
+  'refiner',
+  'swap_model',
+  'text_encoder_override',
+  'zimage_variant',
+])
 
 const TextEncoderOverrideSchema = z
   .object({
@@ -417,6 +442,113 @@ function resolveGuidanceMode(state: Txt2ImgFormState): Txt2ImgGuidanceMode {
   return 'cfg'
 }
 
+function isQwenImageTxt2ImgState(state: Txt2ImgFormState): boolean {
+  return String(state.engine || '').trim().toLowerCase() === QWEN_IMAGE_ENGINE_ID
+}
+
+function hasEnabledHires(state: Txt2ImgFormState): boolean {
+  return Boolean(state.hires?.enabled)
+}
+
+function assertQwenImageTxt2ImgDimension(value: number, label: 'width' | 'height'): void {
+  const dimension = Math.trunc(Number(value))
+  if (!Number.isFinite(dimension) || dimension < 8 || dimension > 8192) {
+    throw new Error(`Qwen Image txt2img ${label} must be an integer between 8 and 8192.`)
+  }
+  if (dimension % QWEN_IMAGE_DIMENSION_MULTIPLE !== 0) {
+    throw new Error(`Qwen Image txt2img ${label} must be a multiple of ${QWEN_IMAGE_DIMENSION_MULTIPLE}px.`)
+  }
+}
+
+function assertQwenImageTxt2ImgState(state: Txt2ImgFormState, opts: BuildImagePayloadOptions): void {
+  assertQwenImageTxt2ImgDimension(state.width, 'width')
+  assertQwenImageTxt2ImgDimension(state.height, 'height')
+  const clipSkip = Number(state.clipSkip)
+  if (Number.isFinite(clipSkip) && Math.trunc(clipSkip) > 0) {
+    throw new Error('Qwen Image txt2img does not support CLIP Skip. Reset CLIP Skip to 0.')
+  }
+  if (Math.trunc(Number(state.batchSize)) !== 1 || Math.trunc(Number(state.batchCount)) !== 1) {
+    throw new Error('Qwen Image txt2img requires batch size = 1 and batch count = 1.')
+  }
+  if (hasEnabledHires(state)) {
+    throw new Error('Qwen Image txt2img does not support Hires Fix. Disable Hires before generating.')
+  }
+  if (state.swapModel?.enabled) {
+    throw new Error('Qwen Image txt2img does not support first-pass model swap. Disable model swap before generating.')
+  }
+  if (state.refiner?.enabled) {
+    throw new Error('Qwen Image txt2img does not support refiner. Disable refiner before generating.')
+  }
+  if (
+    opts.nestedSelectorPayloads?.swapModel
+    || opts.nestedSelectorPayloads?.refiner
+    || opts.nestedSelectorPayloads?.hiresSwapModel
+    || opts.nestedSelectorPayloads?.hiresRefiner
+  ) {
+    throw new Error('Qwen Image txt2img does not support nested swap/refiner selector payloads.')
+  }
+}
+
+function buildQwenImageAssetExtras(rawExtras: Record<string, unknown> | undefined): Record<string, unknown> {
+  if (!rawExtras || typeof rawExtras !== 'object') {
+    throw new Error('Qwen Image txt2img requires resolved asset selectors in extras.')
+  }
+  const extras: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(rawExtras)) {
+    if (value === undefined) continue
+    if (QWEN_IMAGE_UNSUPPORTED_EXTRA_KEYS.has(key) || !QWEN_IMAGE_ASSET_EXTRA_KEYS.has(key)) {
+      throw new Error(`Qwen Image txt2img does not support extras.${key}.`)
+    }
+    extras[key] = value
+  }
+
+  const missing: string[] = []
+  for (const key of QWEN_IMAGE_ASSET_EXTRA_KEYS) {
+    if (extras[key] === undefined || extras[key] === null || extras[key] === '') {
+      missing.push(key)
+    }
+  }
+  if (missing.length > 0) {
+    throw new Error(`Qwen Image txt2img requires extras.${missing.join(', extras.')}.`)
+  }
+  if (extras.vae_source !== 'external') {
+    throw new Error('Qwen Image txt2img requires an external VAE selection.')
+  }
+  return extras
+}
+
+function buildQwenImageTxt2ImgPayload(
+  state: Txt2ImgFormState,
+  opts: BuildImagePayloadOptions,
+): Txt2ImgRequest {
+  assertQwenImageTxt2ImgState(state, opts)
+  const extras = buildQwenImageAssetExtras(state.extras)
+  const payload: Record<string, unknown> = {
+    device: normalizeDevice(state.device),
+    settings_revision: normalizeSettingsRevision(state.settingsRevision),
+    prompt: state.prompt.trim(),
+    negative_prompt: state.negativePrompt ?? '',
+    width: state.width,
+    height: state.height,
+    steps: state.steps,
+    cfg: state.guidanceScale,
+    sampler: state.sampler,
+    scheduler: state.scheduler,
+    seed: state.seed,
+    engine: QWEN_IMAGE_ENGINE_ID,
+    model: state.model,
+    extras,
+  }
+  if (!String(state.model || '').trim()) {
+    delete payload.model
+  }
+  const styles = state.styles?.filter((entry) => entry.trim().length > 0) ?? []
+  if (styles.length > 0) {
+    payload.styles = styles
+  }
+  return Txt2ImgRequestSchema.parse(payload)
+}
+
 export function buildNormalizedHiresOptions(
   state: Pick<Txt2ImgFormState, 'prompt' | 'negativePrompt' | 'hires'> & Partial<Pick<Txt2ImgFormState, 'steps'>>,
   guidanceMode: Txt2ImgGuidanceMode,
@@ -490,6 +622,10 @@ export function buildTxt2ImgPayload(
   state: Txt2ImgFormState,
   opts: BuildImagePayloadOptions = {},
 ): Txt2ImgRequest {
+  if (isQwenImageTxt2ImgState(state)) {
+    return buildQwenImageTxt2ImgPayload(state, opts)
+  }
+
   const guidanceMode = resolveGuidanceMode(state)
   const isDistilledCfgModel = guidanceMode === 'distilled_cfg'
   const totalSteps = Math.max(0, Math.trunc(Number(state.steps)))

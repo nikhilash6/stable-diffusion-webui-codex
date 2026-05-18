@@ -22,6 +22,8 @@ shared no-stretch img2vid guide controls (`img2vidImageScale`, `img2vidCropOffse
 persists explicit `executionProfile` state, and leaves stale/blank profile values visible until the active checkpoint metadata or user choice resolves
 them truthfully without silently rewriting stored raw profile ids.
 Image-tab sampler/scheduler defaults are consumed only from backend capabilities; when those defaults are unavailable the store leaves fields blank for request-boundary validation instead of inventing frontend fallback values.
+Qwen Image tabs are capability-derived like Anima/LTX2, use the single canonical `qwen_image` image-tab type, and reject persisted text-encoder labels
+that are not `qwen_image/<path>` selections.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `BaseTabType` (type): API tab type discriminator (from backend `ApiTab['type']`).
@@ -38,7 +40,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `LtxGenerationMode` (type): LTX video mode discriminator (`txt2vid|img2vid`).
 - `LtxTabParams` (interface): UI LTX video params, including checkpoint-owned `executionProfile` state plus prompt/init-image/video controls.
 - `BaseTab` (interface): Generic tab record persisted in the store (id/type/label + params + meta).
-- `ImageBaseParams` (interface): Common image-tab params (prompt, seed, steps, CFG, dims, etc.) shared across SD/Flux.1/Flux.2/Chroma/ZImage
+- `ImageBaseParams` (interface): Common image-tab params (prompt, seed, steps, CFG, dims, etc.) shared across SD/Flux.1/Flux.2/Chroma/Qwen Image/ZImage
   (includes optional family-specific fields like `zimageTurbo`, img2img layout state `img2imgResizeMode`/`img2imgUpscaler`,
   inpaint mask controls (`maskRegionSplit` and related toggles), image automation owners (`runAction`, `initSource`, `supir`, `ipAdapter`), and advanced guidance policy controls).
 - `ImageRunAction` (type): Run CTA mode discriminator (`generate|infinite`) persisted per image tab.
@@ -63,7 +65,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `defaultImageParamsForType` (function): Returns canonical image-tab defaults for a specific image tab type.
 - `normalizeTabType` (function): Validates/coerces raw type values into `BaseTabType`.
 - `BASE_REQUIRED_TYPES` (const): Baseline tab types always auto-created by the UI store.
-- `requiredTypesFromCapabilities` (function): Derives required tab types from backend capability map (adds capability-exposed `ltx2`/`anima` tabs).
+- `requiredTypesFromCapabilities` (function): Derives required tab types from backend capability map (adds capability-exposed `qwen_image`/`ltx2`/`anima` tabs).
 - `asRecordObject` (function): Narrowing helper that normalizes unknown values into plain records for merge-safe processing.
 - `isPlainRecord` (function): Validates object values as plain record payloads (no arrays/class instances) for patch serialization safety.
 - `PersistSerializationPhase` (type): Serialization boundary phases used by params persistence snapshots and rollback.
@@ -76,6 +78,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `normalizeWan5bParams` (function): Applies exact WAN 5B single-stage normalization for `stage/video/assets` plus top-level prompt/sampler/seed owners.
 - `shouldPersistWan14bStageSamplingBackfill` (function): Detects persisted WAN 14B params requiring High/Low stage sampler/scheduler migration (`sampler='uni-pc bh2'`, `scheduler='simple'`).
 - `buildImageTopLevelBackfillPatch` (function): Builds a missing-top-level-only image-tab backfill patch from the normalized owner shape so hydration can persist absent canonical keys without widening into unrelated nested drift.
+- `normalizeQwenImageTextEncoders` (function): Validates Qwen Image persisted text-encoder labels as one `qwen_image/<path>` selector.
 - `normalizeImageParams` (function): Applies image-tab nested merge normalization (`hires/refiner`) with sampler/scheduler and strict inpaint-mode reset.
 - `normalizeParamsForType` (function): Normalizes raw params payload based on tab type (shape checking; discards invalid fields).
 - `normalizeTab` (function): Normalizes a raw tab record (id/type/params/meta) into the store shape.
@@ -422,6 +425,7 @@ export type TabParamsByType = {
   sdxl: ImageBaseParams
   flux1: ImageBaseParams
   flux2: ImageBaseParams
+  qwen_image: ImageBaseParams
   zimage: ImageBaseParams
   chroma: ImageBaseParams
   anima: ImageBaseParams
@@ -1497,6 +1501,24 @@ function buildImageTopLevelBackfillPatch(
   return needsBackfill ? backfillPatch : null
 }
 
+function normalizeQwenImageTextEncoders(labels: string[]): string[] {
+  if (labels.length === 0) return []
+  if (labels.length !== 1) {
+    throw new ModelTabsStoreError(
+      'invalid_response',
+      'Qwen Image requires exactly one qwen_image/<path> text encoder selection.',
+    )
+  }
+  const normalized = labels[0].replace(/\\+/g, '/').trim()
+  if (!normalized.startsWith('qwen_image/') || normalized.length <= 'qwen_image/'.length) {
+    throw new ModelTabsStoreError(
+      'invalid_response',
+      'Qwen Image text encoder selections must use qwen_image/<path> labels from qwen_image_tenc roots.',
+    )
+  }
+  return [normalized]
+}
+
 function normalizeGuidanceAdvancedParams(raw: unknown, defaults: GuidanceAdvancedParams): GuidanceAdvancedParams {
   const patch = asRecordObject(raw)
   const toFiniteNumber = (value: unknown, fallback: number): number => {
@@ -1703,6 +1725,9 @@ function normalizeParamsForType<T extends BaseTabType>(
       .filter((label) => label.startsWith('flux2/'))
       .slice(0, 1)
   }
+  if (type === 'qwen_image') {
+    normalized.textEncoders = normalizeQwenImageTextEncoders(normalized.textEncoders)
+  }
   return normalized as TabParamsByType[T]
 }
 
@@ -1730,6 +1755,9 @@ export function requiredTypesFromCapabilities(engines: Record<string, unknown>):
   const types: BaseTabType[] = [...BASE_REQUIRED_TYPES]
   if (Object.prototype.hasOwnProperty.call(engines, 'ltx2')) {
     types.push('ltx2')
+  }
+  if (Object.prototype.hasOwnProperty.call(engines, 'qwen_image')) {
+    types.push('qwen_image')
   }
   if (Object.prototype.hasOwnProperty.call(engines, 'anima')) {
     types.push('anima')

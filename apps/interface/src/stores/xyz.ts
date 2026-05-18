@@ -11,6 +11,7 @@ Builds parameter grid combos, enqueues jobs, starts txt2img tasks (including req
 per-cell results. Hires upscaler values are stable ids (`latent:*` / `spandrel:*`) for hires-fix wiring; hires tile prefs (fallback/min_tile) are propagated from the shared upscalers store.
 Preflight now fails loud when VAE selection is empty before queuing XYZ requests, and queued txt2img payloads reuse the shared image request contract helper so the sweep lane emits the
 same explicit checkpoint/VAE selectors (`model_sha`, `checkpoint_core_only`, `model_format`, `vae_source`), FLUX.2 guidance mode, and asset-contract-backed extras as the main image generation lane.
+Qwen Image sweeps enter the same exported prebuild/apply-axis path and then the shared txt2img payload builder, so unsupported generic axes and stale tab state fail before queuing instead of emitting rejected fields.
 The standalone `/xyz` route now pins itself to a compatible image-tab owner (active image tab, then most recently updated image tab, else a new `sdxl` tab) instead of baselining from generic active-tab state.
 Baseline sampler/scheduler resolution validates current params or backend capability defaults against executable sampler/scheduler catalogs before queuing requests.
 
@@ -18,6 +19,9 @@ Symbols (top-level; keep in sync; no ghosts):
 - `Status` (type): XYZ sweep lifecycle status (`idle`/`running`/`stopped`/`error`/`done`).
 - `StopMode` (type): Stop behavior for a running sweep (`immediate` vs `after_current`).
 - `XyzJob` (interface): Internal job record for each cell (payload/task id/status/result/error).
+- `CompatibleImageTab` (type): Image-tab owner shape accepted by the sweep payload prebuilder.
+- `assertQwenImageXyzTabState` (function): Rejects stale unsupported Qwen tab state before XYZ prebuild can ignore it.
+- `buildXyzBaseForm` / `applyXyzAxis` / `buildXyzTxt2ImgPayload` (function): Exported payload prebuild path used by store runs and focused contract probes.
 - `ensureBaselineImageTab` (function): Resolves the owner image tab for `/xyz` with deterministic fallback.
 - `useXyzStore` (store): Pinia store for XYZ sweeps; builds combos, runs jobs, subscribes to task SSE, and writes results into cells.
 - `enabled`/`xEnabled`/`yEnabled`/`zEnabled` (store refs): Master and per-axis toggles used by the embedded XYZ card + Run integration.
@@ -30,7 +34,7 @@ import { computed, reactive, ref } from 'vue'
 
 import { cancelTask, fetchSamplers, fetchSchedulers, startTxt2Img, subscribeTask } from '../api/client'
 import { buildTxt2ImgPayload } from '../api/payloads'
-import type { Txt2ImgRequest } from '../api/payloads'
+import type { Txt2ImgFormState, Txt2ImgRequest } from '../api/payloads'
 import type { GeneratedImage, TaskEvent } from '../api/types'
 import { buildExplicitImageRequestContract } from '../utils/image_request_contract'
 import { AXIS_OPTIONS, buildCombos, labelOf, parseAxisValues, type AxisParam, type AxisValue, type XyzCell } from '../utils/xyz'
@@ -42,6 +46,8 @@ import { isWanTabFamily, normalizeTabFamily, resolveImageRequestEngineId } from 
 
 type Status = 'idle' | 'running' | 'stopped' | 'error' | 'done'
 type StopMode = 'immediate' | 'after_current'
+const QWEN_IMAGE_ENGINE_ID = 'qwen_image'
+const LORA_TAG_RE = /<\s*lora\s*:\s*([^:>]+)\s*(?::[^>]*)?>/gi
 
 interface XyzJob {
   id: string
@@ -52,6 +58,213 @@ interface XyzJob {
   image?: GeneratedImage
   info?: unknown
   error?: string
+}
+
+export type CompatibleImageTab = TabByType<ImageTabType>
+
+export interface XyzAxisApplication {
+  enabled: boolean
+  param: AxisParam
+  value: AxisValue | null
+}
+
+export interface BuildXyzTxt2ImgPayloadInput {
+  tab: CompatibleImageTab
+  samplingDefaults: SamplingDefaults
+  axes?: readonly XyzAxisApplication[]
+  hiresFallbackOnOom?: boolean
+  hiresMinTile?: number
+}
+
+function hasLoraPromptTag(text: string | null | undefined): boolean {
+  LORA_TAG_RE.lastIndex = 0
+  const matched = LORA_TAG_RE.test(String(text || ''))
+  LORA_TAG_RE.lastIndex = 0
+  return matched
+}
+
+function assertNoQwenImageXyzLoraTags(prompt: string | null | undefined, context: string): void {
+  if (!hasLoraPromptTag(prompt)) return
+  throw new Error(`Qwen Image XYZ does not support LoRA prompt tags in ${context}.`)
+}
+
+export function assertQwenImageXyzTabState(tab: CompatibleImageTab): void {
+  if (resolveImageRequestEngineId(tab.type, false) !== QWEN_IMAGE_ENGINE_ID) return
+  const params = tab.params as ImageBaseParams
+  if (params.useInitImage) {
+    throw new Error('Qwen Image XYZ uses txt2img sweeps. Disable IMG2IMG before running XYZ.')
+  }
+  if (params.runAction === 'infinite') {
+    throw new Error('Qwen Image XYZ does not support Infinite generate. Use Generate.')
+  }
+  if (Math.trunc(Number(params.batchSize ?? 1)) !== 1 || Math.trunc(Number(params.batchCount ?? 1)) !== 1) {
+    throw new Error('Qwen Image XYZ requires batch size = 1 and batch count = 1.')
+  }
+  const clipSkip = Number(params.clipSkip ?? 0)
+  if (Number.isFinite(clipSkip) && Math.trunc(clipSkip) > 0) {
+    throw new Error('Qwen Image XYZ does not support CLIP Skip. Reset CLIP Skip to 0.')
+  }
+  if (params.hires?.enabled) {
+    throw new Error('Qwen Image XYZ does not support Hires Fix. Disable Hires before running XYZ.')
+  }
+  if (params.swapModel?.enabled) {
+    throw new Error('Qwen Image XYZ does not support first-pass model swap. Disable model swap before running XYZ.')
+  }
+  if (params.refiner?.enabled) {
+    throw new Error('Qwen Image XYZ does not support refiner. Disable refiner before running XYZ.')
+  }
+  if (params.ipAdapter?.enabled) {
+    throw new Error('Qwen Image XYZ does not support IP-Adapter. Disable IP-Adapter before running XYZ.')
+  }
+  if (params.guidanceAdvanced?.enabled) {
+    throw new Error('Qwen Image XYZ does not support Advanced Guidance/APG. Disable Advanced Guidance before running XYZ.')
+  }
+  assertNoQwenImageXyzLoraTags(params.prompt, 'prompt')
+  assertNoQwenImageXyzLoraTags(params.negativePrompt, 'negative prompt')
+}
+
+function assertQwenImageXyzFormState(form: Txt2ImgFormState): void {
+  if (form.engine !== QWEN_IMAGE_ENGINE_ID) return
+  assertNoQwenImageXyzLoraTags(form.prompt, 'prompt')
+  assertNoQwenImageXyzLoraTags(form.negativePrompt, 'negative prompt')
+}
+
+export function buildXyzBaseForm(tab: CompatibleImageTab, samplingDefaults: SamplingDefaults): Txt2ImgFormState {
+  const quick = useQuicksettingsStore()
+  const caps = useEngineCapabilitiesStore()
+  const params = tab.params as ImageBaseParams
+  const tabFamily = tab.type
+  const engineKey = resolveImageRequestEngineId(tabFamily, false)
+  const checkpoint = String(params.checkpoint || '').trim()
+  const modelLabel = checkpoint || quick.currentModel
+  const textEncoders = Array.isArray(params.textEncoders)
+    ? params.textEncoders
+        .map((value: unknown) => String(value || '').trim())
+        .filter((value: string) => value.length > 0)
+    : []
+  const requestContract = buildExplicitImageRequestContract({
+    modelLabel,
+    engineKey,
+    textEncoderLabels: textEncoders,
+    selectedVaeLabel: quick.getVaeForFamily(tabFamily),
+    zimageTurbo: engineKey === 'zimage'
+      ? Boolean(params.zimageTurbo ?? true)
+      : false,
+    resolvers: {
+      requireModelInfo: quick.requireModelInfo,
+      resolveFlux2CheckpointVariant: quick.resolveFlux2CheckpointVariant,
+      resolveTextEncoderSha: quick.resolveTextEncoderSha,
+      resolveTextEncoderSlot: quick.resolveTextEncoderSlot,
+      requireVaeSelection: quick.requireVaeSelection,
+      resolveVaeSha: quick.resolveVaeSha,
+      getAssetContract: caps.getAssetContract,
+    },
+  })
+
+  return {
+    prompt: params.prompt ?? '',
+    negativePrompt: params.negativePrompt ?? '',
+    width: params.width ?? 1024,
+    height: params.height ?? 1024,
+    steps: params.steps ?? 30,
+    guidanceScale: params.cfgScale ?? 7,
+    sampler: samplingDefaults.sampler,
+    scheduler: samplingDefaults.scheduler,
+    seed: params.seed ?? -1,
+    clipSkip: params.clipSkip ?? 0,
+    batchSize: 1,
+    batchCount: 1,
+    styles: [],
+    device: quick.currentDevice as Txt2ImgFormState['device'],
+    settingsRevision: quick.getSettingsRevision(),
+    engine: engineKey,
+    model: modelLabel,
+    guidanceMode: requestContract.guidanceMode,
+    swapModel: { ...params.swapModel },
+    hires: params.hires
+      ? {
+          ...params.hires,
+          tile: { ...params.hires.tile },
+          swapModel: params.hires.swapModel ? { ...params.hires.swapModel } : undefined,
+          refiner: params.hires.refiner ? { ...params.hires.refiner } : params.hires.refiner,
+        }
+      : undefined,
+    refiner: params.refiner ? { ...params.refiner } : undefined,
+    extras: { ...requestContract.extras },
+  }
+}
+
+export function applyXyzAxis(form: Txt2ImgFormState, param: AxisParam, value: AxisValue): void {
+  switch (param) {
+    case 'prompt':
+      form.prompt = String(value)
+      break
+    case 'negative':
+      form.negativePrompt = String(value)
+      break
+    case 'cfg':
+      form.guidanceScale = Number(value)
+      break
+    case 'steps':
+      form.steps = Number(value)
+      break
+    case 'sampler':
+      form.sampler = String(value)
+      break
+    case 'scheduler':
+      form.scheduler = String(value)
+      break
+    case 'seed':
+      form.seed = Number(value)
+      break
+    case 'width':
+      form.width = Number(value)
+      break
+    case 'height':
+      form.height = Number(value)
+      break
+    case 'hires_scale':
+      form.hires = form.hires || { enabled: true, scale: 2.0, denoise: 0.4, steps: 0, resizeX: 0, resizeY: 0, upscaler: 'latent:bicubic-aa', tile: { tile: 256, overlap: 16 } }
+      form.hires.enabled = true
+      form.hires.scale = Number(value)
+      break
+    case 'hires_steps':
+      form.hires = form.hires || { enabled: true, scale: 2.0, denoise: 0.4, steps: 0, resizeX: 0, resizeY: 0, upscaler: 'latent:bicubic-aa', tile: { tile: 256, overlap: 16 } }
+      form.hires.enabled = true
+      form.hires.steps = Number(value)
+      break
+    case 'refiner_model':
+      form.refiner = form.refiner || { enabled: true, swapAtStep: 10, cfg: form.guidanceScale ?? 7, seed: -1 }
+      form.refiner.enabled = true
+      form.refiner.model = String(value)
+      break
+    case 'refiner_steps':
+      form.refiner = form.refiner || { enabled: true, swapAtStep: 10, cfg: form.guidanceScale ?? 7, seed: -1 }
+      form.refiner.enabled = true
+      form.refiner.swapAtStep = Math.max(1, Math.trunc(Number(value)))
+      break
+    case 'refiner_cfg':
+      form.refiner = form.refiner || { enabled: true, swapAtStep: 10, cfg: form.guidanceScale ?? 7, seed: -1 }
+      form.refiner.enabled = true
+      form.refiner.cfg = Number(value)
+      break
+    default:
+      break
+  }
+}
+
+export function buildXyzTxt2ImgPayload(input: BuildXyzTxt2ImgPayloadInput): Txt2ImgRequest {
+  assertQwenImageXyzTabState(input.tab)
+  const form = buildXyzBaseForm(input.tab, input.samplingDefaults)
+  for (const axis of input.axes ?? []) {
+    if (!axis.enabled || axis.value === null) continue
+    applyXyzAxis(form, axis.param, axis.value)
+  }
+  assertQwenImageXyzFormState(form)
+  return buildTxt2ImgPayload(form, {
+    hiresFallbackOnOom: input.hiresFallbackOnOom,
+    hiresMinTile: input.hiresMinTile,
+  })
 }
 
 export const useXyzStore = defineStore('xyz', () => {
@@ -78,8 +291,6 @@ export const useXyzStore = defineStore('xyz', () => {
   const activeTaskId = ref<string | null>(null)
 
   let unsubscribe: (() => void) | null = null
-
-  type CompatibleImageTab = TabByType<ImageTabType>
 
   const axisKind = (param: AxisParam): 'text' | 'number' => {
     return AXIS_OPTIONS.find((o) => o.id === param)?.kind ?? 'text'
@@ -167,121 +378,6 @@ export const useXyzStore = defineStore('xyz', () => {
     }
     tabs.setActive(created.id)
     return created
-  }
-
-  function buildBaseForm(tab: CompatibleImageTab, samplingDefaults: SamplingDefaults): any {
-    const quick = useQuicksettingsStore()
-    const caps = useEngineCapabilitiesStore()
-    const params = tab.params as ImageBaseParams
-    const tabFamily = tab.type
-    const engineKey = resolveImageRequestEngineId(tabFamily, false)
-    const checkpoint = String(params.checkpoint || '').trim()
-    const modelLabel = checkpoint || quick.currentModel
-    const textEncoders = Array.isArray(params.textEncoders)
-      ? params.textEncoders
-          .map((value: unknown) => String(value || '').trim())
-          .filter((value: string) => value.length > 0)
-      : []
-    const requestContract = buildExplicitImageRequestContract({
-      modelLabel,
-      engineKey,
-      textEncoderLabels: textEncoders,
-      selectedVaeLabel: quick.getVaeForFamily(tabFamily),
-      zimageTurbo: engineKey === 'zimage'
-        ? Boolean(params.zimageTurbo ?? true)
-        : false,
-      resolvers: {
-        requireModelInfo: quick.requireModelInfo,
-        resolveFlux2CheckpointVariant: quick.resolveFlux2CheckpointVariant,
-        resolveTextEncoderSha: quick.resolveTextEncoderSha,
-        resolveTextEncoderSlot: quick.resolveTextEncoderSlot,
-        requireVaeSelection: quick.requireVaeSelection,
-        resolveVaeSha: quick.resolveVaeSha,
-        getAssetContract: caps.getAssetContract,
-      },
-    })
-    const guidanceMode = requestContract.guidanceMode
-    const extras: Record<string, unknown> = { ...requestContract.extras }
-
-    return {
-      prompt: params?.prompt ?? '',
-      negativePrompt: params?.negativePrompt ?? '',
-      width: params?.width ?? 1024,
-      height: params?.height ?? 1024,
-      steps: params?.steps ?? 30,
-      guidanceScale: params?.cfgScale ?? 7,
-      sampler: samplingDefaults.sampler,
-      scheduler: samplingDefaults.scheduler,
-      seed: params?.seed ?? -1,
-      batchSize: 1,
-      batchCount: 1,
-      styles: [],
-      device: quick.currentDevice,
-      settingsRevision: quick.getSettingsRevision(),
-      engine: engineKey,
-      model: modelLabel,
-      guidanceMode,
-      extras,
-    }
-  }
-
-  function applyAxis(form: any, param: AxisParam, value: AxisValue): void {
-    switch (param) {
-      case 'prompt':
-        form.prompt = String(value)
-        break
-      case 'negative':
-        form.negativePrompt = String(value)
-        break
-      case 'cfg':
-        form.guidanceScale = Number(value)
-        break
-      case 'steps':
-        form.steps = Number(value)
-        break
-      case 'sampler':
-        form.sampler = String(value)
-        break
-      case 'scheduler':
-        form.scheduler = String(value)
-        break
-      case 'seed':
-        form.seed = Number(value)
-        break
-      case 'width':
-        form.width = Number(value)
-        break
-      case 'height':
-        form.height = Number(value)
-        break
-      case 'hires_scale':
-        form.hires = form.hires || { enabled: true, scale: 2.0, denoise: 0.4, steps: 0, resizeX: 0, resizeY: 0, upscaler: 'latent:bicubic-aa', tile: { tile: 256, overlap: 16 } }
-        form.hires.enabled = true
-        form.hires.scale = Number(value)
-        break
-      case 'hires_steps':
-        form.hires = form.hires || { enabled: true, scale: 2.0, denoise: 0.4, steps: 0, resizeX: 0, resizeY: 0, upscaler: 'latent:bicubic-aa', tile: { tile: 256, overlap: 16 } }
-        form.hires.enabled = true
-        form.hires.steps = Number(value)
-        break
-      case 'refiner_model':
-        form.refiner = form.refiner || { enabled: true, swapAtStep: 10, cfg: form.guidanceScale ?? 7, seed: -1 }
-        form.refiner.enabled = true
-        form.refiner.model = String(value)
-        break
-      case 'refiner_steps':
-        form.refiner = form.refiner || { enabled: true, swapAtStep: 10, cfg: form.guidanceScale ?? 7, seed: -1 }
-        form.refiner.enabled = true
-        form.refiner.swapAtStep = Math.max(1, Math.trunc(Number(value)))
-        break
-      case 'refiner_cfg':
-        form.refiner = form.refiner || { enabled: true, swapAtStep: 10, cfg: form.guidanceScale ?? 7, seed: -1 }
-        form.refiner.enabled = true
-        form.refiner.cfg = Number(value)
-        break
-      default:
-        break
-    }
   }
 
   async function awaitResult(taskId: string): Promise<{ images: GeneratedImage[]; info?: unknown }> {
@@ -415,11 +511,17 @@ export const useXyzStore = defineStore('xyz', () => {
     // Pre-build job queue with payload snapshots
     for (const [index, combo] of comboList.entries()) {
       try {
-        const form = buildBaseForm(baselineTab, resolvedSampling)
-        if (xEnabled.value) applyAxis(form, xParam.value, combo.x)
-        if (combo.y !== null && yEnabled.value) applyAxis(form, yParam.value, combo.y)
-        if (combo.z !== null && zEnabled.value) applyAxis(form, zParam.value, combo.z)
-        const payload = buildTxt2ImgPayload(form, { hiresFallbackOnOom, hiresMinTile })
+        const payload = buildXyzTxt2ImgPayload({
+          tab: baselineTab,
+          samplingDefaults: resolvedSampling,
+          axes: [
+            { enabled: xEnabled.value, param: xParam.value, value: combo.x },
+            { enabled: yEnabled.value, param: yParam.value, value: combo.y },
+            { enabled: zEnabled.value, param: zParam.value, value: combo.z },
+          ],
+          hiresFallbackOnOom,
+          hiresMinTile,
+        })
         nextJobs.push({
           id: `job-${index + 1}`,
           combo: { x: combo.x, y: combo.y, z: combo.z },

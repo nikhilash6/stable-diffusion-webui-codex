@@ -17,7 +17,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `dependencyChecks` (computed): Home dependency map sourced from engine capabilities store.
 - `dependencyLabels` (computed): Engine label map for dependency panel display and deterministic ordering.
 - `dependencyError` (ref): Fatal capabilities-init error shown in the global dependency panel.
-- `onCreate` (function): Creates a new model tab for the selected engine type (optional title; includes capability-gated Anima/LTX2 when supported).
+- `onCreate` (function): Creates a new model tab for the selected engine type (optional title; includes capability-gated Qwen Image/Anima/LTX2 when supported).
 - `setTitleDraft` (function): Updates the in-memory title draft for a tab row (before persisting).
 - `commitTitle` (function): Persists a tab title edit to the backend/store.
 - `setEnabled` (function): Toggles a tab enabled/disabled state and persists the change.
@@ -34,7 +34,7 @@ Symbols (top-level; keep in sync; no ghosts):
       <div class="panel-header">Welcome</div>
       <div class="panel-body">
         <p class="subtitle">
-          This home workspace is engine-agnostic. Use it to create and manage model tabs (SD 1.5, SDXL, FLUX.1, FLUX.2, Z Image, Anima, LTX 2.3, WAN 2.2)
+          This home workspace is engine-agnostic. Use it to create and manage model tabs (SD 1.5, SDXL, FLUX.1, FLUX.2, Qwen Image, Z Image, Anima, LTX 2.3, WAN 2.2)
           and to navigate to workflows or utilities. Generation happens in tabs and workflows, not here.
         </p>
 
@@ -88,6 +88,7 @@ Symbols (top-level; keep in sync; no ghosts):
                 <option value="sdxl">SDXL</option>
                 <option value="flux1">FLUX.1</option>
                 <option value="flux2">FLUX.2</option>
+                <option v-if="showQwenImageOption" value="qwen_image">Qwen Image</option>
                 <option value="zimage">Z Image</option>
                 <option v-if="showAnimaOption" value="anima">Anima</option>
                 <option v-if="showLtx2Option" value="ltx2">LTX 2.3</option>
@@ -310,6 +311,7 @@ onMounted(async () => {
 })
 
 const tabs = computed(() => store.orderedTabs.filter((tab) => tab.type !== 'chroma'))
+const showQwenImageOption = computed(() => Boolean(engineCaps.get('qwen_image')))
 const showAnimaOption = computed(() => Boolean(engineCaps.get('anima')))
 const showLtx2Option = computed(() => Boolean(engineCaps.get('ltx2')))
 const dependencyChecks = computed(() => engineCaps.dependencyChecks)
@@ -332,6 +334,11 @@ async function onCreate(): Promise<void> {
   try {
     if (newType.value === 'anima' && !showAnimaOption.value) {
       const msg = "Cannot create Anima tab: '/api/engines/capabilities' does not expose 'anima'."
+      console.error(`[Home] ${msg}`)
+      throw new Error(msg)
+    }
+    if (newType.value === 'qwen_image' && !showQwenImageOption.value) {
+      const msg = "Cannot create Qwen Image tab: '/api/engines/capabilities' does not expose 'qwen_image'."
       console.error(`[Home] ${msg}`)
       throw new Error(msg)
     }

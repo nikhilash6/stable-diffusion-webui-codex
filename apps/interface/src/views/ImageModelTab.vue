@@ -6,7 +6,7 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Image model tab view (txt2img/img2img/inpaint) UI for SD/Flux/ZImage-family engines.
+Purpose: Image model tab view (txt2img/img2img/inpaint) UI for SD/Flux/ZImage/Qwen Image-family engines.
 Owns prompt + parameter controls, init-image + mask handling for img2img/inpaint, per-tab history, and integrates with the generation composable to
 submit `/api/txt2img`/`/api/img2img` tasks and render progress/results (Z-Image Turbo/Base and FLUX.2 Klein distilled/base-4B are variant-dependent:
 CFG label + negative prompt gating follow the selected checkpoint/tab state, while img2img denoise + hires visibility stay truthful to the active capability/mask contract).
@@ -27,6 +27,8 @@ Generate CTA and run preflight are capability-driven (`/api/engines/capabilities
 current checkpoint/text-encoder/VAE contract is not runnable.
 Run status in the RUN card is centralized via `RunProgressStatus` variants (progress/error/info/success/warning), including dual progress bars (total pipeline + sampling steps), so errors are visible even when Prompt is off-screen.
 When XYZ workflow is enabled, RUN header shows an `XYZ` badge beside `Generate` via the run-card center-adjacent slot while keeping the primary CTA label stable as `Generate`.
+Qwen Image uses the same image workspace shell but hides unsupported generic controls, keeps batch/action state forced to one-shot Generate,
+snaps txt2img dimensions to the backend family resolution step, omits CLIP Skip/swap/refiner/hires/IP-Adapter/advanced-guidance controls, and treats edit output dimensions as backend-derived from the init image.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `ImageModelTab` (component): Main image model tab view; handles prompt/params/profile persistence, init-image UX, history reuse, and actions.
@@ -82,6 +84,7 @@ Symbols (top-level; keep in sync; no ghosts):
   active family-scoped VAE owner.
 - `usesImageAutomation` / `infiniteXyzConflict` / `automationBatchConflict` (const): Derived automation guards for the split-button and backend-owned automation route.
 - `showIpAdapterCard` / `initFolderMissingPath` / `dirInitMaskConflict` / `ipAdapterBlockingReason` (const): Card-visibility + preflight guards for Initial Image DIR mode and the dedicated IP-Adapter owner card.
+- `isQwenImageRequest` / `showRunBatchControls` (const): Qwen Image surface guards that hide unsupported generic controls and force one-shot request state.
 - `missingInpaintMask` (const): Derived guard flag used to disable generation when INPAINT is enabled without an applied mask.
 - `supportsImg2ImgMasking` (const): Truthful backend-capability-driven mask/inpaint support gate for img2img engines.
 - `hideNegativePrompt` (const): Hides the base Negative Prompt field when the active checkpoint/model does not support it or effective base CFG is `<= 1`.
@@ -191,10 +194,10 @@ Symbols (top-level; keep in sync; no ghosts):
               :cfg-scale="params.cfgScale"
               :cfg-label="cfgLabel"
               :denoise-strength="params.denoiseStrength"
-              :show-denoise="true"
+              :show-denoise="showImg2ImgDenoise"
               :seed="params.seed"
               :clip-skip="params.clipSkip"
-              :show-clip-skip="showClipSkip"
+              :show-clip-skip="showImg2ImgClipSkip"
               :min-clip-skip="minClipSkip"
               :max-clip-skip="12"
               :guidance-advanced="params.guidanceAdvanced"
@@ -206,7 +209,9 @@ Symbols (top-level; keep in sync; no ghosts):
               :upscaler="params.img2imgUpscaler"
               :resize-mode="params.img2imgResizeMode"
               :resize-mode-options="img2imgResizeModeOptions"
-              :show-resize-mode="!(resolvedEngineForMode === 'zimage' && params.useMask)"
+              :show-resize-mode="showImg2ImgResizeMode"
+              :show-dimensions="showImg2ImgDimensions"
+              :dimensions-hidden-hint="img2imgDimensionsHiddenHint"
               :dimension-snap-mode="resolvedEngineForMode === 'zimage' ? 'floor' : 'nearest'"
               :show-init-image-dims="Boolean(params.initImageData)"
               :width-step="imageDimensionSliderStep"
@@ -393,9 +398,9 @@ Symbols (top-level; keep in sync; no ghosts):
         :generateDisabled="runGenerateDisabled"
         :generateTitle="runGenerateTitle"
         :actionMode="params.runAction"
-        :showActionMenu="!xyzStore.enabled"
+        :showActionMenu="!xyzStore.enabled && !isQwenImageRequest"
         :isRunning="isRunBusy"
-        :showBatchControls="!usesImageAutomation"
+        :showBatchControls="showRunBatchControls"
         :batchCount="params.batchCount"
         :batchSize="params.batchSize"
         :disabled="isRunBusy"
@@ -812,10 +817,26 @@ watch(
 
 const engineConfig = computed(() => getEngineConfig(props.type))
 const resolvedEngineForMode = computed(() => resolveEngineForRequest(props.type, Boolean(params.value.useInitImage)))
-const imageDimensionInputStep = computed(() => resolvedEngineForMode.value === 'zimage' ? 16 : 8)
-const imageDimensionSliderStep = computed(() => resolvedEngineForMode.value === 'zimage' ? 16 : 64)
+const isQwenImageRequest = computed(() => resolvedEngineForMode.value === 'qwen_image')
 const img2imgResizeModeOptions = computed(() => img2imgResizeModeOptionsForEngine(resolvedEngineForMode.value))
 const engineSurface = computed(() => engineCaps.get(resolvedEngineForMode.value))
+const engineFamilySurface = computed(() => engineCaps.getFamilyForEngine(resolvedEngineForMode.value))
+const imageDimensionInputStep = computed(() => {
+  const resolutionStep = Number(engineFamilySurface.value?.resolution_step)
+  if (
+    resolvedEngineForMode.value === 'qwen_image'
+    && Number.isFinite(resolutionStep)
+    && Math.trunc(resolutionStep) > 0
+  ) {
+    return Math.trunc(resolutionStep)
+  }
+  return resolvedEngineForMode.value === 'zimage' || resolvedEngineForMode.value === 'qwen_image' ? 16 : 8
+})
+const imageDimensionSliderStep = computed(() =>
+  resolvedEngineForMode.value === 'qwen_image'
+    ? imageDimensionInputStep.value
+    : (resolvedEngineForMode.value === 'zimage' ? 16 : 64),
+)
 const availableInpaintModes = computed(() => engineCaps.getInpaintModes(resolvedEngineForMode.value))
 const availableInpaintModeOptions = computed(() =>
   availableInpaintModes.value.map((value) => ({
@@ -936,11 +957,14 @@ const isRunBusy = computed(() => isRunning.value || xyzRunning.value)
 const generateLabel = 'Generate'
 const supportsImg2ImgMasking = computed(() => Boolean(engineSurface.value?.supports_img2img_masking))
 const usesImageAutomation = computed(() => (
-  params.value.runAction === 'infinite'
+  !isQwenImageRequest.value
+  && (params.value.runAction === 'infinite'
   || (params.value.useInitImage && params.value.initSource.mode === 'dir')
-  || (params.value.ipAdapter.enabled && params.value.ipAdapter.source.mode === 'dir')
+  || (params.value.ipAdapter.enabled && params.value.ipAdapter.source.mode === 'dir'))
 ))
+const showRunBatchControls = computed(() => !usesImageAutomation.value && !isQwenImageRequest.value)
 const ipAdapterSupported = computed(() => {
+  if (isQwenImageRequest.value) return false
   if (engineSurface.value) return Boolean(engineSurface.value.supports_ip_adapter)
   return props.type === 'sd15' || props.type === 'sdxl'
 })
@@ -987,7 +1011,7 @@ function getSupirRestoreBlockingReason(candidate: Pick<ImageBaseParams, 'useInit
   return ''
 }
 
-const showIpAdapterCard = computed(() => !supirEnabled.value && (ipAdapterSupported.value || params.value.ipAdapter.enabled))
+const showIpAdapterCard = computed(() => !isQwenImageRequest.value && !supirEnabled.value && (ipAdapterSupported.value || params.value.ipAdapter.enabled))
 const infiniteXyzConflict = computed(() => params.value.runAction === 'infinite' && xyzStore.enabled)
 const automationBatchConflict = computed(() => (
   usesImageAutomation.value
@@ -1079,7 +1103,7 @@ const runGenerateTitle = computed(() => {
   return ''
 })
 
-const enableAssets = computed(() => true)
+const enableAssets = computed(() => !isQwenImageRequest.value)
 const enableStyles = computed(() => true)
 const toolbarLabel = computed(() => {
   if (props.type !== 'zimage') return ''
@@ -1087,7 +1111,7 @@ const toolbarLabel = computed(() => {
 })
 
 const cfgLabel = computed(() => (usesDistilledCfgModel.value ? 'Distilled CFG' : 'CFG'))
-const showClipSkip = computed(() => Boolean(familyCapabilities.value?.shows_clip_skip))
+const showClipSkip = computed(() => !isQwenImageRequest.value && Boolean(familyCapabilities.value?.shows_clip_skip))
 const minClipSkip = computed(() => 0)
 const swapModelChoices = computed(() => {
   const family = normalizeTabFamily(props.type)
@@ -1096,6 +1120,7 @@ const swapModelChoices = computed(() => {
 })
 
 const supportsHiresForEngine = computed(() => {
+  if (isQwenImageRequest.value) return false
   if (props.type === 'zimage') return false
   const surf = engineSurface.value
   if (!surf) return true
@@ -1108,9 +1133,10 @@ const hiresModePolicy = computed(() => resolveHiresModePolicy(
 ))
 const showHires = computed(() => !supirEnabled.value && hiresModePolicy.value.showCard)
 
-const showGlobalSwapModel = computed(() => !Boolean(params.value.useInitImage))
+const showGlobalSwapModel = computed(() => !isQwenImageRequest.value && !Boolean(params.value.useInitImage))
 
 const showHiresRefiner = computed(() => {
+  if (isQwenImageRequest.value) return false
   if (params.value.useInitImage) return false
   if (props.type === 'zimage') return false
   const surf = engineSurface.value
@@ -1119,12 +1145,23 @@ const showHiresRefiner = computed(() => {
 })
 
 const showGlobalRefiner = computed(() => {
+  if (isQwenImageRequest.value) return false
   if (params.value.useInitImage) return false
   if (props.type === 'zimage') return false
   const surf = engineSurface.value
   if (!surf) return true
   return surf.supports_refiner
 })
+const showImg2ImgDimensions = computed(() => !isQwenImageRequest.value)
+const img2imgDimensionsHiddenHint = computed(() => (
+  isQwenImageRequest.value ? 'Qwen Image Edit derives output size from the init image.' : ''
+))
+const showImg2ImgDenoise = computed(() => !isQwenImageRequest.value)
+const showImg2ImgClipSkip = computed(() => showClipSkip.value && !isQwenImageRequest.value)
+const showImg2ImgResizeMode = computed(() => (
+  !isQwenImageRequest.value
+  && !(resolvedEngineForMode.value === 'zimage' && params.value.useMask)
+))
 
 function normalizeRecommendedList(values: string[] | null | undefined): string[] | null {
   if (!Array.isArray(values)) return null
@@ -1446,6 +1483,95 @@ watch(showHiresRefiner, (show) => {
 })
 
 watch(
+  isQwenImageRequest,
+  (active) => {
+    if (!active) return
+    const nextPatch: Partial<ImageBaseParams> = {}
+    let needsPatch = false
+    if (params.value.runAction !== 'generate') {
+      nextPatch.runAction = 'generate'
+      needsPatch = true
+    }
+    if (params.value.batchCount !== 1 || params.value.batchSize !== 1) {
+      nextPatch.batchCount = 1
+      nextPatch.batchSize = 1
+      needsPatch = true
+    }
+    if (params.value.clipSkip !== 0) {
+      nextPatch.clipSkip = 0
+      needsPatch = true
+    }
+    if (params.value.useMask || params.value.maskImageData || params.value.maskImageName) {
+      nextPatch.useMask = false
+      nextPatch.maskImageData = ''
+      nextPatch.maskImageName = ''
+      needsPatch = true
+    }
+    if (params.value.initSource.mode !== 'img') {
+      nextPatch.initSource = {
+        ...params.value.initSource,
+        mode: 'img',
+        count: 1,
+      }
+      needsPatch = true
+    }
+    if (
+      params.value.hires.enabled
+      || Boolean(params.value.hires.swapModel?.model)
+      || Boolean(params.value.hires.refiner?.enabled)
+    ) {
+      nextPatch.hires = {
+        ...params.value.hires,
+        enabled: false,
+        swapModel: undefined,
+        refiner: params.value.hires.refiner
+          ? { ...params.value.hires.refiner, enabled: false }
+          : params.value.hires.refiner,
+      }
+      needsPatch = true
+    }
+    if (params.value.swapModel.enabled) {
+      nextPatch.swapModel = { ...params.value.swapModel, enabled: false }
+      needsPatch = true
+    }
+    if (params.value.refiner.enabled) {
+      nextPatch.refiner = { ...params.value.refiner, enabled: false }
+      needsPatch = true
+    }
+    if (params.value.supir.enabled) {
+      nextPatch.supir = { ...params.value.supir, enabled: false }
+      needsPatch = true
+    }
+    if (params.value.ipAdapter.enabled || params.value.ipAdapter.source.sameAsInit || params.value.ipAdapter.source.mode !== 'img') {
+      nextPatch.ipAdapter = {
+        ...params.value.ipAdapter,
+        enabled: false,
+        source: {
+          ...params.value.ipAdapter.source,
+          mode: 'img',
+          sameAsInit: false,
+          count: 1,
+        },
+      }
+      needsPatch = true
+    }
+    if (params.value.guidanceAdvanced.enabled) {
+      nextPatch.guidanceAdvanced = {
+        ...params.value.guidanceAdvanced,
+        enabled: false,
+        apgEnabled: false,
+        cfgTruncEnabled: false,
+      }
+      needsPatch = true
+    }
+    if (needsPatch) {
+      setParams(nextPatch)
+    }
+  },
+  { immediate: true },
+)
+
+watch(
   () => params.value.useInitImage,
   (enabled, wasEnabled) => {
     if (enabled && params.value.hires.swapModel?.model) {
@@ -1580,7 +1706,20 @@ const runSummary = computed(() => {
   const sampler = normalizedSampling?.sampler || defaults.sampler
   const scheduler = normalizedSampling?.scheduler || defaults.scheduler
   const seedLabel = params.value.seed === -1 ? 'seed random' : `seed ${params.value.seed}`
-  return `${params.value.width}×${params.value.height} px · ${params.value.steps} steps · ${cfgLabel.value} ${params.value.cfgScale} · ${sampler} / ${scheduler} · ${seedLabel} · batch ${params.value.batchCount}×${params.value.batchSize}`
+  const sizeLabel = isQwenImageRequest.value && params.value.useInitImage
+    ? 'init-derived size'
+    : `${params.value.width}×${params.value.height} px`
+  const parts = [
+    sizeLabel,
+    `${params.value.steps} steps`,
+    `${cfgLabel.value} ${params.value.cfgScale}`,
+    `${sampler} / ${scheduler}`,
+    seedLabel,
+  ]
+  if (!isQwenImageRequest.value) {
+    parts.push(`batch ${params.value.batchCount}×${params.value.batchSize}`)
+  }
+  return parts.join(' · ')
 })
 
 async function onGenerate(actionMode: ImageRunAction = params.value.runAction): Promise<void> {
@@ -1941,6 +2080,10 @@ function setParams(patch: Partial<ImageBaseParams>): void {
 }
 
 function setRunAction(actionMode: ImageRunAction): void {
+  if (isQwenImageRequest.value) {
+    setParams({ runAction: 'generate', batchCount: 1, batchSize: 1 })
+    return
+  }
   if (actionMode === 'infinite') {
     setParams({ runAction: actionMode, batchCount: 1, batchSize: 1 })
     return

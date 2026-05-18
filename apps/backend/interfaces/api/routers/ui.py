@@ -9,6 +9,7 @@ Required Notice: see NOTICE
 Purpose: UI persistence and metadata API routes.
     Handles tabs/workflows JSON persistence, UI blocks filtering, and checkpoint-only presets application, with fail-loud tab-type validation for `/api/ui/tabs`
     while filtering stale unsupported top-level tab params during stored-tab load and rejecting unknown top-level LTX keys on create/update.
+    Qwen Image is a live image tab type when exposed by backend capabilities; it is persisted under the single canonical `qwen_image` tab id.
     Live WAN tab/workflow types are exact (`wan22_14b` / `wan22_5b`); stored legacy generic `wan` / `wan22` entries migrate once to `wan22_14b`,
     new generic WAN writes are rejected, and workflow snapshot payloads/source-tab bindings stay normalized and unique. Image-tab persistence also owns the allowlist for nested automation-era params
     such as `runAction`, `initSource`, `supir`, and `ipAdapter`. Stored workflow snapshots now use the same fail-loud image param rules as live writes
@@ -147,7 +148,7 @@ def build_router(
 
     # ------------------------------------------------------------------
     # Tabs & Workflows Persistence (JSON files)
-    _ALLOWED_TAB_TYPES = {"sd15", "sdxl", "flux1", "flux2", "chroma", "zimage", "wan22_14b", "wan22_5b", "anima", "ltx2"}
+    _ALLOWED_TAB_TYPES = {"sd15", "sdxl", "flux1", "flux2", "chroma", "zimage", "qwen_image", "wan22_14b", "wan22_5b", "anima", "ltx2"}
     _IMAGE_TAB_TYPES = _ALLOWED_TAB_TYPES - {"wan22_14b", "wan22_5b", "ltx2"}
     _IMAGE_PARAM_TOP_LEVEL_KEYS = {
         "schemaVersion",
@@ -781,6 +782,7 @@ def build_router(
             or (
                 "FLUX.1" if ttype == "flux1"
                 else "FLUX.2" if ttype == "flux2"
+                else "Qwen Image" if ttype == "qwen_image"
                 else "WAN 2.2 14B" if ttype == "wan22_14b"
                 else "WAN 2.2 5B" if ttype == "wan22_5b"
                 else ttype.upper()

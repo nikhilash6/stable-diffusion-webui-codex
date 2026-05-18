@@ -90,7 +90,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `UiPresetsResponse` (interface): `/api/ui/presets` response shape.
 - `UiPresetApplyResponse` (interface): `/api/ui/presets/apply` response shape returning only the resolved checkpoint owner.
 - `ApiTabMeta` (interface): Per-tab metadata timestamps.
-- `ApiTab` (interface): Persisted model tab definition (`sd15|sdxl|flux1|flux2|zimage|chroma|wan22_14b|wan22_5b|ltx2|anima`).
+- `ApiTab` (interface): Persisted model tab definition (`sd15|sdxl|flux1|flux2|qwen_image|zimage|chroma|wan22_14b|wan22_5b|ltx2|anima`).
 - `TabsResponse` (interface): `/api/ui/tabs` response shape.
 - `WorkflowsResponse` (interface): `/api/ui/workflows` response shape.
 - `InventoryResponse` (interface): `/api/models/inventory` response shape.
@@ -521,6 +521,7 @@ export interface GuidanceAdvancedCapabilities {
 export interface FamilyCapabilities {
   supports_negative_prompt: boolean
   shows_clip_skip: boolean
+  resolution_step: number
   supported_samplers?: string[] | null
   supported_schedulers?: string[] | null
   excluded_samplers?: string[] | null
@@ -714,7 +715,7 @@ export interface UiPresetApplyResponse { applied: boolean; model: string; checkp
 
 // Tabs/workflows persistence
 export interface ApiTabMeta { createdAt: string; updatedAt: string }
-export interface ApiTab { id: string; type: 'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'zimage' | 'chroma' | 'wan22_14b' | 'wan22_5b' | 'anima' | 'ltx2'; title: string; order: number; enabled: boolean; params: Record<string, unknown>; meta: ApiTabMeta }
+export interface ApiTab { id: string; type: 'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'qwen_image' | 'zimage' | 'chroma' | 'wan22_14b' | 'wan22_5b' | 'anima' | 'ltx2'; title: string; order: number; enabled: boolean; params: Record<string, unknown>; meta: ApiTabMeta }
 export interface TabsResponse { version: number; tabs: ApiTab[] }
 export interface WorkflowItem { id: string; name: string; source_tab_id: string; type: ApiTab['type']; created_at: string; params_snapshot: Record<string, unknown> }
 export interface WorkflowsResponse { version: number; workflows: WorkflowItem[] }

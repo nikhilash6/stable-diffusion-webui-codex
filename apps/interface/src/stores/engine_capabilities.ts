@@ -11,7 +11,7 @@ Fetches `/api/engines/capabilities` and exposes cached capability + family + ass
 UI features, required asset selection, family-specific behavior, readiness indicators, family-scoped sampler/scheduler filtering, and the LTX-only
 execution-profile/default surface from a single contract surface. The dependency-check helpers also resolve mode-scoped readiness rows
 so SDXL `fooocus_inpaint` can stay code-supported while still blocking only that runtime mode when its dedicated assets are missing.
-Exact engine-id and sampling-default truth is parsed from backend capabilities; frontend catalog filters validate explicit/default selections but never synthesize executable sampler defaults.
+Exact engine-id, family resolution-step, and sampling-default truth are parsed from backend capabilities; frontend catalog filters validate explicit/default selections but never synthesize executable sampler defaults.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `parseCapabilityInpaintMode` (function): Validates one inpaint-mode token from backend capability payloads against the canonical UI enum.
@@ -28,7 +28,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `filterSchedulersForFamilyCapabilities` (function): Applies family `supported_schedulers`/`excluded_schedulers` constraints to executable scheduler rows.
 - `filterSchedulersForSampler` (function): Filters scheduler rows by sampler `allowed_schedulers` compatibility.
 - `normalizeSamplerSchedulerSelection` (function): Resolves a valid sampler/scheduler pair against executable catalogs + family + sampler compatibility constraints.
-- `parseFamilyCapabilities` (function): Parses strict `families` capability map from capabilities response.
+- `parseFamilyCapabilities` (function): Parses strict `families` capability map from capabilities response, including per-family resolution steps.
 - `useEngineCapabilitiesStore` (store): Pinia store exposing engine capabilities, load state, and lookup helpers (including `getLtxExecutionSurface(...)`).
 */
 
@@ -473,6 +473,7 @@ function parseFamilyCapabilities(payload: unknown): Record<string, FamilyCapabil
     const row = value as Record<string, unknown>
     const supportsNegative = row.supports_negative_prompt
     const showsClipSkip = row.shows_clip_skip
+    const resolutionStep = row.resolution_step
     const supportedSamplers = parseFamilySamplingList(row, family, 'supported_samplers')
     const supportedSchedulers = parseFamilySamplingList(row, family, 'supported_schedulers')
     const excludedSamplers = parseFamilySamplingList(row, family, 'excluded_samplers')
@@ -487,9 +488,15 @@ function parseFamilyCapabilities(payload: unknown): Record<string, FamilyCapabil
         `${CAPABILITIES_CONTRACT_ERROR_PREFIX} family capability '${family}' has non-boolean 'shows_clip_skip'.`,
       )
     }
+    if (!Number.isInteger(resolutionStep) || Number(resolutionStep) <= 0) {
+      throw new Error(
+        `${CAPABILITIES_CONTRACT_ERROR_PREFIX} family capability '${family}' has invalid 'resolution_step'.`,
+      )
+    }
     out[family] = {
       supports_negative_prompt: supportsNegative,
       shows_clip_skip: showsClipSkip,
+      resolution_step: Number(resolutionStep),
       supported_samplers: supportedSamplers,
       supported_schedulers: supportedSchedulers,
       excluded_samplers: excludedSamplers,

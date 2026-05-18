@@ -31,8 +31,9 @@ Validates `extras.vae_sha` against VAE inventory ownership (rejects non-VAE asse
 Image request selectors are explicit: the router validates `model_sha`, `checkpoint_core_only`, `model_format`, and `vae_source`
 against inventory metadata instead of probing checkpoint families or inferring core-only status from checkpoint names.
 Qwen Image requests keep `qwen_image_variant` internal-only: txt2img derives `2512`, img2img derives `edit_2511`, and stale public variant,
-foreign-family selectors, classic denoise/resize/mask/hires/IP-Adapter/LoRA/SUPIR surfaces fail before task creation.
-Qwen Image VAE SHA selection is scoped to `qwen_image_vae` roots and must expose `AutoencoderKLQwenImage` config metadata before task creation.
+foreign-family selectors, top-level txt2img clip-skip, classic denoise/resize/mask/hires/IP-Adapter/LoRA/SUPIR surfaces fail before task creation.
+Qwen Image VAE and text-encoder SHA selection is scoped to `qwen_image_vae` / `qwen_image_tenc` roots before task creation;
+the VAE must expose `AutoencoderKLQwenImage` config metadata.
 Resolves `extras.lora_sha` / `img2img_extras.lora_sha` into server-side `lora_path` overrides only for engines with `supports_lora=True`
 and when SHA ownership matches LoRA inventory (`inventory.loras`, `.safetensors`), rejecting unsupported-engine/non-LoRA resolution fail-loud.
 Enforces generation settings contracts: top-level `smart_*` payload keys are rejected and `settings_revision` must match persisted options revision.
@@ -2555,6 +2556,11 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         _reject_public_qwen_image_variant(payload, context="txt2img")
         if not _is_qwen_image_engine(payload.get("engine")):
             return
+        if "clip_skip" in payload and payload.get("clip_skip") is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"'clip_skip' is unsupported for engine '{_QWEN_IMAGE_ENGINE_ID}'.",
+            )
         _require_qwen_image_txt2img_dimensions(
             _require_int_field(payload, "width", minimum=8),
             _require_int_field(payload, "height", minimum=8),
@@ -3298,6 +3304,49 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
 
+    def _path_is_under_configured_roots(path: str, roots: Sequence[object]) -> bool:
+        resolved_path = Path(path).expanduser().resolve()
+        for raw_root in roots:
+            if not isinstance(raw_root, str) or not raw_root.strip():
+                continue
+            root = Path(raw_root.strip()).expanduser().resolve()
+            if root.is_file():
+                if resolved_path == root:
+                    return True
+                continue
+            try:
+                resolved_path.relative_to(root)
+                return True
+            except ValueError:
+                continue
+        return False
+
+    def _resolve_qwen_image_text_encoder_sha_to_path(
+        *,
+        tenc_sha: str,
+        tenc_field: str,
+        resolve_asset_by_sha,  # type: ignore[no-untyped-def]
+    ) -> str:
+        from apps.backend.infra.config.paths import get_paths_for as _get_paths_for
+
+        tenc_path = resolve_asset_by_sha(tenc_sha)
+        if not tenc_path:
+            raise HTTPException(status_code=409, detail=f"Asset not found for sha: {tenc_sha}")
+        qwen_image_tenc_roots = tuple(_get_paths_for("qwen_image_tenc"))
+        if not qwen_image_tenc_roots:
+            raise HTTPException(status_code=409, detail="No qwen_image_tenc roots are configured.")
+        path_text = str(tenc_path)
+        if not _path_is_under_configured_roots(path_text, qwen_image_tenc_roots):
+            roots_text = ", ".join(str(root) for root in qwen_image_tenc_roots if isinstance(root, str) and root.strip())
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"'{tenc_field}' for engine '{_QWEN_IMAGE_ENGINE_ID}' must resolve under qwen_image_tenc roots; "
+                    f"got {path_text}. Roots: {roots_text or '<none>'}."
+                ),
+            )
+        return path_text
+
     def _preflight_qwen_image_asset_selector_payload(raw_extras: Mapping[str, Any], *, field_prefix: str) -> None:
         from apps.backend.inventory.cache import resolve_asset_by_sha, resolve_vae_path_by_sha
 
@@ -3327,6 +3376,11 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                 status_code=400,
                 detail=f"Engine '{_QWEN_IMAGE_ENGINE_ID}' requires exactly 1 text encoder via '{tenc_field}'.",
             )
+        _resolve_qwen_image_text_encoder_sha_to_path(
+            tenc_sha=tenc_shas[0],
+            tenc_field=tenc_field,
+            resolve_asset_by_sha=resolve_asset_by_sha,
+        )
 
     def _require_qwen_image_txt2img_dimensions(width: object, height: object) -> tuple[int, int]:
         try:
@@ -3519,9 +3573,16 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         if tenc_shas:
             tenc_paths: list[str] = []
             for sha in tenc_shas:
-                path = resolve_asset_by_sha(sha)
-                if not path:
-                    raise HTTPException(status_code=409, detail=f"Asset not found for sha: {sha}")
+                if engine_id == _QWEN_IMAGE_ENGINE_ID:
+                    path = _resolve_qwen_image_text_encoder_sha_to_path(
+                        tenc_sha=sha,
+                        tenc_field=tenc_field,
+                        resolve_asset_by_sha=resolve_asset_by_sha,
+                    )
+                else:
+                    path = resolve_asset_by_sha(sha)
+                    if not path:
+                        raise HTTPException(status_code=409, detail=f"Asset not found for sha: {sha}")
                 tenc_paths.append(path)
 
             slot_to_path: dict[str, str] | None = None

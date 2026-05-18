@@ -6,7 +6,7 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Shared QuickSettings top bar for Model Tabs (SD/Flux/Chroma/ZImage/LTX/WAN).
+Purpose: Shared QuickSettings top bar for Model Tabs (SD/Flux/Qwen Image/Chroma/ZImage/LTX/WAN).
 Loads `/api/options`, `/api/models`, `/api/models/inventory`, and `/api/paths`, then filters/presents per-family selectors (models/TE/VAE)
 through the shared non-WAN `QuickSettingsAssetBlock.vue` owner plus the specialized exact WAN branches, and commits overrides (device + runtime flags + tab-scoped Z-Image variant) used by generation payload builders. Asset-contract-derived selector
 hints now disappear when checkpoint inventory metadata lacks a valid `core_only` flag, preventing stale UI contract display. FLUX.2 stays
@@ -41,7 +41,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `normalizeTextEncoderLabels` (function): Normalizes raw TE values into a stable label list (used for Flux/WAN multi-TE cases).
 - `WanAssetsParams` (type): Minimal WAN assets triple used for payload building (metadata dir + TE + VAE).
 - `currentWanAssetsFor` (function): Builds `WanAssetsParams` from the active exact WAN tab selections (used by WAN payload generation).
-- `flux2TextEncoderFieldLabel` (computed): Resolves the truthful FLUX.2 Klein Qwen3-4B selector label from backend asset contracts.
+- `flux2TextEncoderFieldLabel` / `qwenImageTextEncoderFieldLabel` (computed): Resolves truthful Qwen-backed text-encoder selector labels from backend asset contracts.
 - `toastModelAssetOwnerRequired` (function): Explains that model-asset selectors are read-only outside `/models/:tabId`.
 - `onPrimaryTextEncoderChange` (function): Applies primary text-encoder selection changes (and triggers dependent updates).
 - `onSecondaryTextEncoderChange` (function): Applies secondary text-encoder selection changes (FLUX.1 dual-encoder workflow only).
@@ -396,6 +396,70 @@ Symbols (top-level; keep in sync; no ghosts):
         </fieldset>
       </template>
 
+      <!-- Qwen Image-specific quicksettings -->
+      <template v-else-if="activeFamily === 'qwen_image'">
+        <div v-if="modelAssetSelectorsReadOnly" class="quicksettings-group qs-group-owner-note">
+          <label class="label-muted">Model Tab Owner</label>
+          <div class="qs-row qs-row-wrap">
+            <span class="caption">Checkpoint, VAE, and Text Encoder are read-only here.</span>
+            <RouterLink class="btn qs-btn-outline qs-inline-btn" :to="modelAssetOwnerRoute">Open model tab</RouterLink>
+          </div>
+        </div>
+        <fieldset class="qs-readonly-fieldset" :disabled="modelAssetSelectorsReadOnly">
+          <QuickSettingsAssetBlock
+            :checkpoint="effectiveCheckpoint"
+            :checkpoints="filteredModelTitles"
+            checkpoint-label="Model"
+            checkpoint-choice-mode="truncate"
+            :vae="qwenImageVae"
+            :vae-choices="filteredVaeChoices"
+            vae-choice-mode="truncate"
+            vae-placeholder-label="Select Qwen Image VAE"
+            :text-encoder="primaryTextEncoder"
+            :text-encoder-choices="filteredTextEncoderChoices"
+            :text-encoder-group-label="qwenImageTextEncoderFieldLabel"
+            text-encoder-automatic-label="Select Text Encoder"
+            show-text-encoder-actions
+            @update:checkpoint="onModelChange"
+            @update:vae="onVaeChange"
+            @update:textEncoder="onPrimaryTextEncoderChange"
+            @addCheckpointPath="onAddCheckpointPath"
+            @addVaePath="onAddVaePath"
+            @addTencPath="onAddTencPath"
+            @showMetadata="onShowMetadata"
+          />
+          <div v-if="canShowModeToggles" class="quicksettings-group qs-group-mode-toggle">
+            <label class="label-muted">Mode</label>
+            <div class="qs-row">
+              <button
+                :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', useInitImage ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
+                type="button"
+                :aria-pressed="useInitImage"
+                @click="onUseInitImageChange(!useInitImage)"
+              >
+                IMG2IMG
+              </button>
+              <button
+                :class="['btn', 'qs-toggle-btn', 'qs-toggle-btn--sm', useMask ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
+                type="button"
+                :aria-pressed="useMask"
+                :disabled="inpaintToggleDisabled"
+                :title="inpaintToggleTitle"
+                @click="onUseMaskChange(!useMask)"
+              >
+                INPAINT
+              </button>
+            </div>
+          </div>
+          <div class="quicksettings-group qs-group-models">
+            <label class="label-muted">Models</label>
+            <div class="qs-row">
+              <button class="btn qs-btn-secondary qs-refresh-btn" type="button" @click="refreshAll" title="Refresh lists">Refresh</button>
+            </div>
+          </div>
+        </fieldset>
+      </template>
+
       <!-- Chroma-specific quicksettings -->
       <template v-else-if="activeFamily === 'chroma'">
         <div v-if="modelAssetSelectorsReadOnly" class="quicksettings-group qs-group-owner-note">
@@ -718,7 +782,7 @@ const engineCaps = useEngineCapabilitiesStore()
 type WanInventoryVariant = 'wan22_5b' | 'wan22_14b' | 'wan22_14b_animate'
 type InventoryWanGguf = { name: string; path: string; sha256?: string; stage: string; variant?: WanInventoryVariant; repoHint?: string }
 type InventoryTextEncoder = { name: string; path: string; sha256?: string }
-type ImageTab = TabByType<'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'zimage' | 'chroma' | 'anima'>
+type ImageTab = TabByType<'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'qwen_image' | 'zimage' | 'chroma' | 'anima'>
 type LtxTab = TabByType<'ltx2'>
 type Wan14bTab = TabByType<'wan22_14b'>
 type Wan5bTab = TabByType<'wan22_5b'>
@@ -1063,7 +1127,7 @@ function stripFamilyPrefix(label: string): string {
   const prefix = norm.slice(0, idx)
   const rest = norm.slice(idx + 1)
   if (!rest) return norm
-  if (['sd15', 'sdxl', 'flux1', 'flux2', 'chroma', 'wan22', 'zimage'].includes(prefix)) return rest
+  if (['sd15', 'sdxl', 'flux1', 'flux2', 'chroma', 'qwen_image', 'wan22', 'zimage'].includes(prefix)) return rest
   return norm
 }
 
@@ -1360,6 +1424,11 @@ const filteredTextEncoderChoices = computed(() => {
       .filter((item) => typeof item.path === 'string' && fileInPaths(item.path, 'zimage_tenc'))
       .map((item) => `zimage/${item.path}`)
   }
+  if (fam === 'qwen_image') {
+    return inventoryTextEncoders.value
+      .filter((item) => typeof item.path === 'string' && fileInPaths(item.path, 'qwen_image_tenc'))
+      .map((item) => `qwen_image/${item.path}`)
+  }
   const prefix = isWanTabFamily(fam) ? 'wan22/' : `${fam}/`
   return store.textEncoderChoices.filter((name: string) => typeof name === 'string' && typeof prefix === 'string' && name.startsWith(prefix))
 })
@@ -1541,6 +1610,10 @@ const flux1TextEncoders = computed(() => effectiveTextEncoders.value.filter((lab
 const flux1TextEncoderPrimary = computed(() => flux1TextEncoders.value[0] ?? '')
 const flux1TextEncoderSecondary = computed(() => flux1TextEncoders.value[1] ?? '')
 const flux2TextEncoder = computed(() => effectiveTextEncoders.value.find((label: string) => label.startsWith('flux2/')) ?? '')
+const qwenImageVae = computed(() => {
+  const current = String(store.currentVae || '').trim()
+  return filteredVaeChoices.value.includes(current) ? current : ''
+})
 
 const effectiveCheckpoint = computed(() => {
   if (isModelTabRoute.value) {
@@ -1593,6 +1666,28 @@ const activeImageAssetContract = computed(() => {
 const flux2TextEncoderFieldLabel = computed(() => {
   const fallback = 'Text Encoder (Qwen3-4B)'
   if (activeFamily.value !== 'flux2') return fallback
+
+  const contract = activeImageAssetContract.value
+  const slotLabel = Array.isArray(contract?.tenc_slot_labels)
+    ? contract.tenc_slot_labels
+        .map((value) => String(value || '').trim())
+        .find((value) => value.length > 0)
+    : ''
+  if (slotLabel) {
+    return /text encoder/i.test(slotLabel) ? slotLabel : `Text Encoder (${slotLabel})`
+  }
+
+  const kindLabel = String(contract?.tenc_kind_label || '').trim()
+  if (kindLabel) {
+    return /text encoder/i.test(kindLabel) ? kindLabel : `Text Encoder (${kindLabel})`
+  }
+
+  return fallback
+})
+
+const qwenImageTextEncoderFieldLabel = computed(() => {
+  const fallback = 'Text Encoder (Qwen2.5-VL-7B)'
+  if (activeFamily.value !== 'qwen_image') return fallback
 
   const contract = activeImageAssetContract.value
   const slotLabel = Array.isArray(contract?.tenc_slot_labels)

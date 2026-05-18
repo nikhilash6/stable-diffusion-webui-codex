@@ -6,7 +6,7 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Unified generation composable for image tabs (SD/Flux/Chroma/ZImage; txt2img/img2img/inpaint + automation).
+Purpose: Unified generation composable for image tabs (SD/Flux/Qwen Image/Chroma/ZImage; txt2img/img2img/inpaint + automation).
 Owns per-tab generation state (progress/live preview/gallery/history), builds request payloads using Model Tabs + QuickSettings,
 starts `/api/txt2img`, `/api/img2img`, and `/api/image-automation` (when run action or source contracts require backend-owned looping),
 includes `settings_revision` in payloads, handles stale-revision conflicts (`409` + `current_revision`), and consumes task SSE events to update UI state.
@@ -20,6 +20,7 @@ FLUX.2 img2img guidance emission is variant-aware (`img2img_cfg_scale` xor `img2
 the nested `img2img_extras.hires` owner while remaining blocked for masked runs. Native SDXL SUPIR mode stays on the single nested frontend owner
 `params.supir` and is emitted only through `img2img_extras.supir` for truthful SDXL img2img/inpaint runs, with diagnostics-backed sampler metadata
 owning the effective runtime sampler/scheduler pair and fail-loud rejection of stale APG/advanced-guidance overlap.
+Qwen Image uses dedicated txt2img/img2img request-state guards and an edit payload allowlist so hidden unsupported state fails loud before `/api/*` submission.
 Non-SUPIR image runs resolve the executable sampler/scheduler pair from strictly validated current params or backend capability defaults before any task start.
 Masked img2img runtime selection now flows through strict `inpaintMode` / `img2img_inpaint_mode`, with exact-engine mode discoverability coming from
 `/api/engines/capabilities.exact_engine_inpaint_modes` and invalid stale values failing loud before submit. Image run-history snapshots now also carry the
@@ -92,6 +93,31 @@ import { type ResumeLoadResult, useTaskRunLifecycle } from './useTaskRunLifecycl
 import { resolveSupirSelectionState } from './useSupirDiagnostics'
 
 export type ImageRunStatus = 'running' | 'completed' | 'error' | 'cancelled'
+const QWEN_IMAGE_ENGINE_ID = 'qwen_image'
+const QWEN_IMAGE_ASSET_EXTRA_KEYS = new Set([
+  'checkpoint_core_only',
+  'model_format',
+  'model_sha',
+  'tenc_sha',
+  'vae_sha',
+  'vae_source',
+])
+const QWEN_IMAGE_IMG2IMG_ALLOWED_KEYS = new Set([
+  'device',
+  'engine',
+  'img2img_cfg_scale',
+  'img2img_extras',
+  'img2img_init_image',
+  'img2img_neg_prompt',
+  'img2img_prompt',
+  'img2img_sampling',
+  'img2img_scheduler',
+  'img2img_seed',
+  'img2img_steps',
+  'img2img_styles',
+  'model',
+  'settings_revision',
+])
 
 export interface ImageRunHistoryItem {
   taskId: string
@@ -458,7 +484,132 @@ function buildImg2ImgGuidanceFields(
   return { img2img_cfg_scale: guidanceScale }
 }
 
+function isQwenImageEngine(engineId: string): boolean {
+  return String(engineId || '').trim().toLowerCase() === QWEN_IMAGE_ENGINE_ID
+}
+
+function assertAllowedRecordKeys(record: Record<string, unknown>, allowed: ReadonlySet<string>, context: string): void {
+  for (const key of Object.keys(record)) {
+    if (!allowed.has(key)) {
+      throw new Error(`${context}.${key} is unsupported for Qwen Image.`)
+    }
+  }
+}
+
+function buildQwenImageAssetExtras(rawExtras: Record<string, unknown>, context: string): Record<string, unknown> {
+  const extras: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(rawExtras)) {
+    if (value === undefined) continue
+    if (!QWEN_IMAGE_ASSET_EXTRA_KEYS.has(key)) {
+      throw new Error(`${context}.${key} is unsupported for Qwen Image.`)
+    }
+    extras[key] = value
+  }
+  const missing: string[] = []
+  for (const key of QWEN_IMAGE_ASSET_EXTRA_KEYS) {
+    if (extras[key] === undefined || extras[key] === null || extras[key] === '') {
+      missing.push(key)
+    }
+  }
+  if (missing.length > 0) {
+    throw new Error(`Qwen Image requires ${missing.map((key) => `${context}.${key}`).join(', ')}.`)
+  }
+  if (extras.vae_source !== 'external') {
+    throw new Error('Qwen Image requires an external VAE selection.')
+  }
+  return extras
+}
+
+function assertQwenImageRequestState(args: {
+  params: ImageBaseParams
+  useInitImage: boolean
+  batchCount: number
+  batchSize: number
+  loraNames: readonly string[]
+}): void {
+  const params = args.params
+  if (params.runAction === 'infinite') {
+    throw new Error('Qwen Image does not support Infinite generate. Use Generate.')
+  }
+  if (args.batchCount !== 1 || args.batchSize !== 1) {
+    throw new Error('Qwen Image requests require batch count = 1 and batch size = 1.')
+  }
+  const clipSkip = Number(params.clipSkip)
+  if (Number.isFinite(clipSkip) && Math.trunc(clipSkip) > 0) {
+    throw new Error('Qwen Image does not support CLIP Skip. Reset CLIP Skip to 0.')
+  }
+  if (normalizeBooleanParam(params.hires?.enabled, false)) {
+    throw new Error('Qwen Image does not support Hires Fix. Disable Hires before generating.')
+  }
+  if (normalizeBooleanParam(params.swapModel?.enabled, false)) {
+    throw new Error('Qwen Image does not support first-pass model swap. Disable model swap before generating.')
+  }
+  if (normalizeBooleanParam(params.refiner?.enabled, false)) {
+    throw new Error('Qwen Image does not support refiner. Disable refiner before generating.')
+  }
+  if (normalizeBooleanParam(params.ipAdapter?.enabled, false)) {
+    throw new Error('Qwen Image does not support IP-Adapter. Disable IP-Adapter before generating.')
+  }
+  if (normalizeBooleanParam(params.guidanceAdvanced?.enabled, false)) {
+    throw new Error('Qwen Image does not support Advanced Guidance/APG. Disable Advanced Guidance before generating.')
+  }
+  if (args.loraNames.length > 0) {
+    throw new Error('Qwen Image does not support LoRA prompt tags.')
+  }
+  if (args.useInitImage && normalizeBooleanParam(params.useMask, false)) {
+    throw new Error('Qwen Image Edit does not support masks or inpaint. Disable INPAINT before generating.')
+  }
+  if (args.useInitImage && params.initSource.mode !== 'img') {
+    throw new Error('Qwen Image Edit requires a single init image. Switch the initial image source to IMG.')
+  }
+}
+
+function buildQwenImageImg2ImgPayload(args: BuildImg2ImgPayloadArgs): Record<string, unknown> {
+  const params = args.params
+  assertQwenImageRequestState({
+    params,
+    useInitImage: true,
+    batchCount: args.batchCount,
+    batchSize: args.batchSize,
+    loraNames: [],
+  })
+  if (args.batchCount !== 1 || args.batchSize !== 1) {
+    throw new Error('Qwen Image Edit requires batch count = 1 and batch size = 1.')
+  }
+  if (normalizeBooleanParam(params.useMask, false)) {
+    throw new Error('Qwen Image Edit does not support masks or inpaint. Disable INPAINT before generating.')
+  }
+  if (!String(params.initImageData || '').trim()) {
+    throw new Error('Qwen Image Edit requires an init image.')
+  }
+  const effectiveSampler = String(args.samplerOverride || params.sampler || '').trim()
+  const effectiveScheduler = String(args.schedulerOverride || params.scheduler || '').trim()
+  const payload: Record<string, unknown> = {
+    img2img_init_image: params.initImageData,
+    img2img_prompt: params.prompt,
+    img2img_neg_prompt: args.supportsNegativePrompt ? params.negativePrompt : '',
+    img2img_styles: [],
+    img2img_steps: params.steps,
+    img2img_cfg_scale: params.cfgScale,
+    img2img_sampling: effectiveSampler,
+    img2img_scheduler: effectiveScheduler,
+    img2img_seed: params.seed,
+    device: args.device,
+    settings_revision: args.settingsRevision,
+    engine: QWEN_IMAGE_ENGINE_ID,
+    model: args.modelOverride,
+    img2img_extras: buildQwenImageAssetExtras(args.extras, 'img2img_extras'),
+  }
+  assertAllowedRecordKeys(payload, QWEN_IMAGE_IMG2IMG_ALLOWED_KEYS, 'Qwen Image img2img payload')
+  assertAllowedRecordKeys(payload.img2img_extras as Record<string, unknown>, QWEN_IMAGE_ASSET_EXTRA_KEYS, 'img2img_extras')
+  return payload
+}
+
 export function buildImg2ImgPayload(args: BuildImg2ImgPayloadArgs): Record<string, unknown> {
+  if (isQwenImageEngine(args.engineId)) {
+    return buildQwenImageImg2ImgPayload(args)
+  }
+
   const params = args.params
   const effectiveSampler = String(args.samplerOverride || params.sampler || '').trim()
   const effectiveScheduler = String(args.schedulerOverride || params.scheduler || '').trim()
@@ -1207,6 +1358,21 @@ export function useGeneration(tabId: string) {
       ...extractLoraNamesFromPrompt(p.prompt),
       ...(supportsNegative ? extractLoraNamesFromPrompt(p.negativePrompt) : []),
     ]
+    if (isQwenImageEngine(engineOverrideForRequest)) {
+      try {
+        assertQwenImageRequestState({
+          params: p,
+          useInitImage,
+          batchCount: requestBatchCount,
+          batchSize: requestBatchSize,
+          loraNames,
+        })
+      } catch (error) {
+        state.value.status = 'error'
+        state.value.errorMessage = error instanceof Error ? error.message : String(error)
+        return
+      }
+    }
     const resolveEffectiveSampling = async (): Promise<SamplingDefaults> => {
       const backendDefaults = backendCaps.resolveSamplingDefaults(engineOverrideForRequest)
       const [samplerResponse, schedulerResponse] = await Promise.all([fetchSamplers(), fetchSchedulers()])
