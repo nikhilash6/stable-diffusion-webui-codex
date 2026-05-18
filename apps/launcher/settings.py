@@ -7,8 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Typed launcher settings and validation helpers.
-Provides typed env-backed wrappers (no Tk dependency) so UI/service code avoids stringly-typed lookups and scattered
-normalization rules, and so this module is unit-testable.
+Provides typed env-backed wrappers (no Tk dependency) over choices owned by `setting_registry.py` so UI/service code avoids stringly-typed lookups and scattered normalization rules.
 Includes strict normalization for attention bootstrap keys (`CODEX_ATTENTION_BACKEND`, `CODEX_ATTENTION_SDPA_POLICY`) and
 task cancel default mode (`CODEX_TASK_CANCEL_DEFAULT_MODE`) alongside task buffer/safety knobs.
 GGUF/LoRA normalization resolves missing LoRA apply mode to `online` while preserving explicit `merge` values.
@@ -42,31 +41,25 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Iterable, Mapping, MutableMapping, Optional, Sequence
 
+from apps.launcher.setting_registry import (
+    ATTENTION_BACKEND_CHOICES,
+    ATTENTION_SDPA_POLICY_CHOICES,
+    CFG_BATCH_MODE_CHOICES,
+    DEVICE_CHOICES,
+    GGUF_DEQUANT_CACHE_CHOICES,
+    LAUNCHER_ATTENTION_MODE_CHOICES,
+    LORA_APPLY_CHOICES,
+    LORA_ONLINE_MATH_CHOICES,
+    TASK_CANCEL_DEFAULT_MODE_CHOICES,
+    TASK_EVENT_BUFFER_MAX_EVENTS_DEFAULT,
+    TASK_EVENT_BUFFER_MAX_MB_DEFAULT,
+    WAN22_IMG2VID_CHUNK_BUFFER_MODE_CHOICES,
+    setting_descriptor_for_key,
+)
+
 
 class SettingValidationError(ValueError):
     pass
-
-
-DEVICE_CHOICES: tuple[str, ...] = ("auto", "cuda", "cpu", "mps", "xpu", "directml")
-CFG_BATCH_MODE_CHOICES: tuple[str, ...] = ("fused", "split")
-TASK_EVENT_BUFFER_MAX_EVENTS_DEFAULT = 5000
-TASK_EVENT_BUFFER_MAX_MB_DEFAULT = 64
-TASK_CANCEL_DEFAULT_MODE_CHOICES: tuple[str, ...] = ("immediate", "after_current")
-ATTENTION_BACKEND_CHOICES: tuple[str, ...] = ("pytorch", "xformers", "split", "quad")
-ATTENTION_SDPA_POLICY_CHOICES: tuple[str, ...] = ("auto", "flash", "mem_efficient", "math")
-LAUNCHER_ATTENTION_MODE_CHOICES: tuple[str, ...] = (
-    "sdpa_auto",
-    "sdpa_flash",
-    "sdpa_mem_efficient",
-    "sdpa_math",
-    "xformers",
-    "split",
-    "quad",
-)
-GGUF_DEQUANT_CACHE_CHOICES: tuple[str, ...] = ("off",)
-WAN22_IMG2VID_CHUNK_BUFFER_MODE_CHOICES: tuple[str, ...] = ("hybrid", "ram", "ram+hd")
-LORA_APPLY_CHOICES: tuple[str, ...] = ("merge", "online")
-LORA_ONLINE_MATH_CHOICES: tuple[str, ...] = ("weight_merge",)
 
 
 def _normalize_lower(value: str) -> str:
@@ -157,10 +150,21 @@ class IntSetting:
         env[self.key] = str(value)
 
 
+def _setting_default(key: str) -> str:
+    descriptor = setting_descriptor_for_key(key)
+    if descriptor is None:
+        raise RuntimeError(f"Launcher setting descriptor missing for {key}")
+    return descriptor.default_value()
+
+
+def _setting_bool_default(key: str) -> bool:
+    return BoolSetting(key, default=False).parse(_setting_default(key))
+
+
 def attention_mode_to_backend_policy(mode: str) -> tuple[str, str]:
     normalized_mode = ChoiceSetting(
         "CODEX_ATTENTION_MODE",
-        default="sdpa_auto",
+        default=_setting_default("CODEX_ATTENTION_MODE"),
         choices=LAUNCHER_ATTENTION_MODE_CHOICES,
     ).parse(mode)
     if normalized_mode == "sdpa_auto":
@@ -179,12 +183,12 @@ def attention_mode_to_backend_policy(mode: str) -> tuple[str, str]:
 def backend_policy_to_attention_mode(backend: str, sdpa_policy: str) -> str:
     normalized_backend = ChoiceSetting(
         "CODEX_ATTENTION_BACKEND",
-        default="pytorch",
+        default=_setting_default("CODEX_ATTENTION_BACKEND"),
         choices=ATTENTION_BACKEND_CHOICES,
     ).parse(backend)
     normalized_policy = ChoiceSetting(
         "CODEX_ATTENTION_SDPA_POLICY",
-        default="auto",
+        default=_setting_default("CODEX_ATTENTION_SDPA_POLICY"),
         choices=ATTENTION_SDPA_POLICY_CHOICES,
     ).parse(sdpa_policy)
     if normalized_backend == "pytorch":
@@ -201,16 +205,16 @@ def backend_policy_to_attention_mode(backend: str, sdpa_policy: str) -> str:
 def normalize_attention_env(env: MutableMapping[str, str]) -> tuple[str, str]:
     backend = ChoiceSetting(
         "CODEX_ATTENTION_BACKEND",
-        default="pytorch",
+        default=_setting_default("CODEX_ATTENTION_BACKEND"),
         choices=ATTENTION_BACKEND_CHOICES,
     ).get(env)
     sdpa_policy = ChoiceSetting(
         "CODEX_ATTENTION_SDPA_POLICY",
-        default="auto",
+        default=_setting_default("CODEX_ATTENTION_SDPA_POLICY"),
         choices=ATTENTION_SDPA_POLICY_CHOICES,
     ).get(env)
     if backend != "pytorch":
-        sdpa_policy = "auto"
+        sdpa_policy = _setting_default("CODEX_ATTENTION_SDPA_POLICY")
     env["CODEX_ATTENTION_BACKEND"] = backend
     env["CODEX_ATTENTION_SDPA_POLICY"] = sdpa_policy
     return backend, sdpa_policy
@@ -230,20 +234,28 @@ def normalize_gguf_lora_env(env: MutableMapping[str, str]) -> tuple[str, str, st
     env.pop("CODEX_GGUF_EXEC", None)
     gguf_dequant_cache = ChoiceSetting(
         "CODEX_GGUF_DEQUANT_CACHE",
-        default="off",
+        default=_setting_default("CODEX_GGUF_DEQUANT_CACHE"),
         choices=GGUF_DEQUANT_CACHE_CHOICES,
     ).get(env)
-    lora_apply = ChoiceSetting("CODEX_LORA_APPLY_MODE", default="online", choices=LORA_APPLY_CHOICES).get(env)
-    lora_math = ChoiceSetting("CODEX_LORA_ONLINE_MATH", default="weight_merge", choices=LORA_ONLINE_MATH_CHOICES).get(env)
+    lora_apply = ChoiceSetting(
+        "CODEX_LORA_APPLY_MODE",
+        default=_setting_default("CODEX_LORA_APPLY_MODE"),
+        choices=LORA_APPLY_CHOICES,
+    ).get(env)
+    lora_math = ChoiceSetting(
+        "CODEX_LORA_ONLINE_MATH",
+        default=_setting_default("CODEX_LORA_ONLINE_MATH"),
+        choices=LORA_ONLINE_MATH_CHOICES,
+    ).get(env)
     chunk_buffer_mode = ChoiceSetting(
         "CODEX_WAN22_IMG2VID_CHUNK_BUFFER_MODE",
-        default="hybrid",
+        default=_setting_default("CODEX_WAN22_IMG2VID_CHUNK_BUFFER_MODE"),
         choices=WAN22_IMG2VID_CHUNK_BUFFER_MODE_CHOICES,
     ).get(env)
 
     # math only valid on online mode
     if lora_apply != "online":
-        lora_math = "weight_merge"
+        lora_math = _setting_default("CODEX_LORA_ONLINE_MATH")
 
     env["CODEX_GGUF_DEQUANT_CACHE"] = gguf_dequant_cache
     env["CODEX_LORA_APPLY_MODE"] = lora_apply
@@ -259,8 +271,8 @@ def normalize_task_runtime_env(env: MutableMapping[str, str]) -> tuple[bool, boo
     Returns (single_flight, safe_weights, buffer_max_events, buffer_max_mb, cancel_default_mode).
     """
 
-    single_flight_setting = BoolSetting("CODEX_SINGLE_FLIGHT", default=True)
-    safeweights_setting = BoolSetting("CODEX_SAFE_WEIGHTS", default=False)
+    single_flight_setting = BoolSetting("CODEX_SINGLE_FLIGHT", default=_setting_bool_default("CODEX_SINGLE_FLIGHT"))
+    safeweights_setting = BoolSetting("CODEX_SAFE_WEIGHTS", default=_setting_bool_default("CODEX_SAFE_WEIGHTS"))
     max_events_setting = IntSetting(
         "CODEX_TASK_EVENT_BUFFER_MAX_EVENTS",
         default=TASK_EVENT_BUFFER_MAX_EVENTS_DEFAULT,
@@ -273,7 +285,7 @@ def normalize_task_runtime_env(env: MutableMapping[str, str]) -> tuple[bool, boo
     )
     cancel_default_mode_setting = ChoiceSetting(
         "CODEX_TASK_CANCEL_DEFAULT_MODE",
-        default="immediate",
+        default=_setting_default("CODEX_TASK_CANCEL_DEFAULT_MODE"),
         choices=TASK_CANCEL_DEFAULT_MODE_CHOICES,
     )
 

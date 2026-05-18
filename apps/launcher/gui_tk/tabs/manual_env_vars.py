@@ -20,7 +20,7 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Callable
 
-from apps.launcher.profiles import DEFAULT_MANUAL_API_ENV_TEXT
+from apps.launcher.profile_meta import DEFAULT_MANUAL_API_ENV_TEXT
 
 from ..controller import LauncherController
 from ..styles import Palette, resolve_fonts

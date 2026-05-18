@@ -26,8 +26,9 @@ from pathlib import Path
 from typing import Dict
 
 from apps.launcher.log_buffer import CodexLogBuffer
-from apps.launcher.profiles import LauncherProfileStore
-from apps.launcher.services import CodexServiceHandle, ServiceStatus, build_ui_dev_service_command
+from apps.launcher.profile_store import LauncherProfileStore
+from apps.launcher.service_process import CodexServiceHandle, ServiceStatus
+from apps.launcher.service_specs import build_ui_dev_service_command
 
 
 @dataclass(slots=True)
