@@ -116,7 +116,7 @@ def convert_safetensors_to_gguf(
         model_config=model_config,
         user_rules=config.tensor_type_overrides,
     )
-    quant_policy_id = f"{profile.quant_policy.id}_{quant_policy_preset.value.lower()}_v1"
+    quant_policy_id = f"{profile.quant_policy.id}_{quant_policy_preset.value.lower()}_v{profile.quant_policy.version}"
 
     if profile.arch is GGUFArch.LLAMA:
         arch = str(model_config.get("model_type") or "llama")

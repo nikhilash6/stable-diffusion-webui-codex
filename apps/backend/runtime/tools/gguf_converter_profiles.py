@@ -24,7 +24,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_POLICY_MQ_LQ` (constant): Policy preset set for balanced/compact baseline optional rules.
 - `_POLICY_HQ_MQ` (constant): Policy preset set for Llama-family optional mixed precision bumps.
 - `_qwen_image_num_layers` (function): Reads and validates Qwen Image transformer block count for policy edge rules.
-- `_qwen_image_mq_edge_rules` (function): Builds Qwen Image MQ modulation edge-bump rules from `num_layers`.
+- `_qwen_image_mq_quality_rules` (function): Builds Qwen Image MQ core-quality rules from `num_layers`.
 - `FLUX_QUANT_POLICY` (constant): Flux per-tensor dtype policy (HQ preserves optional IO weights in source float dtype).
 - `QWEN_IMAGE_QUANT_POLICY` (constant): Qwen Image per-tensor dtype policy (stability tensors preserve source float dtype).
 - `WAN22_QUANT_POLICY` (constant): WAN22 per-tensor dtype policy (HQ preserves optional embedder weights in source float dtype).
@@ -143,7 +143,7 @@ def _qwen_image_num_layers(config: Mapping[str, Any]) -> int:
     return num_layers
 
 
-def _qwen_image_mq_edge_rules(
+def _qwen_image_mq_quality_rules(
     config: Mapping[str, Any],
     quant: QuantizationType,
     policy_preset: QuantPolicyPreset,
@@ -166,6 +166,42 @@ def _qwen_image_mq_edge_rules(
         adjacent_type = GGMLQuantizationType.Q6_K
 
     return (
+        TensorTypeRule(
+            pattern=r"^transformer_blocks\.\d+\.attn\.(?:to_v|add_v_proj)\.weight$",
+            ggml_type=GGMLQuantizationType.Q6_K,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QWEN_IMAGE_MIXED,
+            reason="Qwen Image MQ policy: keep value projections at Q6_K",
+        ),
+        TensorTypeRule(
+            pattern=r"^transformer_blocks\.\d+\.(?:img_mlp|txt_mlp)\.net\.2\.weight$",
+            ggml_type=GGMLQuantizationType.Q6_K,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QWEN_IMAGE_MIXED,
+            reason="Qwen Image MQ policy: keep MLP down/out projections at Q6_K",
+        ),
+        TensorTypeRule(
+            pattern=(
+                rf"^transformer_blocks\.{first_last}\."
+                r"(?:(?:attn\.(?:add_[qk]_proj|to_add_out|to_[qk]|to_out\.0))"
+                r"|(?:(?:img_mlp|txt_mlp)\.net\.0\.proj))\.weight$"
+            ),
+            ggml_type=GGMLQuantizationType.Q6_K,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QWEN_IMAGE_MIXED,
+            reason="Qwen Image MQ policy: keep first/last core block weights at Q6_K",
+        ),
+        TensorTypeRule(
+            pattern=(
+                rf"^transformer_blocks\.{adjacent}\."
+                r"(?:(?:attn\.(?:add_[qk]_proj|to_add_out|to_[qk]|to_out\.0))"
+                r"|(?:(?:img_mlp|txt_mlp)\.net\.0\.proj))\.weight$"
+            ),
+            ggml_type=adjacent_type,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QWEN_IMAGE_MIXED,
+            reason=f"Qwen Image MQ policy: keep adjacent core block weights at {adjacent_type.name}",
+        ),
         TensorTypeRule(
             pattern=rf"^transformer_blocks\.{first_last}\.img_mod\.1\.weight$",
             ggml_type=GGMLQuantizationType.Q8_0,
@@ -309,6 +345,7 @@ FLUX_QUANT_POLICY = QuantizationPolicySpec(
 
 QWEN_IMAGE_QUANT_POLICY = QuantizationPolicySpec(
     id="qwen_image",
+    version=2,
     default_rules=(
         TensorTypeRule(
             pattern=r"^transformer_blocks\.\d+\.(?:img_mod|txt_mod)\.1\.weight$",
@@ -335,7 +372,7 @@ QWEN_IMAGE_QUANT_POLICY = QuantizationPolicySpec(
             reason="Qwen Image HQ/MQ policy: preserve timestep embedder source float dtype",
         ),
     ),
-    default_rule_factories=(_qwen_image_mq_edge_rules,),
+    default_rule_factories=(_qwen_image_mq_quality_rules,),
     required_rules=(
         TensorTypeRule(
             pattern=r".*\.bias$",

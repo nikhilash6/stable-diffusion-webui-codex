@@ -1,6 +1,6 @@
 # apps/backend/runtime/tools Overview
 Date: 2025-12-31
-Last Review: 2026-05-18
+Last Review: 2026-05-19
 Status: Active
 
 ## Purpose
@@ -28,6 +28,7 @@ Status: Active
 - 2026-03-07: GGUF converter emits source/native tensor names only for Flux, Qwen Image, Z-Image, WAN22, LTX-2, and Gemma3 text-encoder components; the tooling surface exposes one profile id per component and no layout-selection contract.
 - 2026-05-17: GGUF converter supports Qwen Image transformer weights through the `qwen_image_transformer` profile (`arch=qwen_image`), preserves native tensor names with no key mapping, records `codex.qwen_image.*` metadata, verifies sharded SafeTensors payload presence before listing presets, and no longer treats unknown Diffusers transformer configs as the Llama fallback.
 - 2026-05-18: GGUF converter policy presets are global through `quant_policy_preset=HQ|MQ|LQ`, with `MQ` as the default. `HQ` keeps conservative optional source-dtype preservation where profiles define it, `MQ` keeps balanced optional rules, and `LQ` uses only required invariants plus base requested quantization where profiles have no compact extras.
+- 2026-05-19: Qwen Image `MQ` policy is a real middle preset for mixed quantized selectors: it keeps required/final tensors source-dtype, preserves input/timestep weights, keeps modulation edge bumps, and raises value projections plus MLP down/out projections to `Q6_K` with broader first/last and adjacent block precision bumps. Qwen Image policy metadata is profile-wide `v2`; `HQ` and `LQ` tensor policies remain conservative and compact respectively.
 - 2026-01-14: Fixed `concat_dim0` streaming writes to allow variable dim0 sizes (required by Flux single-block `linear1` fusion: q/k/v + `proj_mlp`).
 - 2026-01-14: Flux GGUF quantization keeps sensitive IO projection weights in float (F32/F16) and keeps Flux 1D tensors in F32 (biases + norm scales) to preserve output quality.
 - 2026-01-14: GGUF converter dispatch is now profile-driven (typed registry): model-specific dtype “overrides” are formalized as per-model quantization policies (user `tensor_type_overrides` remain supported, but policy rules can be marked required).

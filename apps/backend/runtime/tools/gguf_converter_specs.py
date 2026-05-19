@@ -17,7 +17,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `TensorTypeRule` (dataclass): Declarative per-tensor dtype rule (regex + target + quant/policy conditions + dtype action + reason).
 - `PolicyRuleFactory` (type alias): Builds config-aware default rules for a policy preset.
 - `CompiledTensorTypeRule` (dataclass): Compiled rule used during planning (compiled regex + target + dtype action + reason).
-- `QuantizationPolicySpec` (dataclass): Bundle of built-in dtype rules; compiles them with optional user overrides.
+- `QuantizationPolicySpec` (dataclass): Bundle of built-in dtype rules and metadata version; compiles them with optional user overrides.
 - `KeyMappingSpec` (dataclass): Typed wrapper around “key mapping builders” (e.g. Llama HF→GGUF mapping).
 - `ConverterProfileSpec` (dataclass): Full conversion profile (detection + key mapping + metadata normalization + policies).
 """
@@ -123,6 +123,7 @@ PolicyRuleFactory = Callable[[Mapping[str, Any], QuantizationType, QuantPolicyPr
 @dataclass(frozen=True, slots=True)
 class QuantizationPolicySpec:
     id: str
+    version: int = 1
     default_rules: tuple[TensorTypeRule, ...] = ()
     default_rule_factories: tuple[PolicyRuleFactory, ...] = ()
     required_rules: tuple[TensorTypeRule, ...] = ()
