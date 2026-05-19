@@ -119,9 +119,8 @@ class GGUFWriter:
         self.split_max_size = split_max_size
         self.dry_run = dry_run
         self.small_first_shard = small_first_shard
-        logger.info("gguf: This GGUF file is for {0} Endian only".format(
-            "Big" if self.endianess == GGUFEndian.BIG else "Little",
-        ))
+        endian_label = "big-endian" if self.endianess == GGUFEndian.BIG else "little-endian"
+        logger.info("Writing GGUF in %s format", endian_label)
         self.state = WriterState.NO_FILE
 
         if self.small_first_shard:
