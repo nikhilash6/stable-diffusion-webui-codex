@@ -12,6 +12,7 @@ Selects source/native metadata normalizers, key mappings, and per-model dtype po
 Symbols (top-level; keep in sync; no ghosts):
 - `_is_flux` (function): Detect whether a config.json describes a Flux transformer.
 - `_is_qwen_image` (function): Detect whether a config.json describes a Qwen Image transformer.
+- `_is_qwen_image_tenc` (function): Detect whether a config.json describes a Qwen Image Qwen2.5-VL text encoder.
 - `_is_zimage` (function): Detect whether a config.json describes a ZImage transformer.
 - `_is_wan22` (function): Detect whether a config.json describes a WAN22 transformer.
 - `_is_ltx2` (function): Detect whether a config.json describes an LTX2 transformer.
@@ -27,6 +28,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_qwen_image_mq_quality_rules` (function): Builds Qwen Image MQ core-quality rules from `num_layers`.
 - `FLUX_QUANT_POLICY` (constant): Flux per-tensor dtype policy (HQ preserves optional IO weights in source float dtype).
 - `QWEN_IMAGE_QUANT_POLICY` (constant): Qwen Image per-tensor dtype policy (stability tensors preserve source float dtype).
+- `QWEN_IMAGE_TENC_QUANT_POLICY` (constant): Qwen Image Qwen2.5-VL text-encoder dtype policy (native names, no Llama aliases).
 - `WAN22_QUANT_POLICY` (constant): WAN22 per-tensor dtype policy (HQ preserves optional embedder weights in source float dtype).
 - `LTX2_QUANT_POLICY` (constant): LTX2 per-tensor dtype policy (stability-sensitive tensors stay float).
 - `ZIMAGE_QUANT_POLICY` (constant): ZImage per-tensor dtype policy (pad tokens must remain float).
@@ -63,6 +65,10 @@ def _is_flux(config: Mapping[str, Any]) -> bool:
 
 def _is_qwen_image(config: Mapping[str, Any]) -> bool:
     return _tensor_planner.is_qwen_image_transformer_config(config)
+
+
+def _is_qwen_image_tenc(config: Mapping[str, Any]) -> bool:
+    return _tensor_planner.is_qwen_image_text_encoder_config(config)
 
 
 def _is_zimage(config: Mapping[str, Any]) -> bool:
@@ -399,6 +405,95 @@ QWEN_IMAGE_QUANT_POLICY = QuantizationPolicySpec(
 )
 
 
+QWEN_IMAGE_TENC_QUANT_POLICY = QuantizationPolicySpec(
+    id="qwen_image_tenc",
+    default_rules=(
+        TensorTypeRule(
+            pattern=r"^visual\.merger\.mlp\.\d+\.weight$",
+            preserve_source_dtype=True,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            policy_presets=_POLICY_HQ,
+            reason="Qwen Image text-encoder HQ policy: preserve visual merger projection source float dtype",
+        ),
+        TensorTypeRule(
+            pattern=r"^(?:model\.embed_tokens|lm_head)\.weight$",
+            ggml_type=GGMLQuantizationType.Q8_0,
+            apply_to=TensorNameTarget.BOTH,
+            when=QuantizationCondition(include=frozenset({QuantizationType.Q5_K_M})),
+            policy_presets=_POLICY_HQ_MQ,
+            reason="Qwen Image text-encoder Q5_K_M policy: keep language embeddings/output at Q8_0",
+        ),
+        TensorTypeRule(
+            pattern=r"^model\.layers\.\d+\.self_attn\.(?:q_proj|k_proj|v_proj|o_proj)\.weight$",
+            ggml_type=GGMLQuantizationType.Q6_K,
+            apply_to=TensorNameTarget.BOTH,
+            when=QuantizationCondition(include=frozenset({QuantizationType.Q5_K_M})),
+            policy_presets=_POLICY_HQ_MQ,
+            reason="Qwen Image text-encoder Q5_K_M policy: keep language attention projections at Q6_K",
+        ),
+        TensorTypeRule(
+            pattern=r"^visual\.blocks\.\d+\.attn\.(?:qkv|proj)\.weight$",
+            ggml_type=GGMLQuantizationType.Q6_K,
+            apply_to=TensorNameTarget.BOTH,
+            when=QuantizationCondition(include=frozenset({QuantizationType.Q5_K_M})),
+            policy_presets=_POLICY_HQ_MQ,
+            reason="Qwen Image text-encoder Q5_K_M policy: keep visual attention projections at Q6_K",
+        ),
+        TensorTypeRule(
+            pattern=r"^(?:model\.embed_tokens|lm_head)\.weight$",
+            ggml_type=GGMLQuantizationType.Q6_K,
+            apply_to=TensorNameTarget.BOTH,
+            when=QuantizationCondition(include=frozenset({QuantizationType.Q4_K_M})),
+            policy_presets=_POLICY_HQ_MQ,
+            reason="Qwen Image text-encoder Q4_K_M policy: keep language embeddings/output at Q6_K",
+        ),
+        TensorTypeRule(
+            pattern=r"^model\.layers\.\d+\.self_attn\.(?:q_proj|k_proj|v_proj|o_proj)\.weight$",
+            ggml_type=GGMLQuantizationType.Q5_K,
+            apply_to=TensorNameTarget.BOTH,
+            when=QuantizationCondition(include=frozenset({QuantizationType.Q4_K_M})),
+            policy_presets=_POLICY_HQ_MQ,
+            reason="Qwen Image text-encoder Q4_K_M policy: keep language attention projections at Q5_K",
+        ),
+        TensorTypeRule(
+            pattern=r"^visual\.blocks\.\d+\.attn\.(?:qkv|proj)\.weight$",
+            ggml_type=GGMLQuantizationType.Q5_K,
+            apply_to=TensorNameTarget.BOTH,
+            when=QuantizationCondition(include=frozenset({QuantizationType.Q4_K_M})),
+            policy_presets=_POLICY_HQ_MQ,
+            reason="Qwen Image text-encoder Q4_K_M policy: keep visual attention projections at Q5_K",
+        ),
+    ),
+    required_rules=(
+        TensorTypeRule(
+            pattern=r".*\.bias$",
+            preserve_source_dtype=True,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            reason="Qwen Image text-encoder biases preserve source float dtype for stability",
+        ),
+        TensorTypeRule(
+            pattern=(
+                r"^(?:model\.norm|model\.layers\.\d+\.(?:input_layernorm|post_attention_layernorm)"
+                r"|visual\.blocks\.\d+\.norm[12]|visual\.merger\.ln_q)\.weight$"
+            ),
+            preserve_source_dtype=True,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            reason="Qwen Image text-encoder norm scales preserve source float dtype for stability",
+        ),
+        TensorTypeRule(
+            pattern=r"^visual\.patch_embed\.proj\.weight$",
+            preserve_source_dtype=True,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            reason="Qwen Image text-encoder patch embedding preserves source float dtype for shape/stability",
+        ),
+    ),
+)
+
+
 WAN22_QUANT_POLICY = QuantizationPolicySpec(
     id="wan22",
     default_rules=(
@@ -707,6 +802,13 @@ PROFILE_REGISTRY: tuple[ConverterProfileSpec, ...] = (
         detect=_is_qwen_image,
         quant_policy=QWEN_IMAGE_QUANT_POLICY,
         metadata_normalizer=_tensor_planner.normalize_qwen_image_transformer_metadata_config,
+    ),
+    ConverterProfileSpec(
+        id=ConverterProfileId.QWEN_IMAGE_TENC,
+        arch=GGUFArch.QWEN2_5_VL,
+        detect=_is_qwen_image_tenc,
+        quant_policy=QWEN_IMAGE_TENC_QUANT_POLICY,
+        metadata_normalizer=_tensor_planner.normalize_qwen_image_text_encoder_metadata_config,
     ),
     ConverterProfileSpec(
         id=ConverterProfileId.ZIMAGE_TRANSFORMER,

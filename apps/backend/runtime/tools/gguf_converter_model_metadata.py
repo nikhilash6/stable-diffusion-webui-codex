@@ -8,7 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: Vendored model metadata for the GGUF converter UI.
 Scans the local Hugging Face mirror under `apps/backend/huggingface/**` and exposes “model metadata” entries (org/repo)
-with supported conversion components (Flux/Qwen Image/ZImage/WAN22/LTX2 denoisers plus Gemma3 text encoders).
+with supported conversion components (Flux/Qwen Image/ZImage/WAN22/LTX2 denoisers plus Gemma3 and Qwen Image text encoders).
 
 Symbols (top-level; keep in sync; no ghosts):
 - `GGUFConverterModelComponent` (dataclass): Convertible component entry (config dir + one truthful profile id).
@@ -79,6 +79,8 @@ def _classify_config(cfg: dict[str, Any]) -> tuple[str, str | None]:
         return ("flux_transformer", "flux_transformer")
     if _tensor_planner.is_qwen_image_transformer_config(cfg):
         return ("qwen_image_transformer", "qwen_image_transformer")
+    if _tensor_planner.is_qwen_image_text_encoder_config(cfg):
+        return ("qwen_image_tenc", "qwen_image_tenc")
     if class_name == "ZImageTransformer2DModel":
         return ("zimage_transformer", "zimage_transformer")
     if class_name in {"WanTransformer3DModel", "WanModel"}:
@@ -126,7 +128,7 @@ def list_vendored_gguf_converter_model_metadata(*, codex_root: Path) -> list[GGU
             component_label = subdir or "root"
             if kind in {"flux_transformer", "qwen_image_transformer", "zimage_transformer", "ltx2_transformer"}:
                 component_label = "denoiser"
-            if kind == "gemma3_tenc":
+            if kind in {"gemma3_tenc", "qwen_image_tenc"}:
                 component_label = "text_encoder"
             if kind == "wan22_transformer" and wan_two_stage:
                 if component_id in {"transformer", "high_noise_model"}:
@@ -153,6 +155,7 @@ def list_vendored_gguf_converter_model_metadata(*, codex_root: Path) -> list[GGU
             "wan22_transformer": 0,
             "ltx2_transformer": 0,
             "gemma3_tenc": 1,
+            "qwen_image_tenc": 1,
         }
         components.sort(key=lambda c: (kind_priority.get(c.kind, 9), c.label.lower()))
         model_id = f"{org}/{repo}"

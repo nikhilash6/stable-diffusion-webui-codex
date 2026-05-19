@@ -41,6 +41,7 @@ class GGUFArch(str, Enum):
     GEMMA3 = "gemma3"
     FLUX = "flux"
     QWEN_IMAGE = "qwen_image"
+    QWEN2_5_VL = "qwen2_5_vl"
     ZIMAGE = "zimage"
     WAN22 = "wan22"
     LTX2 = "ltx2"
@@ -65,6 +66,7 @@ class TensorNameTarget(str, Enum):
 class ConverterProfileId(str, Enum):
     FLUX_TRANSFORMER = "flux_transformer"
     QWEN_IMAGE_TRANSFORMER = "qwen_image_transformer"
+    QWEN_IMAGE_TENC = "qwen_image_tenc"
     ZIMAGE_TRANSFORMER = "zimage_transformer"
     WAN22_TRANSFORMER = "wan22_transformer"
     LTX2_TRANSFORMER = "ltx2_transformer"

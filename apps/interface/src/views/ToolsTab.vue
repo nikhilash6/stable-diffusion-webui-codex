@@ -426,6 +426,7 @@ function formatComponentLabel(component: GGUFConverterModelComponent): string {
     wan22_transformer: 'Denoiser',
     ltx2_transformer: 'Denoiser',
     gemma3_tenc: 'Text Encoder',
+    qwen_image_tenc: 'Text Encoder',
   }
   const base = baseByKind[kind] ?? _titleizeWords(kind || 'Component')
   const label = _titleizeWords(component.label || '')

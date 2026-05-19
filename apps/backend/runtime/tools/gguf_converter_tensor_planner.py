@@ -27,6 +27,12 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_safe_qwen_image_model_name` (function): Selects a stable Qwen model name without leaking local filesystem paths.
 - `is_qwen_image_transformer_config` (function): Returns True when a config.json represents a Qwen Image transformer export.
 - `normalize_qwen_image_transformer_metadata_config` (function): Adapts Qwen Image transformer config fields to metadata helper inputs.
+- `_require_exact_int` (function): Requires an exact integer config value for strict profile identity checks.
+- `_require_exact_float` (function): Requires an exact numeric config value for strict profile identity checks.
+- `_qwen_image_text_encoder_identity_config` (function): Validates exact Qwen Image Qwen2.5-VL text-encoder identity metadata.
+- `_safe_qwen_image_text_encoder_model_name` (function): Selects a stable Qwen text-encoder model name without leaking local paths.
+- `is_qwen_image_text_encoder_config` (function): Returns True when a config.json represents a Qwen Image Qwen2.5-VL text encoder.
+- `normalize_qwen_image_text_encoder_metadata_config` (function): Adapts Qwen Image text-encoder config fields to metadata helper inputs.
 - `is_wan22_transformer_config` (function): Returns True when a config.json represents a WAN22 transformer export.
 - `normalize_wan22_transformer_metadata_config` (function): Adapts WAN22 transformer config fields to metadata helper inputs.
 - `is_ltx2_transformer_config` (function): Returns True when a config.json represents an LTX2 transformer export.
@@ -46,11 +52,19 @@ import numpy as np
 from apps.backend.quantization.gguf import GGMLQuantizationType
 from apps.backend.quantization.gguf.quant_shapes import quant_shape_to_byte_shape
 from apps.backend.runtime.families.qwen_image.config import QWEN_IMAGE_EDIT_VARIANT, QWEN_IMAGE_TXT2IMG_VARIANT
+from apps.backend.runtime.families.qwen_image.text_encoder import qwen_image_text_encoder_config_from_mapping
 from apps.backend.runtime.families.qwen_image.transformer import qwen_image_transformer_config_from_mapping
 from apps.backend.runtime.tools.gguf_converter_quantization import select_tensor_ggml_type
 from apps.backend.runtime.tools.gguf_converter_specs import CompiledTensorTypeRule
 
 _ZIMAGE_PAD_TOKENS = {"x_pad_token", "cap_pad_token"}
+_QWEN_IMAGE_TEXT_ENCODER_FALLBACK_NAME = "qwen_image_qwen2_5_vl_text_encoder"
+_QWEN_IMAGE_TEXT_ENCODER_CANONICAL_REPO_IDS = frozenset(
+    {
+        "Qwen/Qwen-Image-2512",
+        "Qwen/Qwen-Image-Edit-2511",
+    }
+)
 _SOURCE_FLOAT_GGML_TYPES: dict[str, GGMLQuantizationType] = {
     "F16": GGMLQuantizationType.F16,
     "BF16": GGMLQuantizationType.BF16,
@@ -240,6 +254,68 @@ def is_qwen_image_transformer_config(config: Mapping[str, Any]) -> bool:
     return True
 
 
+def _require_exact_int(config: Mapping[str, Any], key: str, expected: int, *, context: str) -> int:
+    raw = config.get(key)
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise RuntimeError(f"{context}: {key} must be integer {expected}.")
+    value = int(raw)
+    if value != expected:
+        raise RuntimeError(f"{context}: {key} must be {expected}; got {value}.")
+    return value
+
+
+def _require_exact_float(config: Mapping[str, Any], key: str, expected: float, *, context: str) -> float:
+    raw = config.get(key)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise RuntimeError(f"{context}: {key} must be numeric {expected}.")
+    value = float(raw)
+    if abs(value - expected) > 1e-12:
+        raise RuntimeError(f"{context}: {key} must be {expected}; got {value}.")
+    return value
+
+
+def _qwen_image_text_encoder_identity_config(config: Mapping[str, Any], *, context: str) -> dict[str, int | float]:
+    qwen_image_text_encoder_config_from_mapping(config, context=context)
+    return {
+        "num_hidden_layers": _require_exact_int(config, "num_hidden_layers", 28, context=context),
+        "num_attention_heads": _require_exact_int(config, "num_attention_heads", 28, context=context),
+        "num_key_value_heads": _require_exact_int(config, "num_key_value_heads", 4, context=context),
+        "max_position_embeddings": _require_exact_int(config, "max_position_embeddings", 128000, context=context),
+        "rope_theta": _require_exact_float(config, "rope_theta", 1000000.0, context=context),
+        "rms_norm_eps": _require_exact_float(config, "rms_norm_eps", 1e-6, context=context),
+    }
+
+
+def _safe_qwen_image_text_encoder_model_name(config: Mapping[str, Any]) -> str:
+    candidates: list[Mapping[str, Any]] = [config]
+    text_config = config.get("text_config")
+    if isinstance(text_config, Mapping):
+        candidates.append(text_config)
+
+    for candidate_config in candidates:
+        for key in ("_name_or_path", "name"):
+            value = str(candidate_config.get(key) or "").strip()
+            if not value:
+                continue
+            if value in _QWEN_IMAGE_TEXT_ENCODER_CANONICAL_REPO_IDS:
+                return value
+            if _is_path_like_model_name(value, fallback=_QWEN_IMAGE_TEXT_ENCODER_FALLBACK_NAME):
+                continue
+            return value
+    return _QWEN_IMAGE_TEXT_ENCODER_FALLBACK_NAME
+
+
+def is_qwen_image_text_encoder_config(config: Mapping[str, Any]) -> bool:
+    try:
+        _qwen_image_text_encoder_identity_config(
+            config,
+            context="Qwen Image text-encoder GGUF converter profile detection",
+        )
+    except RuntimeError:
+        return False
+    return True
+
+
 def is_wan22_transformer_config(config: Mapping[str, Any]) -> bool:
     return str(config.get("_class_name") or "") in {"WanTransformer3DModel", "WanModel"}
 
@@ -317,6 +393,27 @@ def normalize_qwen_image_transformer_metadata_config(config: Mapping[str, Any]) 
         "codex.qwen_image.out_channels": qwen_config.out_channels,
         "codex.qwen_image.patch_size": qwen_config.patch_size,
         "codex.qwen_image.axes_dims_rope": list(qwen_config.axes_dims_rope),
+    }
+
+
+def normalize_qwen_image_text_encoder_metadata_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Adapt Qwen Image Qwen2.5-VL text-encoder config keys into metadata helper inputs."""
+
+    identity = _qwen_image_text_encoder_identity_config(
+        config,
+        context="Qwen Image text-encoder GGUF converter metadata",
+    )
+
+    return {
+        "model_type": "qwen2_5_vl",
+        "num_hidden_layers": identity["num_hidden_layers"],
+        "hidden_size": 3584,
+        "num_attention_heads": identity["num_attention_heads"],
+        "num_key_value_heads": identity["num_key_value_heads"],
+        "max_position_embeddings": identity["max_position_embeddings"],
+        "rope_theta": identity["rope_theta"],
+        "rms_norm_eps": identity["rms_norm_eps"],
+        "_name_or_path": _safe_qwen_image_text_encoder_model_name(config),
     }
 
 
@@ -519,12 +616,14 @@ __all__ = [
     "is_flux_transformer_config",
     "is_gemma3_text_encoder_config",
     "is_ltx2_transformer_config",
+    "is_qwen_image_text_encoder_config",
     "is_qwen_image_transformer_config",
     "is_wan22_transformer_config",
     "is_zimage_transformer_config",
     "normalize_flux_transformer_metadata_config",
     "normalize_gemma3_text_encoder_metadata_config",
     "normalize_ltx2_transformer_metadata_config",
+    "normalize_qwen_image_text_encoder_metadata_config",
     "normalize_qwen_image_transformer_metadata_config",
     "normalize_wan22_transformer_metadata_config",
     "normalize_zimage_transformer_metadata_config",
