@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Tools API routes (GGUF conversion + SafeTensors merge + file browser + PNG metadata inspection).
-Provides long-running conversion/merge job tracking, filesystem browsing for file picker dialogs, and small utility endpoints used by the UI.
+Provides long-running conversion/merge job tracking, the source/native GGUF converter contract, filesystem browsing for file picker dialogs, and small utility endpoints used by the UI.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `build_router` (function): Build the APIRouter for tools endpoints.
@@ -193,22 +193,9 @@ def build_router(*, codex_root: Path) -> APIRouter:
 
     @router.get("/api/tools/gguf-converter/presets")
     async def list_gguf_converter_presets() -> Dict[str, Any]:
-        from apps.backend.runtime.tools.gguf_converter_float_groups import float_groups_for_profile_id
         from apps.backend.runtime.tools.gguf_converter_model_metadata import list_vendored_gguf_converter_model_metadata
 
         models = list_vendored_gguf_converter_model_metadata(codex_root=codex_root)
-        profile_ids: set[str] = set()
-        for model in models:
-            for comp in model.components:
-                if comp.profile_id:
-                    profile_ids.add(comp.profile_id)
-
-        float_groups: dict[str, Any] = {}
-        for pid in sorted(profile_ids):
-            float_groups[pid] = [
-                {"id": g.id, "label": g.label, "patterns": list(g.patterns)}
-                for g in float_groups_for_profile_id(pid)
-            ]
 
         return {
             "models": [
@@ -230,7 +217,6 @@ def build_router(*, codex_root: Path) -> APIRouter:
                 }
                 for m in models
             ],
-            "float_groups": float_groups,
         }
 
     @router.post("/api/tools/convert-gguf")
@@ -241,10 +227,6 @@ def build_router(*, codex_root: Path) -> APIRouter:
             GGUFConversionCancelled,
             QuantizationType,
             convert_safetensors_to_gguf,
-        )
-        from apps.backend.runtime.tools.gguf_converter_types import (
-            normalize_mixed_float_override,
-            normalize_precision_mode,
         )
 
         job_id = str(uuid.uuid4())[:8]
@@ -257,8 +239,6 @@ def build_router(*, codex_root: Path) -> APIRouter:
             "quantization",
             "tensor_type_overrides",
             "profile_id",
-            "float_group_overrides",
-            "precision_mode",
         }
         unknown_keys = sorted({str(key) for key in payload.keys() if str(key) not in allowed_payload_keys})
         if unknown_keys:
@@ -280,8 +260,6 @@ def build_router(*, codex_root: Path) -> APIRouter:
         quant_str = payload.get("quantization", "F16")
         overrides_raw = payload.get("tensor_type_overrides", [])
         profile_id_raw = payload.get("profile_id", None)
-        float_group_overrides_raw = payload.get("float_group_overrides", {})
-        precision_mode_raw = payload.get("precision_mode", None)
 
         if not config_path or not safetensors_path or not output_path:
             raise HTTPException(status_code=400, detail="Missing required paths")
@@ -327,52 +305,6 @@ def build_router(*, codex_root: Path) -> APIRouter:
                 except ValueError as exc:
                     raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        try:
-            precision_mode = normalize_precision_mode(precision_mode_raw)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        float_group_overrides: dict[str, str] = {}
-        if float_group_overrides_raw is None:
-            float_group_overrides = {}
-        elif isinstance(float_group_overrides_raw, dict):
-            for k, v in float_group_overrides_raw.items():
-                group_id = str(k or "").strip()
-                if not group_id:
-                    raise HTTPException(status_code=400, detail="float_group_overrides contains an empty group id")
-                try:
-                    float_group_overrides[group_id] = normalize_mixed_float_override(v)
-                except ValueError as exc:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=str(exc),
-                    ) from exc
-        else:
-            raise HTTPException(status_code=400, detail="float_group_overrides must be an object/dict when provided")
-
-        if precision_mode is not None and float_group_overrides:
-            raise HTTPException(
-                status_code=400,
-                detail="precision_mode cannot be combined with float_group_overrides.",
-            )
-
-        if any(v != "auto" for v in float_group_overrides.values()):
-            if profile_id is None:
-                raise HTTPException(status_code=400, detail="float_group_overrides requires profile_id")
-
-            from apps.backend.runtime.tools.gguf_converter_float_groups import float_groups_for_profile_id
-
-            allowed = {g.id for g in float_groups_for_profile_id(profile_id)}
-            for gid, choice in float_group_overrides.items():
-                if choice == "auto":
-                    continue
-                if gid not in allowed:
-                    allowed_msg = ", ".join(sorted(allowed)) if allowed else "(none)"
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Unknown float dtype group for profile {profile_id!r}: {gid!r} (allowed: {allowed_msg})",
-                    )
-
         tensor_type_overrides: list[str] = []
         if isinstance(overrides_raw, str):
             tensor_type_overrides = [ln.strip() for ln in overrides_raw.splitlines() if ln.strip()]
@@ -417,8 +349,6 @@ def build_router(*, codex_root: Path) -> APIRouter:
                     profile_id=profile_id,
                     quantization=quant,
                     tensor_type_overrides=tensor_type_overrides,
-                    float_group_overrides=float_group_overrides,
-                    precision_mode=precision_mode,
                 )
 
                 def progress_cb(prog):

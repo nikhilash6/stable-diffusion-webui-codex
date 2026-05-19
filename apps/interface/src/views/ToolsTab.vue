@@ -15,7 +15,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `ToolsTab` (component): Tools page SFC; owns GGUF + merger form state and the shared file browser modal.
 - `GGUFConverterModelComponent` (interface): Convertible component entry (config dir + unified profile id).
 - `GGUFConverterModelMetadata` (interface): Vendored model metadata entry returned by `/api/tools/gguf-converter/presets`.
-- `GGUFForm` (interface): GGUF converter form state (model metadata + component + quant/mixed + precision mode + overwrite).
+- `GGUFForm` (interface): GGUF converter form state (model metadata + component + quant/mixed + overwrite).
 - `SafetensorsMergeForm` (interface): Safetensors merge form state (source path + output path + overwrite).
 - `ToolJobStatus` (interface): Polled tools job status payload (status + progress + current tensor + error).
 - `BrowserItem` (interface): Single file browser entry (file/directory + optional size).
@@ -90,60 +90,47 @@ Symbols (top-level; keep in sync; no ghosts):
             <p class="caption">For sharded weights, select the folder that contains <code>*.safetensors.index.json</code>.</p>
           </div>
 
-	          <div class="field">
-	            <label class="label-muted">Quantization</label>
-              <div class="row-inline">
-	              <select class="select-md cdx-tools-grow" v-model="ggufForm.quantization" :disabled="isConverting">
-	                <optgroup label="Float (no quant)">
-	                  <option value="F16">F16 — float16</option>
-	                  <option value="F32">F32 — float32</option>
-	                </optgroup>
-	                <optgroup label="K-quants">
-	                  <option value="Q8_0">Q8_0 — 8-bit</option>
-	                  <option value="Q6_K">Q6_K — 6-bit K</option>
-	                  <option value="Q5_K">Q5_K — 5-bit K</option>
-	                  <option value="Q4_K">Q4_K — 4-bit K</option>
-	                  <option value="Q3_K">Q3_K — 3-bit K</option>
-	                  <option value="Q2_K">Q2_K — 2-bit K</option>
-	                </optgroup>
-	                <optgroup label="Legacy">
-	                  <option value="Q5_1">Q5_1 — 5-bit legacy</option>
-	                  <option value="Q5_0">Q5_0 — 5-bit legacy</option>
-	                  <option value="Q4_1">Q4_1 — 4-bit legacy</option>
-	                  <option value="Q4_0">Q4_0 — 4-bit legacy</option>
-	                </optgroup>
-	                <optgroup label="Experimental">
-	                  <option value="IQ4_NL">IQ4_NL — 4-bit IQ (NL)</option>
-	                </optgroup>
-	              </select>
-		            <button
-		              :class="['btn', 'qs-toggle-btn', ggufForm.mixed ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
-		              type="button"
-		              :aria-pressed="ggufForm.mixed"
-		              :disabled="isConverting || !mixedSupported"
-		              title="Enable mixed policy when available (e.g., Q5_K → Q5_K_M, Q4_K → Q4_K_M)"
-		              @click="ggufForm.mixed = !ggufForm.mixed"
-		            >
-		              Mixed
-		            </button>
-		            <select
-		              v-if="ggufForm.mixed && mixedSupported"
-		              class="select-md"
-		              v-model="ggufForm.precisionMode"
-		              :disabled="isConverting"
-		              title="Select mixed precision policy"
-		            >
-		              <option value="FULL_BF16">Full BF16</option>
-		              <option value="FULL_FP16">Full FP16</option>
-		              <option value="FULL_FP32">Full FP32</option>
-		              <option value="FP16_PLUS_FP32">FP16+FP32</option>
-		              <option value="BF16_PLUS_FP32">BF16+FP32</option>
-		            </select>
-              </div>
-	            <p class="caption">
-	              Mixed enables mixed quant variants when available. Precision mode controls non-quantized tensor dtype policy.
-	            </p>
-	          </div>
+          <div class="field">
+            <label class="label-muted">Quantization</label>
+            <div class="row-inline">
+              <select class="select-md cdx-tools-grow" v-model="ggufForm.quantization" :disabled="isConverting">
+                <optgroup label="Float (no quant)">
+                  <option value="F16">F16 — float16</option>
+                  <option value="F32">F32 — float32</option>
+                </optgroup>
+                <optgroup label="K-quants">
+                  <option value="Q8_0">Q8_0 — 8-bit</option>
+                  <option value="Q6_K">Q6_K — 6-bit K</option>
+                  <option value="Q5_K">Q5_K — 5-bit K</option>
+                  <option value="Q4_K">Q4_K — 4-bit K</option>
+                  <option value="Q3_K">Q3_K — 3-bit K</option>
+                  <option value="Q2_K">Q2_K — 2-bit K</option>
+                </optgroup>
+                <optgroup label="Legacy">
+                  <option value="Q5_1">Q5_1 — 5-bit legacy</option>
+                  <option value="Q5_0">Q5_0 — 5-bit legacy</option>
+                  <option value="Q4_1">Q4_1 — 4-bit legacy</option>
+                  <option value="Q4_0">Q4_0 — 4-bit legacy</option>
+                </optgroup>
+                <optgroup label="Experimental">
+                  <option value="IQ4_NL">IQ4_NL — 4-bit IQ (NL)</option>
+                </optgroup>
+              </select>
+              <button
+                :class="['btn', 'qs-toggle-btn', ggufForm.mixed ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
+                type="button"
+                :aria-pressed="ggufForm.mixed"
+                :disabled="isConverting || !mixedSupported"
+                title="Enable mixed policy when available (e.g., Q5_K → Q5_K_M, Q4_K → Q4_K_M)"
+                @click="ggufForm.mixed = !ggufForm.mixed"
+              >
+                Mixed
+              </button>
+            </div>
+            <p class="caption">
+              Mixed enables mixed quant variants when available. Preserved mixed tensors keep their source dtype.
+            </p>
+          </div>
 
           <div class="field">
             <label class="label-muted">Output Folder</label>
@@ -332,7 +319,6 @@ interface GGUFForm {
   safetensorsPath: string
   quantization: string
   mixed: boolean
-  precisionMode: 'FULL_BF16' | 'FULL_FP16' | 'FULL_FP32' | 'FP16_PLUS_FP32' | 'BF16_PLUS_FP32'
   outputDir: string
   overwrite: boolean
 }
@@ -375,7 +361,6 @@ const ggufForm = ref<GGUFForm>({
   safetensorsPath: '',
   quantization: 'Q5_K',
   mixed: true,
-  precisionMode: 'FP16_PLUS_FP32',
   outputDir: '',
   overwrite: false,
 })
@@ -645,10 +630,6 @@ async function startConversion() {
     const profileId = effectiveProfileId.value
     if (profileId) {
       payload.profile_id = profileId
-    }
-
-    if (ggufForm.value.mixed && mixedSupported.value) {
-      payload.precision_mode = ggufForm.value.precisionMode
     }
 
     const response = await fetch('/api/tools/convert-gguf', {

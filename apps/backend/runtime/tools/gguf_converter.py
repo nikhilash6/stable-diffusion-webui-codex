@@ -11,15 +11,10 @@ Uses explicit converter profiles for supported text encoders and transformer/den
 
 Symbols (top-level; keep in sync; no ghosts):
 - `QuantizationType` (enum): Supported “human” quantization selectors for conversion (maps to `GGMLQuantizationType`).
-- `ConversionConfig` (dataclass): Conversion configuration (input/output paths, quantization choices, profile selection, and dtype overrides).
+- `ConversionConfig` (dataclass): Conversion configuration (input/output paths, quantization choices, profile selection, and regex dtype overrides).
 - `ConversionProgress` (dataclass): Progress/report structure for long conversions (stage counters, timings, and status fields).
 - `GGUFConversionCancelled` (exception): Raised when a conversion is cancelled via a cooperative cancel signal.
 - `GGUFVerificationError` (exception): Raised when a written GGUF file fails validation/verification.
-- `_compile_float_group_override_rules` (function): Compiles profile-scoped float-group overrides into matcher rules.
-- `_apply_float_group_overrides` (function): Applies profile-scoped F16/BF16/F32 group overrides to compiled dtype rules.
-- `_precision_mode_plus_overrides` (function): Builds profile float-group overrides for precision-mode PLUS policies.
-- `_precision_mode_full_float_dtype` (function): Resolves precision-mode FULL policy to a target float GGML dtype.
-- `_force_nonquantized_tensor_dtype` (function): Rewrites planned non-quantized tensors to a selected full float dtype.
 - `convert_safetensors_to_gguf` (function): Main conversion entrypoint; reads SafeTensors (incl. sharded), quantizes tensors, writes GGUF,
   and optionally verifies the output (uses many helpers above).
 """
@@ -27,10 +22,7 @@ Symbols (top-level; keep in sync; no ghosts):
 from __future__ import annotations
 from apps.backend.runtime.logging import get_backend_logger
 
-from dataclasses import replace
 import json
-import logging
-import re
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -48,20 +40,14 @@ from apps.backend.runtime.tools import gguf_converter_quantization as _quantizat
 from apps.backend.runtime.tools import gguf_converter_safetensors_source as _safetensors_source
 from apps.backend.runtime.tools import gguf_converter_tensor_planner as _tensor_planner
 from apps.backend.runtime.tools import gguf_converter_verify as _verify
-from apps.backend.runtime.tools.gguf_converter_float_groups import float_groups_for_profile_id
 from apps.backend.runtime.tools.gguf_converter_specs import (
-    CompiledTensorTypeRule,
-    ConverterProfileId,
     GGUFArch,
-    TensorNameTarget,
 )
 from apps.backend.runtime.tools.gguf_converter_types import (
     ConversionConfig,
     ConversionProgress,
     GGUFVerificationError,
-    PrecisionMode,
     QuantizationType,
-    normalize_mixed_float_override,
 )
 
 logger = get_backend_logger("backend.runtime.tools.gguf_converter")
@@ -69,164 +55,6 @@ logger = get_backend_logger("backend.runtime.tools.gguf_converter")
 
 class GGUFConversionCancelled(Exception):
     """Raised when a conversion is cancelled via a cooperative cancel signal."""
-
-
-_FLOAT_GGML_TYPES: set[GGMLQuantizationType] = {
-    GGMLQuantizationType.F16,
-    GGMLQuantizationType.BF16,
-    GGMLQuantizationType.F32,
-}
-_ZIMAGE_PAD_TOKENS: set[str] = {"x_pad_token", "cap_pad_token"}
-_QWEN_IMAGE_FULL_DTYPE_DOWNGRADE_MODES: frozenset[PrecisionMode] = frozenset(
-    {PrecisionMode.FULL_FP16, PrecisionMode.FULL_BF16}
-)
-
-
-def _parse_mixed_float_override_choice(value: object) -> GGMLQuantizationType | None:
-    normalized = normalize_mixed_float_override(value)
-    if normalized == "auto":
-        return None
-    if normalized == "F16":
-        return GGMLQuantizationType.F16
-    if normalized == "BF16":
-        return GGMLQuantizationType.BF16
-    if normalized == "F32":
-        return GGMLQuantizationType.F32
-    raise RuntimeError(f"Unsupported normalized float dtype selection: {normalized!r}")
-
-
-def _compile_float_group_override_rules(
-    *,
-    profile_id: str,
-    overrides: object,
-    reason_prefix: str = "user float group override",
-) -> list[CompiledTensorTypeRule]:
-    if overrides is None:
-        return []
-    if not isinstance(overrides, dict):
-        raise TypeError(f"float_group_overrides must be a dict[str, str], got {type(overrides).__name__}")
-    if not overrides:
-        return []
-
-    allowed_groups = {g.id: g for g in float_groups_for_profile_id(profile_id)}
-    if not allowed_groups:
-        raise ValueError(f"Profile {profile_id!r} does not define any float dtype groups")
-
-    compiled: list[CompiledTensorTypeRule] = []
-    for group_id, choice in overrides.items():
-        gid = str(group_id).strip()
-        if not gid:
-            raise ValueError("float_group_overrides contains an empty group id")
-        group = allowed_groups.get(gid)
-        if group is None:
-            allowed = ", ".join(sorted(allowed_groups.keys()))
-            raise ValueError(f"Unknown float dtype group for profile {profile_id!r}: {gid!r} (allowed: {allowed})")
-
-        ggml_type = _parse_mixed_float_override_choice(choice)
-        if ggml_type is None:
-            continue
-
-        for pattern in group.patterns:
-            compiled.append(
-                CompiledTensorTypeRule(
-                    pattern=re.compile(pattern),
-                    ggml_type=ggml_type,
-                    apply_to=TensorNameTarget.DST,
-                    reason=f"{reason_prefix}: {gid}={ggml_type.name}",
-                )
-            )
-    return compiled
-
-
-def _apply_float_group_overrides(
-    rules: list[CompiledTensorTypeRule],
-    *,
-    config: ConversionConfig,
-    profile_id: str,
-    overrides: object | None = None,
-) -> None:
-    selected_overrides = getattr(config, "float_group_overrides", None) if overrides is None else overrides
-    rules.extend(_compile_float_group_override_rules(profile_id=profile_id, overrides=selected_overrides))
-
-
-def _precision_mode_plus_overrides(
-    precision_mode: PrecisionMode | None,
-    *,
-    profile_id: str,
-) -> dict[str, str]:
-    if precision_mode == PrecisionMode.FP16_PLUS_FP32:
-        value = "F16"
-    elif precision_mode == PrecisionMode.BF16_PLUS_FP32:
-        value = "BF16"
-    else:
-        return {}
-    return {group.id: value for group in float_groups_for_profile_id(profile_id)}
-
-
-def _precision_mode_full_float_dtype(precision_mode: PrecisionMode | None) -> GGMLQuantizationType | None:
-    if precision_mode == PrecisionMode.FULL_FP16:
-        return GGMLQuantizationType.F16
-    if precision_mode == PrecisionMode.FULL_BF16:
-        return GGMLQuantizationType.BF16
-    if precision_mode == PrecisionMode.FULL_FP32:
-        return GGMLQuantizationType.F32
-    return None
-
-
-def _float_storage_meta(
-    shape: tuple[int, ...],
-    dtype: GGMLQuantizationType,
-) -> tuple[np.dtype, int]:
-    if dtype == GGMLQuantizationType.F16:
-        element_dtype = np.dtype(np.float16)
-        bytes_per_elem = 2
-    elif dtype == GGMLQuantizationType.BF16:
-        element_dtype = np.dtype(np.uint16)
-        bytes_per_elem = 2
-    elif dtype == GGMLQuantizationType.F32:
-        element_dtype = np.dtype(np.float32)
-        bytes_per_elem = 4
-    else:
-        raise ValueError(f"Expected float GGML dtype, got {dtype.name}")
-
-    elem_count = int(np.prod(shape, dtype=np.int64)) if len(shape) > 0 else 1
-    return element_dtype, int(elem_count * bytes_per_elem)
-
-
-def _force_nonquantized_tensor_dtype(
-    plans: list[_tensor_planner.TensorPlan],
-    *,
-    target_dtype: GGMLQuantizationType | None,
-) -> list[_tensor_planner.TensorPlan]:
-    if target_dtype is None:
-        return plans
-    if target_dtype not in _FLOAT_GGML_TYPES:
-        raise ValueError(f"target_dtype must be float-like, got {target_dtype.name}")
-
-    forced: list[_tensor_planner.TensorPlan] = []
-    for plan in plans:
-        if plan.ggml_type not in _FLOAT_GGML_TYPES:
-            forced.append(plan)
-            continue
-        if target_dtype == GGMLQuantizationType.BF16 and plan.gguf_name in _ZIMAGE_PAD_TOKENS:
-            raise RuntimeError(
-                f"BF16 override is not supported for Z-Image pad token {plan.gguf_name!r}; use F16/F32 mode instead."
-            )
-        if plan.ggml_type == target_dtype:
-            forced.append(plan)
-            continue
-
-        stored_dtype, stored_nbytes = _float_storage_meta(plan.raw_shape, target_dtype)
-        forced.append(
-            replace(
-                plan,
-                ggml_type=target_dtype,
-                stored_shape=plan.raw_shape,
-                stored_dtype=stored_dtype,
-                stored_nbytes=stored_nbytes,
-            )
-        )
-    return forced
 
 
 def convert_safetensors_to_gguf(
@@ -277,36 +105,10 @@ def convert_safetensors_to_gguf(
     else:
         profile = _profiles.resolve_profile(model_config)
 
-    precision_mode = getattr(config, "precision_mode", None)
-    plus_mode_overrides = _precision_mode_plus_overrides(precision_mode, profile_id=profile.id.value)
-    full_float_target = _precision_mode_full_float_dtype(precision_mode)
-
-    if plus_mode_overrides and getattr(config, "float_group_overrides", None):
-        raise RuntimeError("precision_mode PLUS options cannot be combined with float_group_overrides")
-    if profile.id is ConverterProfileId.QWEN_IMAGE_TRANSFORMER and precision_mode in _QWEN_IMAGE_FULL_DTYPE_DOWNGRADE_MODES:
-        raise RuntimeError(
-            f"{profile.id.value} required F32 tensors cannot be downgraded by {precision_mode.value}; "
-            "use FULL_FP32, a quantized preset, or Qwen float-group controls instead."
-        )
-
-    pre_required_rules: list[CompiledTensorTypeRule] = []
-    if plus_mode_overrides:
-        pre_required_rules = _compile_float_group_override_rules(
-            profile_id=profile.id.value,
-            overrides=plus_mode_overrides,
-            reason_prefix="precision_mode plus override",
-        )
-    else:
-        pre_required_rules = _compile_float_group_override_rules(
-            profile_id=profile.id.value,
-            overrides=getattr(config, "float_group_overrides", None),
-        )
-
     requested_type = _quantization.requested_ggml_type(config.quantization)
     dtype_rules = profile.quant_policy.compile(
         quant=config.quantization,
         user_rules=config.tensor_type_overrides,
-        extra_rules_before_required=pre_required_rules,
     )
 
     if profile.arch is GGUFArch.LLAMA:
@@ -337,7 +139,6 @@ def convert_safetensors_to_gguf(
         check_cancel()
 
         plans = _tensor_planner.plan_tensors(tensor_names, sf, key_mapping, requested_type, dtype_rules)
-        plans = _force_nonquantized_tensor_dtype(plans, target_dtype=full_float_target)
 
         progress.total_steps = len(plans)
         check_cancel()

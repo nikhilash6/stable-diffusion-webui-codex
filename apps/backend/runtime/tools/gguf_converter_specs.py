@@ -14,8 +14,8 @@ Symbols (top-level; keep in sync; no ghosts):
 - `TensorNameTarget` (enum): Whether a tensor-type rule matches source names, destination names, or both.
 - `ConverterProfileId` (enum): Stable identifiers for converter profiles (one truthful id per supported component family).
 - `QuantizationCondition` (dataclass): Declarative condition for when a rule applies (include/exclude quantization selectors).
-- `TensorTypeRule` (dataclass): Declarative per-tensor dtype rule (regex + target + condition + reason).
-- `CompiledTensorTypeRule` (dataclass): Compiled rule used during planning (compiled regex + target + dtype + reason).
+- `TensorTypeRule` (dataclass): Declarative per-tensor dtype rule (regex + target + condition + dtype action + reason).
+- `CompiledTensorTypeRule` (dataclass): Compiled rule used during planning (compiled regex + target + dtype action + reason).
 - `QuantizationPolicySpec` (dataclass): Bundle of built-in dtype rules; compiles them with optional user overrides.
 - `KeyMappingSpec` (dataclass): Typed wrapper around “key mapping builders” (e.g. Llama HF→GGUF mapping).
 - `ConverterProfileSpec` (dataclass): Full conversion profile (detection + key mapping + metadata normalization + policies).
@@ -87,18 +87,32 @@ class QuantizationCondition:
 @dataclass(frozen=True, slots=True)
 class TensorTypeRule:
     pattern: str
-    ggml_type: GGMLQuantizationType
+    ggml_type: GGMLQuantizationType | None = None
+    preserve_source_dtype: bool = False
     apply_to: TensorNameTarget = TensorNameTarget.BOTH
     when: QuantizationCondition = QuantizationCondition()
     reason: str = ""
+
+    def __post_init__(self) -> None:
+        if self.preserve_source_dtype and self.ggml_type is not None:
+            raise ValueError("TensorTypeRule cannot set both ggml_type and preserve_source_dtype")
+        if not self.preserve_source_dtype and self.ggml_type is None:
+            raise ValueError("TensorTypeRule requires ggml_type unless preserve_source_dtype is true")
 
 
 @dataclass(frozen=True, slots=True)
 class CompiledTensorTypeRule:
     pattern: re.Pattern[str]
-    ggml_type: GGMLQuantizationType
+    ggml_type: GGMLQuantizationType | None
     apply_to: TensorNameTarget
+    preserve_source_dtype: bool = False
     reason: str = ""
+
+    def __post_init__(self) -> None:
+        if self.preserve_source_dtype and self.ggml_type is not None:
+            raise ValueError("CompiledTensorTypeRule cannot set both ggml_type and preserve_source_dtype")
+        if not self.preserve_source_dtype and self.ggml_type is None:
+            raise ValueError("CompiledTensorTypeRule requires ggml_type unless preserve_source_dtype is true")
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,7 +126,6 @@ class QuantizationPolicySpec:
         *,
         quant: QuantizationType,
         user_rules: Sequence[str],
-        extra_rules_before_required: Sequence[CompiledTensorTypeRule] = (),
     ) -> list[CompiledTensorTypeRule]:
         compiled: list[CompiledTensorTypeRule] = []
 
@@ -123,6 +136,7 @@ class QuantizationPolicySpec:
                 CompiledTensorTypeRule(
                     pattern=re.compile(rule.pattern),
                     ggml_type=rule.ggml_type,
+                    preserve_source_dtype=rule.preserve_source_dtype,
                     apply_to=rule.apply_to,
                     reason=rule.reason,
                 )
@@ -149,18 +163,11 @@ class QuantizationPolicySpec:
                 CompiledTensorTypeRule(
                     pattern=re.compile(pattern),
                     ggml_type=requested_ggml_type(q_enum),
+                    preserve_source_dtype=False,
                     apply_to=TensorNameTarget.BOTH,
                     reason="user override",
                 )
             )
-
-        for extra in extra_rules_before_required:
-            if not isinstance(extra, CompiledTensorTypeRule):
-                raise TypeError(
-                    "extra_rules_before_required entries must be CompiledTensorTypeRule; "
-                    f"got {type(extra).__name__}"
-                )
-            compiled.append(extra)
 
         for rule in self.required_rules:
             if not rule.when.matches(quant):
@@ -169,6 +176,7 @@ class QuantizationPolicySpec:
                 CompiledTensorTypeRule(
                     pattern=re.compile(rule.pattern),
                     ggml_type=rule.ggml_type,
+                    preserve_source_dtype=rule.preserve_source_dtype,
                     apply_to=rule.apply_to,
                     reason=rule.reason,
                 )

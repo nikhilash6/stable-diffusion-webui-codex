@@ -57,8 +57,8 @@ Status: Active
 - 2026-01-13: `ToolsTab.vue` GGUF converter supports cancellation and an Overwrite toggle (default off; fails if the output file exists).
 - 2026-03-07: `ToolsTab.vue` GGUF converter emits source/native tensor names only, posts one `profile_id` per selected component, and no longer sends layout-selection payload fields.
 - 2026-01-14: `ToolsTab.vue` right-aligns GGUF converter action rows (Overwrite + Convert/Cancel).
-- 2026-01-16: `ToolsTab.vue` now uses vendored model metadata only and exposes a Mixed toggle with an FP16/FP32 choice (advanced overrides are hidden).
-- 2026-02-23: `ToolsTab.vue` mixed precision control now uses a dedicated `precision_mode` select (`Full BF16`, `Full FP16`, `Full FP32`, `FP16+FP32`, `BF16+FP32`) and sends `precision_mode` to `/api/tools/convert-gguf`.
+- 2026-05-18: `ToolsTab.vue` uses vendored model metadata only and exposes a Mixed toggle without a dtype selector; mixed/preserved tensors keep their source dtype through backend profile policy.
+- 2026-05-18: `ToolsTab.vue` does not send `precision_mode` or `float_group_overrides` to `/api/tools/convert-gguf`; stale mixed dtype controls are removed from the live UI.
 - 2026-03-07: `ToolsTab.vue` GGUF converter presets are component-based and can surface denoisers or text encoders from vendored model metadata with truthful labels.
 - 2026-03-07: `ToolsTab.vue` exposes only the GGUF converter and SafeTensors Merger workflows in the Tools UI.
 - 2026-03-05: `ToolsTab.vue` now adds a second `Safetensors Merger` card (`POST /api/tools/merge-safetensors` + polling on `/api/tools/merge-safetensors/{job_id}`) with source/output browse, overwrite toggle, deterministic directory-picked output naming (`<stem>-merged.safetensors`), a dedicated merge status block, and a source contract limited to `.safetensors`, `*.safetensors.index.json`, or a folder (no generic `.index.json` picker/filter copy).

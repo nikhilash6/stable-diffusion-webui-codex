@@ -22,9 +22,9 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_COND_FLUX_MIXED` (constant): Condition helper matching Flux mixed presets (`Q5_K_M`/`Q4_K_M`).
 - `_COND_QWEN_IMAGE_MIXED` (constant): Condition helper matching Qwen Image mixed presets (`Q5_K_M`/`Q4_K_M`).
 - `_COND_WAN22_MIXED` (constant): Condition helper matching WAN22 mixed presets (`Q5_K_M`/`Q4_K_M`).
-- `FLUX_QUANT_POLICY` (constant): Flux per-tensor dtype policy (mixed presets keep more IO weights in float32).
-- `QWEN_IMAGE_QUANT_POLICY` (constant): Qwen Image per-tensor dtype policy (required stability tensors stay float32).
-- `WAN22_QUANT_POLICY` (constant): WAN22 per-tensor dtype policy (mixed presets keep sensitive weights in float32).
+- `FLUX_QUANT_POLICY` (constant): Flux per-tensor dtype policy (mixed presets keep more IO weights in source float dtype).
+- `QWEN_IMAGE_QUANT_POLICY` (constant): Qwen Image per-tensor dtype policy (stability tensors preserve source float dtype).
+- `WAN22_QUANT_POLICY` (constant): WAN22 per-tensor dtype policy (mixed presets keep sensitive weights in source float dtype).
 - `LTX2_QUANT_POLICY` (constant): LTX2 per-tensor dtype policy (stability-sensitive tensors stay float).
 - `ZIMAGE_QUANT_POLICY` (constant): ZImage per-tensor dtype policy (pad tokens must remain float).
 - `LLAMA_QUANT_POLICY` (constant): Llama per-tensor dtype policy (mixed presets bump key weights to higher precision).
@@ -213,27 +213,27 @@ FLUX_QUANT_POLICY = QuantizationPolicySpec(
             when=_COND_QUANTIZED,
             reason="Flux q/k norm weights stay F32 for stability",
         ),
-        # Mixed presets are explicitly allowed to trade size for quality.
+        # Mixed presets are explicitly allowed to trade size for quality while keeping source float dtype.
         TensorTypeRule(
             pattern=r"^time_text_embed\.(?:timestep_embedder|text_embedder|guidance_embedder)\.linear_2\.weight$",
-            ggml_type=GGMLQuantizationType.F32,
+            preserve_source_dtype=True,
             apply_to=TensorNameTarget.BOTH,
             when=_COND_FLUX_MIXED,
-            reason="Flux mixed preset: keep out-projections float32 for higher quality",
+            reason="Flux mixed preset: preserve out-projection source float dtype for higher quality",
         ),
         TensorTypeRule(
             pattern=r"^context_embedder\.weight$",
-            ggml_type=GGMLQuantizationType.F32,
+            preserve_source_dtype=True,
             apply_to=TensorNameTarget.BOTH,
             when=_COND_FLUX_MIXED,
-            reason="Flux mixed preset: keep txt_in float32 for higher quality",
+            reason="Flux mixed preset: preserve txt_in source float dtype for higher quality",
         ),
         TensorTypeRule(
             pattern=r"^norm_out\.linear\.weight$",
-            ggml_type=GGMLQuantizationType.F32,
+            preserve_source_dtype=True,
             apply_to=TensorNameTarget.BOTH,
             when=_COND_FLUX_MIXED,
-            reason="Flux mixed preset: keep final modulation float32 for higher quality",
+            reason="Flux mixed preset: preserve final modulation source float dtype for higher quality",
         ),
     ),
 )
@@ -244,45 +244,45 @@ QWEN_IMAGE_QUANT_POLICY = QuantizationPolicySpec(
     required_rules=(
         TensorTypeRule(
             pattern=r".*\.bias$",
-            ggml_type=GGMLQuantizationType.F32,
+            preserve_source_dtype=True,
             apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
-            reason="Qwen Image biases stay float32 for stability",
+            reason="Qwen Image biases preserve source float dtype for stability",
         ),
         TensorTypeRule(
             pattern=r"^transformer_blocks\.\d+\.attn\.(?:norm_[qk]|norm_added_[qk])\.weight$",
-            ggml_type=GGMLQuantizationType.F32,
+            preserve_source_dtype=True,
             apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
-            reason="Qwen Image q/k norm scales stay float32 for stability",
+            reason="Qwen Image q/k norm scales preserve source float dtype for stability",
         ),
         TensorTypeRule(
             pattern=r"^transformer_blocks\.\d+\.(?:img_mod|txt_mod)\.1\.(?:weight|bias)$",
-            ggml_type=GGMLQuantizationType.F32,
+            preserve_source_dtype=True,
             apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
-            reason="Qwen Image modulation tensors stay float32 for stability",
+            reason="Qwen Image modulation tensors preserve source float dtype for stability",
         ),
         TensorTypeRule(
             pattern=r"^(?:proj_out|norm_out\.linear)\.(?:weight|bias)$",
-            ggml_type=GGMLQuantizationType.F32,
+            preserve_source_dtype=True,
             apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
-            reason="Qwen Image final head tensors stay float32 for stability",
+            reason="Qwen Image final head tensors preserve source float dtype for stability",
         ),
         TensorTypeRule(
             pattern=r"^(?:img_in|txt_in)\.weight$",
-            ggml_type=GGMLQuantizationType.F32,
+            preserve_source_dtype=True,
             apply_to=TensorNameTarget.BOTH,
             when=_COND_QWEN_IMAGE_MIXED,
-            reason="Qwen Image mixed preset: keep input projections float32 for higher quality",
+            reason="Qwen Image mixed preset: preserve input projection source float dtype for higher quality",
         ),
         TensorTypeRule(
             pattern=r"^time_text_embed\.timestep_embedder\.linear_[12]\.weight$",
-            ggml_type=GGMLQuantizationType.F32,
+            preserve_source_dtype=True,
             apply_to=TensorNameTarget.BOTH,
             when=_COND_QWEN_IMAGE_MIXED,
-            reason="Qwen Image mixed preset: keep timestep embedder weights float32 for higher quality",
+            reason="Qwen Image mixed preset: preserve timestep embedder source float dtype for higher quality",
         ),
     ),
 )
@@ -322,7 +322,7 @@ WAN22_QUANT_POLICY = QuantizationPolicySpec(
             reason="WAN22 time projection to modulation is quality-sensitive; keep float",
         ),
         # Allow non-mixed quantized presets to keep the big embedder weights in float16
-        # (mixed presets can trade size for more float32 below).
+        # (mixed presets can trade size for source float dtype below).
         TensorTypeRule(
             pattern=r"^condition_embedder\.time_embedder\.linear_2\.(?:weight|bias)$",
             ggml_type=GGMLQuantizationType.F16,
@@ -373,20 +373,20 @@ WAN22_QUANT_POLICY = QuantizationPolicySpec(
             when=_COND_QUANTIZED,
             reason="WAN22 MLP biases stay float32 for stability",
         ),
-        # Mixed presets explicitly trade size for quality.
+        # Mixed presets explicitly trade size for quality while keeping source float dtype.
         TensorTypeRule(
             pattern=r"^condition_embedder\.time_embedder\.linear_2\.(?:weight|bias)$",
-            ggml_type=GGMLQuantizationType.F32,
+            preserve_source_dtype=True,
             apply_to=TensorNameTarget.BOTH,
             when=_COND_WAN22_MIXED,
-            reason="WAN22 mixed preset: keep time embedder out-projection float32 for higher quality",
+            reason="WAN22 mixed preset: preserve time embedder out-projection source float dtype for higher quality",
         ),
         TensorTypeRule(
             pattern=r"^condition_embedder\.text_embedder\.linear_(?:1|2)\.(?:weight|bias)$",
-            ggml_type=GGMLQuantizationType.F32,
+            preserve_source_dtype=True,
             apply_to=TensorNameTarget.BOTH,
             when=_COND_WAN22_MIXED,
-            reason="WAN22 mixed preset: keep text embedder weights float32 for higher quality",
+            reason="WAN22 mixed preset: preserve text embedder source float dtype for higher quality",
         ),
     ),
 )
@@ -471,6 +471,7 @@ ZIMAGE_QUANT_POLICY = QuantizationPolicySpec(
 
 LLAMA_QUANT_POLICY = QuantizationPolicySpec(
     id="llama",
+    # Llama mixed rules are quantized precision bumps, not preserved source-float groups.
     default_rules=(
         TensorTypeRule(
             pattern=r"(?:^|\.)token_embd\.weight$",

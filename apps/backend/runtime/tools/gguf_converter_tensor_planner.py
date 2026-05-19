@@ -11,8 +11,11 @@ Plans per-tensor quantization/storage settings for the source/native keyspace em
 classifiers/metadata normalizers for supported component families.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `TensorPlan` (dataclass): Planned tensor conversion entry (name/shape/type + storage strategy).
+- `TensorPlan` (dataclass): Planned tensor conversion entry (name/shape/source dtype/type + storage strategy).
 - `plan_tensors` (function): Plan per-tensor conversion settings for a safetensors source.
+- `_source_ggml_type_from_slice` (function): Reads a SafeTensors slice dtype into the matching float GGML type when supported.
+- `_rule_matches` (function): Returns whether a compiled dtype rule matches source or destination tensor names.
+- `_resolve_rule_ggml_type` (function): Resolves a compiled dtype rule, including source-dtype preservation actions.
 - `_select_ggml_type` (function): Selects an effective GGML type for a tensor (requested + per-name override rules).
 - `is_zimage_transformer_config` (function): Returns True when a config.json represents a Z-Image transformer export.
 - `normalize_zimage_transformer_metadata_config` (function): Adapts Z-Image transformer config fields to metadata helper inputs (variant-neutral; no Turbo defaulting).
@@ -48,6 +51,11 @@ from apps.backend.runtime.tools.gguf_converter_quantization import select_tensor
 from apps.backend.runtime.tools.gguf_converter_specs import CompiledTensorTypeRule
 
 _ZIMAGE_PAD_TOKENS = {"x_pad_token", "cap_pad_token"}
+_SOURCE_FLOAT_GGML_TYPES: dict[str, GGMLQuantizationType] = {
+    "F16": GGMLQuantizationType.F16,
+    "BF16": GGMLQuantizationType.BF16,
+    "F32": GGMLQuantizationType.F32,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +63,7 @@ class TensorPlan:
     src_name: str
     gguf_name: str
     raw_shape: tuple[int, ...]
+    source_ggml_type: GGMLQuantizationType | None
     ggml_type: GGMLQuantizationType
     stored_shape: tuple[int, ...]
     stored_dtype: np.dtype
@@ -75,14 +84,18 @@ def plan_tensors(
     for src_name in tensor_names:
         sl = safetensors_handle.get_slice(src_name)
         raw_shape = tuple(int(x) for x in sl.get_shape())
+        source_ggml_type, source_dtype_name = _source_ggml_type_from_slice(src_name, sl)
         gguf_name = key_mapping.get(src_name, src_name)
 
         desired = requested
         for rule in overrides:
-            if rule.apply_to.matches_src() and rule.pattern.search(src_name):
-                desired = rule.ggml_type
-            if rule.apply_to.matches_dst() and rule.pattern.search(gguf_name):
-                desired = rule.ggml_type
+            if _rule_matches(rule, src_name=src_name, gguf_name=gguf_name):
+                desired = _resolve_rule_ggml_type(
+                    rule,
+                    src_name=src_name,
+                    source_ggml_type=source_ggml_type,
+                    source_dtype_name=source_dtype_name,
+                )
         ggml_type = _select_ggml_type(raw_shape=raw_shape, gguf_name=gguf_name, desired=desired)
 
         if ggml_type == GGMLQuantizationType.F16:
@@ -107,6 +120,7 @@ def plan_tensors(
                 src_name=src_name,
                 gguf_name=gguf_name,
                 raw_shape=raw_shape,
+                source_ggml_type=source_ggml_type,
                 ggml_type=ggml_type,
                 stored_shape=stored_shape,
                 stored_dtype=stored_dtype,
@@ -117,6 +131,42 @@ def plan_tensors(
         )
 
     return plans
+
+
+def _source_ggml_type_from_slice(src_name: str, safetensors_slice: Any) -> tuple[GGMLQuantizationType | None, str]:
+    get_dtype = getattr(safetensors_slice, "get_dtype", None)
+    if not callable(get_dtype):
+        return None, "unavailable"
+    try:
+        dtype_name = str(get_dtype()).strip().upper()
+    except Exception as exc:
+        raise RuntimeError(f"Failed to read source dtype metadata for tensor {src_name!r}: {exc}") from exc
+    return _SOURCE_FLOAT_GGML_TYPES.get(dtype_name), dtype_name or "empty"
+
+
+def _rule_matches(rule: CompiledTensorTypeRule, *, src_name: str, gguf_name: str) -> bool:
+    return (rule.apply_to.matches_src() and rule.pattern.search(src_name) is not None) or (
+        rule.apply_to.matches_dst() and rule.pattern.search(gguf_name) is not None
+    )
+
+
+def _resolve_rule_ggml_type(
+    rule: CompiledTensorTypeRule,
+    *,
+    src_name: str,
+    source_ggml_type: GGMLQuantizationType | None,
+    source_dtype_name: str,
+) -> GGMLQuantizationType:
+    if rule.preserve_source_dtype:
+        if source_ggml_type is None:
+            raise RuntimeError(
+                f"Source-dtype preservation rule matched tensor {src_name!r}, but its SafeTensors dtype "
+                f"{source_dtype_name!r} is not one of F16, BF16, or F32."
+            )
+        return source_ggml_type
+    if rule.ggml_type is None:
+        raise RuntimeError(f"Compiled dtype rule for tensor {src_name!r} has no target GGML type.")
+    return rule.ggml_type
 
 
 def _select_ggml_type(
