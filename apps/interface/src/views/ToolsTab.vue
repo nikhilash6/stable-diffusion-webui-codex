@@ -15,7 +15,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `ToolsTab` (component): Tools page SFC; owns GGUF + merger form state and the shared file browser modal.
 - `GGUFConverterModelComponent` (interface): Convertible component entry (config dir + unified profile id).
 - `GGUFConverterModelMetadata` (interface): Vendored model metadata entry returned by `/api/tools/gguf-converter/presets`.
-- `GGUFForm` (interface): GGUF converter form state (model metadata + component + quant/mixed + overwrite).
+- `GGUFForm` (interface): GGUF converter form state (model metadata + component + quant/mixed/policy + overwrite).
 - `SafetensorsMergeForm` (interface): Safetensors merge form state (source path + output path + overwrite).
 - `ToolJobStatus` (interface): Polled tools job status payload (status + progress + current tensor + error).
 - `BrowserItem` (interface): Single file browser entry (file/directory + optional size).
@@ -41,6 +41,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `confirmSelection` (function): Applies the selected path to the active form field and closes the modal.
 - `formatSize` (function): Formats byte sizes for display.
 - `mixedSupported` (computed): Whether the selected quantization supports mixed variants.
+- `policyPresetSupported` (computed): Whether the selected quantization uses profile policy presets.
 - `effectiveQuantization` (computed): Derived quantization name sent to the API (base type + Mixed toggle).
 - `outputFileName` (computed): Generated output filename derived from the safetensors path (base `.gguf`).
 - `outputFullPath` (computed): Output full path (folder + generated filename).
@@ -121,14 +122,26 @@ Symbols (top-level; keep in sync; no ghosts):
                 type="button"
                 :aria-pressed="ggufForm.mixed"
                 :disabled="isConverting || !mixedSupported"
-                title="Enable mixed policy when available (e.g., Q5_K → Q5_K_M, Q4_K → Q4_K_M)"
+                title="Enable mixed quant variant when available (e.g., Q5_K → Q5_K_M, Q4_K → Q4_K_M)"
                 @click="ggufForm.mixed = !ggufForm.mixed"
               >
                 Mixed
               </button>
             </div>
             <p class="caption">
-              Mixed enables mixed quant variants when available. Preserved mixed tensors keep their source dtype.
+              Mixed only selects the mixed quant variant when available. The policy preset controls optional quality tensors.
+            </p>
+          </div>
+
+          <div v-if="policyPresetSupported" class="field">
+            <label class="label-muted">Quant Policy</label>
+            <select class="select-md" v-model="ggufForm.quantPolicyPreset" :disabled="isConverting">
+              <option value="MQ">MQ — balanced default</option>
+              <option value="HQ">HQ — conservative, larger files</option>
+              <option value="LQ">LQ — compact, more aggressive</option>
+            </select>
+            <p class="caption">
+              Controls which optional profile tensors are preserved or precision-bumped. Preserved tensors keep their source dtype.
             </p>
           </div>
 
@@ -319,6 +332,7 @@ interface GGUFForm {
   safetensorsPath: string
   quantization: string
   mixed: boolean
+  quantPolicyPreset: 'HQ' | 'MQ' | 'LQ'
   outputDir: string
   overwrite: boolean
 }
@@ -361,6 +375,7 @@ const ggufForm = ref<GGUFForm>({
   safetensorsPath: '',
   quantization: 'Q5_K',
   mixed: true,
+  quantPolicyPreset: 'MQ',
   outputDir: '',
   overwrite: false,
 })
@@ -443,6 +458,11 @@ const canMerge = computed(() => {
 const mixedSupported = computed(() => {
   const q = String(ggufForm.value.quantization || '').trim()
   return q === 'Q5_K' || q === 'Q4_K'
+})
+
+const policyPresetSupported = computed(() => {
+  const q = String(ggufForm.value.quantization || '').trim()
+  return q !== 'F16' && q !== 'F32'
 })
 
 const browserTitle = computed(() => {
@@ -557,7 +577,8 @@ const effectiveQuantization = computed(() => {
 const outputFileName = computed(() => {
   const stem = _sanitizeOutputStem(_deriveOutputStem())
   const quant = String(effectiveQuantization.value || 'F16').trim() || 'F16'
-  const base = `${stem}-${quant}-Codex`
+  const policySuffix = policyPresetSupported.value ? `-${ggufForm.value.quantPolicyPreset || 'MQ'}` : ''
+  const base = `${stem}-${quant}${policySuffix}-Codex`
   return `${base}.gguf`
 })
 
@@ -625,6 +646,9 @@ async function startConversion() {
       output_path: outputFullPath.value,
       overwrite: ggufForm.value.overwrite,
       quantization: effectiveQuantization.value,
+    }
+    if (policyPresetSupported.value) {
+      payload.quant_policy_preset = ggufForm.value.quantPolicyPreset || 'MQ'
     }
 
     const profileId = effectiveProfileId.value

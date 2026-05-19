@@ -11,7 +11,8 @@ Uses explicit converter profiles for supported text encoders and transformer/den
 
 Symbols (top-level; keep in sync; no ghosts):
 - `QuantizationType` (enum): Supported “human” quantization selectors for conversion (maps to `GGMLQuantizationType`).
-- `ConversionConfig` (dataclass): Conversion configuration (input/output paths, quantization choices, profile selection, and regex dtype overrides).
+- `QuantPolicyPreset` (enum): Quantization policy preset selector.
+- `ConversionConfig` (dataclass): Conversion configuration (input/output paths, quantization choices, profile/policy selection, and regex dtype overrides).
 - `ConversionProgress` (dataclass): Progress/report structure for long conversions (stage counters, timings, and status fields).
 - `GGUFConversionCancelled` (exception): Raised when a conversion is cancelled via a cooperative cancel signal.
 - `GGUFVerificationError` (exception): Raised when a written GGUF file fails validation/verification.
@@ -47,7 +48,9 @@ from apps.backend.runtime.tools.gguf_converter_types import (
     ConversionConfig,
     ConversionProgress,
     GGUFVerificationError,
+    QuantPolicyPreset,
     QuantizationType,
+    normalize_quant_policy_preset,
 )
 
 logger = get_backend_logger("backend.runtime.tools.gguf_converter")
@@ -105,11 +108,15 @@ def convert_safetensors_to_gguf(
     else:
         profile = _profiles.resolve_profile(model_config)
 
+    quant_policy_preset = normalize_quant_policy_preset(getattr(config, "quant_policy_preset", None))
     requested_type = _quantization.requested_ggml_type(config.quantization)
     dtype_rules = profile.quant_policy.compile(
         quant=config.quantization,
+        policy_preset=quant_policy_preset,
+        model_config=model_config,
         user_rules=config.tensor_type_overrides,
     )
+    quant_policy_id = f"{profile.quant_policy.id}_{quant_policy_preset.value.lower()}_v1"
 
     if profile.arch is GGUFArch.LLAMA:
         arch = str(model_config.get("model_type") or "llama")
@@ -149,6 +156,8 @@ def convert_safetensors_to_gguf(
             arch,
             metadata_config,
             config.quantization,
+            quant_policy=quant_policy_id,
+            quant_policy_preset=quant_policy_preset,
             config_path=config_path,
             safetensors_path=config.safetensors_path,
         )
@@ -464,6 +473,7 @@ __all__ = [
     "ConversionConfig",
     "ConversionProgress", 
     "GGUFConversionCancelled",
+    "QuantPolicyPreset",
     "QuantizationType",
     "GGUFVerificationError",
     "convert_safetensors_to_gguf",

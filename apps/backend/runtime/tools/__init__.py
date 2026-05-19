@@ -10,8 +10,9 @@ Purpose: Runtime tools facade exposing heavyweight offline-style utilities (GGUF
 Re-exports public runtime tool APIs used by `/api/tools/*` and CLI-like tooling.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `ConversionConfig` (class): Conversion configuration for SafeTensors → GGUF (inputs, outputs, verification flags).
+- `ConversionConfig` (class): Conversion configuration for SafeTensors → GGUF (inputs, outputs, profile/policy, quantization).
 - `ConversionProgress` (class): Progress callback payload emitted by the converter.
+- `QuantPolicyPreset` (class): Quant policy preset enum used by the converter.
 - `QuantizationType` (class): Quantization enum/type used by the converter.
 - `convert_safetensors_to_gguf` (function): Convert SafeTensors weights (including sharded indexes) to GGUF.
 - `SafetensorsMergeConfig` (class): Merge configuration for collapsing safetensors sources into one file.
@@ -23,6 +24,7 @@ Symbols (top-level; keep in sync; no ghosts):
 from .gguf_converter import (
     ConversionConfig,
     ConversionProgress,
+    QuantPolicyPreset,
     QuantizationType,
     convert_safetensors_to_gguf,
 )
@@ -31,6 +33,7 @@ from .safetensors_merge import SafetensorsMergeConfig, SafetensorsMergeProgress,
 __all__ = [
     "ConversionConfig",
     "ConversionProgress",
+    "QuantPolicyPreset",
     "QuantizationType",
     "SafetensorsMergeConfig",
     "SafetensorsMergeProgress",

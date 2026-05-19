@@ -19,15 +19,18 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_is_llama_hf_to_gguf` (function): Detect explicit Llama-family HF configs accepted by the Llama key mapping profile.
 - `_build_llama_mapping` (function): Build a Llama HF→GGUF key mapping from the model config.
 - `_COND_QUANTIZED` (constant): Condition helper matching any quantized preset (non-F16/F32).
-- `_COND_FLUX_MIXED` (constant): Condition helper matching Flux mixed presets (`Q5_K_M`/`Q4_K_M`).
-- `_COND_QWEN_IMAGE_MIXED` (constant): Condition helper matching Qwen Image mixed presets (`Q5_K_M`/`Q4_K_M`).
-- `_COND_WAN22_MIXED` (constant): Condition helper matching WAN22 mixed presets (`Q5_K_M`/`Q4_K_M`).
-- `FLUX_QUANT_POLICY` (constant): Flux per-tensor dtype policy (mixed presets keep more IO weights in source float dtype).
+- `_COND_QWEN_IMAGE_MIXED` (constant): Condition helper matching Qwen Image mixed quant selectors (`Q5_K_M`/`Q4_K_M`).
+- `_POLICY_HQ` (constant): Policy preset set for conservative/high-quality optional rules.
+- `_POLICY_MQ_LQ` (constant): Policy preset set for balanced/compact baseline optional rules.
+- `_POLICY_HQ_MQ` (constant): Policy preset set for Llama-family optional mixed precision bumps.
+- `_qwen_image_num_layers` (function): Reads and validates Qwen Image transformer block count for policy edge rules.
+- `_qwen_image_mq_edge_rules` (function): Builds Qwen Image MQ modulation edge-bump rules from `num_layers`.
+- `FLUX_QUANT_POLICY` (constant): Flux per-tensor dtype policy (HQ preserves optional IO weights in source float dtype).
 - `QWEN_IMAGE_QUANT_POLICY` (constant): Qwen Image per-tensor dtype policy (stability tensors preserve source float dtype).
-- `WAN22_QUANT_POLICY` (constant): WAN22 per-tensor dtype policy (mixed presets keep sensitive weights in source float dtype).
+- `WAN22_QUANT_POLICY` (constant): WAN22 per-tensor dtype policy (HQ preserves optional embedder weights in source float dtype).
 - `LTX2_QUANT_POLICY` (constant): LTX2 per-tensor dtype policy (stability-sensitive tensors stay float).
 - `ZIMAGE_QUANT_POLICY` (constant): ZImage per-tensor dtype policy (pad tokens must remain float).
-- `LLAMA_QUANT_POLICY` (constant): Llama per-tensor dtype policy (mixed presets bump key weights to higher precision).
+- `LLAMA_QUANT_POLICY` (constant): Llama per-tensor dtype policy (HQ/MQ mixed quant selectors bump key weights to higher precision).
 - `PROFILE_REGISTRY` (constant): Registry of built-in converter profiles (table-driven dispatch).
 - `_PROFILES_BY_ID` (constant): Indexed lookup table for profile ids.
 - `resolve_profile` (function): Resolve the effective `ConverterProfileSpec` from a config.json.
@@ -51,7 +54,7 @@ from apps.backend.runtime.tools.gguf_converter_specs import (
     TensorNameTarget,
     TensorTypeRule,
 )
-from apps.backend.runtime.tools.gguf_converter_types import QuantizationType
+from apps.backend.runtime.tools.gguf_converter_types import QuantPolicyPreset, QuantizationType
 
 
 def _is_flux(config: Mapping[str, Any]) -> bool:
@@ -124,13 +127,121 @@ def _build_llama_mapping(config: Mapping[str, Any]) -> dict[str, str]:
 
 
 _COND_QUANTIZED = QuantizationCondition(exclude=frozenset({QuantizationType.F16, QuantizationType.F32}))
-_COND_FLUX_MIXED = QuantizationCondition(include=frozenset({QuantizationType.Q5_K_M, QuantizationType.Q4_K_M}))
 _COND_QWEN_IMAGE_MIXED = QuantizationCondition(include=frozenset({QuantizationType.Q5_K_M, QuantizationType.Q4_K_M}))
-_COND_WAN22_MIXED = QuantizationCondition(include=frozenset({QuantizationType.Q5_K_M, QuantizationType.Q4_K_M}))
+_POLICY_HQ = frozenset({QuantPolicyPreset.HQ})
+_POLICY_MQ_LQ = frozenset({QuantPolicyPreset.MQ, QuantPolicyPreset.LQ})
+_POLICY_HQ_MQ = frozenset({QuantPolicyPreset.HQ, QuantPolicyPreset.MQ})
+
+
+def _qwen_image_num_layers(config: Mapping[str, Any]) -> int:
+    raw = config.get("num_layers")
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise RuntimeError("Qwen Image MQ policy requires integer transformer config num_layers >= 4")
+    num_layers = raw
+    if num_layers < 4:
+        raise RuntimeError("Qwen Image MQ policy requires integer transformer config num_layers >= 4")
+    return num_layers
+
+
+def _qwen_image_mq_edge_rules(
+    config: Mapping[str, Any],
+    quant: QuantizationType,
+    policy_preset: QuantPolicyPreset,
+) -> tuple[TensorTypeRule, ...]:
+    if policy_preset is not QuantPolicyPreset.MQ:
+        return ()
+    if quant in {QuantizationType.F16, QuantizationType.F32}:
+        return ()
+    num_layers = _qwen_image_num_layers(config)
+    if quant not in {QuantizationType.Q4_K_M, QuantizationType.Q5_K_M}:
+        return ()
+
+    last = num_layers - 1
+    first_last = f"(?:0|{last})"
+    adjacent = f"(?:1|{last - 1})"
+
+    if quant is QuantizationType.Q4_K_M:
+        adjacent_type = GGMLQuantizationType.Q5_K
+    else:
+        adjacent_type = GGMLQuantizationType.Q6_K
+
+    return (
+        TensorTypeRule(
+            pattern=rf"^transformer_blocks\.{first_last}\.img_mod\.1\.weight$",
+            ggml_type=GGMLQuantizationType.Q8_0,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QWEN_IMAGE_MIXED,
+            reason="Qwen Image MQ policy: keep first/last image modulation weights at Q8_0",
+        ),
+        TensorTypeRule(
+            pattern=rf"^transformer_blocks\.{first_last}\.txt_mod\.1\.weight$",
+            ggml_type=GGMLQuantizationType.Q6_K,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QWEN_IMAGE_MIXED,
+            reason="Qwen Image MQ policy: keep first/last text modulation weights at Q6_K",
+        ),
+        TensorTypeRule(
+            pattern=rf"^transformer_blocks\.{adjacent}\.(?:img_mod|txt_mod)\.1\.weight$",
+            ggml_type=adjacent_type,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QWEN_IMAGE_MIXED,
+            reason=f"Qwen Image MQ policy: keep adjacent edge modulation weights at {adjacent_type.name}",
+        ),
+    )
 
 
 FLUX_QUANT_POLICY = QuantizationPolicySpec(
     id="flux",
+    default_rules=(
+        TensorTypeRule(
+            pattern=r"^time_text_embed\.(?:timestep_embedder|text_embedder|guidance_embedder)\.linear_2\.weight$",
+            ggml_type=GGMLQuantizationType.F16,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            policy_presets=_POLICY_MQ_LQ,
+            reason="Flux MQ/LQ policy: out-projections use F16 baseline",
+        ),
+        TensorTypeRule(
+            pattern=r"^context_embedder\.weight$",
+            ggml_type=GGMLQuantizationType.F16,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            policy_presets=_POLICY_MQ_LQ,
+            reason="Flux MQ/LQ policy: txt_in uses F16 baseline",
+        ),
+        TensorTypeRule(
+            pattern=r"^norm_out\.linear\.weight$",
+            ggml_type=GGMLQuantizationType.F16,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            policy_presets=_POLICY_MQ_LQ,
+            reason="Flux MQ/LQ policy: final modulation uses F16 baseline",
+        ),
+        TensorTypeRule(
+            pattern=r"^time_text_embed\.(?:timestep_embedder|text_embedder|guidance_embedder)\.linear_2\.weight$",
+            preserve_source_dtype=True,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            policy_presets=_POLICY_HQ,
+            reason="Flux HQ policy: preserve out-projection source float dtype",
+        ),
+        TensorTypeRule(
+            pattern=r"^context_embedder\.weight$",
+            preserve_source_dtype=True,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            policy_presets=_POLICY_HQ,
+            reason="Flux HQ policy: preserve txt_in source float dtype",
+        ),
+        TensorTypeRule(
+            pattern=r"^norm_out\.linear\.weight$",
+            preserve_source_dtype=True,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            policy_presets=_POLICY_HQ,
+            reason="Flux HQ policy: preserve final modulation source float dtype",
+        ),
+    ),
     # Required model policy: do not allow user overrides to violate these.
     required_rules=(
         TensorTypeRule(
@@ -153,27 +264,6 @@ FLUX_QUANT_POLICY = QuantizationPolicySpec(
             apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="Flux output projection is quality-sensitive; keep float",
-        ),
-        TensorTypeRule(
-            pattern=r"^time_text_embed\.(?:timestep_embedder|text_embedder|guidance_embedder)\.linear_2\.weight$",
-            ggml_type=GGMLQuantizationType.F16,
-            apply_to=TensorNameTarget.BOTH,
-            when=_COND_QUANTIZED,
-            reason="Flux out-projections can be F16 without visible regressions",
-        ),
-        TensorTypeRule(
-            pattern=r"^context_embedder\.weight$",
-            ggml_type=GGMLQuantizationType.F16,
-            apply_to=TensorNameTarget.BOTH,
-            when=_COND_QUANTIZED,
-            reason="Flux txt_in can be F16 while preserving prompt semantics",
-        ),
-        TensorTypeRule(
-            pattern=r"^norm_out\.linear\.weight$",
-            ggml_type=GGMLQuantizationType.F16,
-            apply_to=TensorNameTarget.BOTH,
-            when=_COND_QUANTIZED,
-            reason="Flux final_layer modulation can be F16",
         ),
         TensorTypeRule(
             pattern=r"^(?:transformer_blocks|single_transformer_blocks)\..*\.bias$",
@@ -213,34 +303,39 @@ FLUX_QUANT_POLICY = QuantizationPolicySpec(
             when=_COND_QUANTIZED,
             reason="Flux q/k norm weights stay F32 for stability",
         ),
-        # Mixed presets are explicitly allowed to trade size for quality while keeping source float dtype.
-        TensorTypeRule(
-            pattern=r"^time_text_embed\.(?:timestep_embedder|text_embedder|guidance_embedder)\.linear_2\.weight$",
-            preserve_source_dtype=True,
-            apply_to=TensorNameTarget.BOTH,
-            when=_COND_FLUX_MIXED,
-            reason="Flux mixed preset: preserve out-projection source float dtype for higher quality",
-        ),
-        TensorTypeRule(
-            pattern=r"^context_embedder\.weight$",
-            preserve_source_dtype=True,
-            apply_to=TensorNameTarget.BOTH,
-            when=_COND_FLUX_MIXED,
-            reason="Flux mixed preset: preserve txt_in source float dtype for higher quality",
-        ),
-        TensorTypeRule(
-            pattern=r"^norm_out\.linear\.weight$",
-            preserve_source_dtype=True,
-            apply_to=TensorNameTarget.BOTH,
-            when=_COND_FLUX_MIXED,
-            reason="Flux mixed preset: preserve final modulation source float dtype for higher quality",
-        ),
     ),
 )
 
 
 QWEN_IMAGE_QUANT_POLICY = QuantizationPolicySpec(
     id="qwen_image",
+    default_rules=(
+        TensorTypeRule(
+            pattern=r"^transformer_blocks\.\d+\.(?:img_mod|txt_mod)\.1\.weight$",
+            preserve_source_dtype=True,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            policy_presets=_POLICY_HQ,
+            reason="Qwen Image HQ policy: preserve modulation weight source float dtype",
+        ),
+        TensorTypeRule(
+            pattern=r"^(?:img_in|txt_in)\.weight$",
+            preserve_source_dtype=True,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            policy_presets=_POLICY_HQ_MQ,
+            reason="Qwen Image HQ/MQ policy: preserve input projection source float dtype",
+        ),
+        TensorTypeRule(
+            pattern=r"^time_text_embed\.timestep_embedder\.linear_[12]\.weight$",
+            preserve_source_dtype=True,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            policy_presets=_POLICY_HQ_MQ,
+            reason="Qwen Image HQ/MQ policy: preserve timestep embedder source float dtype",
+        ),
+    ),
+    default_rule_factories=(_qwen_image_mq_edge_rules,),
     required_rules=(
         TensorTypeRule(
             pattern=r".*\.bias$",
@@ -257,32 +352,11 @@ QWEN_IMAGE_QUANT_POLICY = QuantizationPolicySpec(
             reason="Qwen Image q/k norm scales preserve source float dtype for stability",
         ),
         TensorTypeRule(
-            pattern=r"^transformer_blocks\.\d+\.(?:img_mod|txt_mod)\.1\.(?:weight|bias)$",
-            preserve_source_dtype=True,
-            apply_to=TensorNameTarget.BOTH,
-            when=_COND_QUANTIZED,
-            reason="Qwen Image modulation tensors preserve source float dtype for stability",
-        ),
-        TensorTypeRule(
             pattern=r"^(?:proj_out|norm_out\.linear)\.(?:weight|bias)$",
             preserve_source_dtype=True,
             apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="Qwen Image final head tensors preserve source float dtype for stability",
-        ),
-        TensorTypeRule(
-            pattern=r"^(?:img_in|txt_in)\.weight$",
-            preserve_source_dtype=True,
-            apply_to=TensorNameTarget.BOTH,
-            when=_COND_QWEN_IMAGE_MIXED,
-            reason="Qwen Image mixed preset: preserve input projection source float dtype for higher quality",
-        ),
-        TensorTypeRule(
-            pattern=r"^time_text_embed\.timestep_embedder\.linear_[12]\.weight$",
-            preserve_source_dtype=True,
-            apply_to=TensorNameTarget.BOTH,
-            when=_COND_QWEN_IMAGE_MIXED,
-            reason="Qwen Image mixed preset: preserve timestep embedder source float dtype for higher quality",
         ),
     ),
 )
@@ -290,6 +364,40 @@ QWEN_IMAGE_QUANT_POLICY = QuantizationPolicySpec(
 
 WAN22_QUANT_POLICY = QuantizationPolicySpec(
     id="wan22",
+    default_rules=(
+        TensorTypeRule(
+            pattern=r"^condition_embedder\.time_embedder\.linear_2\.(?:weight|bias)$",
+            ggml_type=GGMLQuantizationType.F16,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            policy_presets=_POLICY_MQ_LQ,
+            reason="WAN22 MQ/LQ policy: time embedding out-projection uses F16 baseline",
+        ),
+        TensorTypeRule(
+            pattern=r"^condition_embedder\.text_embedder\.linear_(?:1|2)\.(?:weight|bias)$",
+            ggml_type=GGMLQuantizationType.F16,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            policy_presets=_POLICY_MQ_LQ,
+            reason="WAN22 MQ/LQ policy: text embedder weights use F16 baseline",
+        ),
+        TensorTypeRule(
+            pattern=r"^condition_embedder\.time_embedder\.linear_2\.(?:weight|bias)$",
+            preserve_source_dtype=True,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            policy_presets=_POLICY_HQ,
+            reason="WAN22 HQ policy: preserve time embedder out-projection source float dtype",
+        ),
+        TensorTypeRule(
+            pattern=r"^condition_embedder\.text_embedder\.linear_(?:1|2)\.(?:weight|bias)$",
+            preserve_source_dtype=True,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            policy_presets=_POLICY_HQ,
+            reason="WAN22 HQ policy: preserve text embedder source float dtype",
+        ),
+    ),
     # Required model policy: do not allow user overrides to violate these.
     required_rules=(
         # IO projections + patch embed are quality-sensitive.
@@ -320,22 +428,6 @@ WAN22_QUANT_POLICY = QuantizationPolicySpec(
             apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="WAN22 time projection to modulation is quality-sensitive; keep float",
-        ),
-        # Allow non-mixed quantized presets to keep the big embedder weights in float16
-        # (mixed presets can trade size for source float dtype below).
-        TensorTypeRule(
-            pattern=r"^condition_embedder\.time_embedder\.linear_2\.(?:weight|bias)$",
-            ggml_type=GGMLQuantizationType.F16,
-            apply_to=TensorNameTarget.BOTH,
-            when=_COND_QUANTIZED,
-            reason="WAN22 time embedding out-projection can be float16 without visible regressions",
-        ),
-        TensorTypeRule(
-            pattern=r"^condition_embedder\.text_embedder\.linear_(?:1|2)\.(?:weight|bias)$",
-            ggml_type=GGMLQuantizationType.F16,
-            apply_to=TensorNameTarget.BOTH,
-            when=_COND_QUANTIZED,
-            reason="WAN22 text embedder weights can be float16 while preserving prompt semantics",
         ),
         # Stability: keep small tensors in float32.
         TensorTypeRule(
@@ -372,21 +464,6 @@ WAN22_QUANT_POLICY = QuantizationPolicySpec(
             apply_to=TensorNameTarget.BOTH,
             when=_COND_QUANTIZED,
             reason="WAN22 MLP biases stay float32 for stability",
-        ),
-        # Mixed presets explicitly trade size for quality while keeping source float dtype.
-        TensorTypeRule(
-            pattern=r"^condition_embedder\.time_embedder\.linear_2\.(?:weight|bias)$",
-            preserve_source_dtype=True,
-            apply_to=TensorNameTarget.BOTH,
-            when=_COND_WAN22_MIXED,
-            reason="WAN22 mixed preset: preserve time embedder out-projection source float dtype for higher quality",
-        ),
-        TensorTypeRule(
-            pattern=r"^condition_embedder\.text_embedder\.linear_(?:1|2)\.(?:weight|bias)$",
-            preserve_source_dtype=True,
-            apply_to=TensorNameTarget.BOTH,
-            when=_COND_WAN22_MIXED,
-            reason="WAN22 mixed preset: preserve text embedder source float dtype for higher quality",
         ),
     ),
 )
@@ -478,6 +555,7 @@ LLAMA_QUANT_POLICY = QuantizationPolicySpec(
             ggml_type=GGMLQuantizationType.Q8_0,
             apply_to=TensorNameTarget.BOTH,
             when=QuantizationCondition(include=frozenset({QuantizationType.Q5_K_M})),
+            policy_presets=_POLICY_HQ_MQ,
             reason="LLM embeddings: keep higher precision to preserve semantics",
         ),
         TensorTypeRule(
@@ -485,6 +563,7 @@ LLAMA_QUANT_POLICY = QuantizationPolicySpec(
             ggml_type=GGMLQuantizationType.Q8_0,
             apply_to=TensorNameTarget.BOTH,
             when=QuantizationCondition(include=frozenset({QuantizationType.Q5_K_M})),
+            policy_presets=_POLICY_HQ_MQ,
             reason="LLM output head: keep higher precision to preserve semantics",
         ),
         TensorTypeRule(
@@ -492,6 +571,7 @@ LLAMA_QUANT_POLICY = QuantizationPolicySpec(
             ggml_type=GGMLQuantizationType.Q8_0,
             apply_to=TensorNameTarget.BOTH,
             when=QuantizationCondition(include=frozenset({QuantizationType.Q5_K_M})),
+            policy_presets=_POLICY_HQ_MQ,
             reason="LLM embeddings: keep higher precision to preserve semantics",
         ),
         TensorTypeRule(
@@ -499,6 +579,7 @@ LLAMA_QUANT_POLICY = QuantizationPolicySpec(
             ggml_type=GGMLQuantizationType.Q8_0,
             apply_to=TensorNameTarget.BOTH,
             when=QuantizationCondition(include=frozenset({QuantizationType.Q5_K_M})),
+            policy_presets=_POLICY_HQ_MQ,
             reason="LLM output head: keep higher precision to preserve semantics",
         ),
         TensorTypeRule(
@@ -506,6 +587,7 @@ LLAMA_QUANT_POLICY = QuantizationPolicySpec(
             ggml_type=GGMLQuantizationType.Q6_K,
             apply_to=TensorNameTarget.BOTH,
             when=QuantizationCondition(include=frozenset({QuantizationType.Q5_K_M})),
+            policy_presets=_POLICY_HQ_MQ,
             reason="LLM attention projections: bump to 6-bit K",
         ),
         TensorTypeRule(
@@ -513,6 +595,7 @@ LLAMA_QUANT_POLICY = QuantizationPolicySpec(
             ggml_type=GGMLQuantizationType.Q6_K,
             apply_to=TensorNameTarget.BOTH,
             when=QuantizationCondition(include=frozenset({QuantizationType.Q5_K_M})),
+            policy_presets=_POLICY_HQ_MQ,
             reason="LLM attention projections: bump to 6-bit K",
         ),
         TensorTypeRule(
@@ -520,6 +603,7 @@ LLAMA_QUANT_POLICY = QuantizationPolicySpec(
             ggml_type=GGMLQuantizationType.Q6_K,
             apply_to=TensorNameTarget.BOTH,
             when=QuantizationCondition(include=frozenset({QuantizationType.Q4_K_M})),
+            policy_presets=_POLICY_HQ_MQ,
             reason="LLM embeddings: bump to 6-bit K",
         ),
         TensorTypeRule(
@@ -527,6 +611,7 @@ LLAMA_QUANT_POLICY = QuantizationPolicySpec(
             ggml_type=GGMLQuantizationType.Q6_K,
             apply_to=TensorNameTarget.BOTH,
             when=QuantizationCondition(include=frozenset({QuantizationType.Q4_K_M})),
+            policy_presets=_POLICY_HQ_MQ,
             reason="LLM output head: bump to 6-bit K",
         ),
         TensorTypeRule(
@@ -534,6 +619,7 @@ LLAMA_QUANT_POLICY = QuantizationPolicySpec(
             ggml_type=GGMLQuantizationType.Q6_K,
             apply_to=TensorNameTarget.BOTH,
             when=QuantizationCondition(include=frozenset({QuantizationType.Q4_K_M})),
+            policy_presets=_POLICY_HQ_MQ,
             reason="LLM embeddings: bump to 6-bit K",
         ),
         TensorTypeRule(
@@ -541,6 +627,7 @@ LLAMA_QUANT_POLICY = QuantizationPolicySpec(
             ggml_type=GGMLQuantizationType.Q6_K,
             apply_to=TensorNameTarget.BOTH,
             when=QuantizationCondition(include=frozenset({QuantizationType.Q4_K_M})),
+            policy_presets=_POLICY_HQ_MQ,
             reason="LLM output head: bump to 6-bit K",
         ),
         TensorTypeRule(
@@ -548,6 +635,7 @@ LLAMA_QUANT_POLICY = QuantizationPolicySpec(
             ggml_type=GGMLQuantizationType.Q5_K,
             apply_to=TensorNameTarget.BOTH,
             when=QuantizationCondition(include=frozenset({QuantizationType.Q4_K_M})),
+            policy_presets=_POLICY_HQ_MQ,
             reason="LLM attention projections: bump to 5-bit K",
         ),
         TensorTypeRule(
@@ -555,6 +643,7 @@ LLAMA_QUANT_POLICY = QuantizationPolicySpec(
             ggml_type=GGMLQuantizationType.Q5_K,
             apply_to=TensorNameTarget.BOTH,
             when=QuantizationCondition(include=frozenset({QuantizationType.Q4_K_M})),
+            policy_presets=_POLICY_HQ_MQ,
             reason="LLM attention projections: bump to 5-bit K",
         ),
     ),

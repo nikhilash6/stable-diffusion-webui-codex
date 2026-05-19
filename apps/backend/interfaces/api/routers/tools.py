@@ -7,7 +7,8 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Tools API routes (GGUF conversion + SafeTensors merge + file browser + PNG metadata inspection).
-Provides long-running conversion/merge job tracking, the source/native GGUF converter contract, filesystem browsing for file picker dialogs, and small utility endpoints used by the UI.
+Provides long-running conversion/merge job tracking, the source/native GGUF converter contract with quant-policy presets,
+filesystem browsing for file picker dialogs, and small utility endpoints used by the UI.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `build_router` (function): Build the APIRouter for tools endpoints.
@@ -228,6 +229,7 @@ def build_router(*, codex_root: Path) -> APIRouter:
             QuantizationType,
             convert_safetensors_to_gguf,
         )
+        from apps.backend.runtime.tools.gguf_converter_types import QuantPolicyPreset, normalize_quant_policy_preset
 
         job_id = str(uuid.uuid4())[:8]
 
@@ -237,6 +239,7 @@ def build_router(*, codex_root: Path) -> APIRouter:
             "output_path",
             "overwrite",
             "quantization",
+            "quant_policy_preset",
             "tensor_type_overrides",
             "profile_id",
         }
@@ -258,6 +261,7 @@ def build_router(*, codex_root: Path) -> APIRouter:
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         quant_str = payload.get("quantization", "F16")
+        quant_policy_preset_raw = payload.get("quant_policy_preset", None)
         overrides_raw = payload.get("tensor_type_overrides", [])
         profile_id_raw = payload.get("profile_id", None)
 
@@ -293,6 +297,14 @@ def build_router(*, codex_root: Path) -> APIRouter:
                 status_code=400,
                 detail=f"Invalid quantization: {quant_str!r} (allowed: {allowed})",
             ) from exc
+
+        if "quant_policy_preset" in payload:
+            try:
+                quant_policy_preset = normalize_quant_policy_preset(quant_policy_preset_raw)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        else:
+            quant_policy_preset = QuantPolicyPreset.MQ
 
         profile_id: str | None = None
         if profile_id_raw is not None:
@@ -348,6 +360,7 @@ def build_router(*, codex_root: Path) -> APIRouter:
                     output_path=str(ctrl.tmp_path),
                     profile_id=profile_id,
                     quantization=quant,
+                    quant_policy_preset=quant_policy_preset,
                     tensor_type_overrides=tensor_type_overrides,
                 )
 

@@ -14,7 +14,8 @@ Symbols (top-level; keep in sync; no ghosts):
 - `TensorNameTarget` (enum): Whether a tensor-type rule matches source names, destination names, or both.
 - `ConverterProfileId` (enum): Stable identifiers for converter profiles (one truthful id per supported component family).
 - `QuantizationCondition` (dataclass): Declarative condition for when a rule applies (include/exclude quantization selectors).
-- `TensorTypeRule` (dataclass): Declarative per-tensor dtype rule (regex + target + condition + dtype action + reason).
+- `TensorTypeRule` (dataclass): Declarative per-tensor dtype rule (regex + target + quant/policy conditions + dtype action + reason).
+- `PolicyRuleFactory` (type alias): Builds config-aware default rules for a policy preset.
 - `CompiledTensorTypeRule` (dataclass): Compiled rule used during planning (compiled regex + target + dtype action + reason).
 - `QuantizationPolicySpec` (dataclass): Bundle of built-in dtype rules; compiles them with optional user overrides.
 - `KeyMappingSpec` (dataclass): Typed wrapper around “key mapping builders” (e.g. Llama HF→GGUF mapping).
@@ -30,7 +31,7 @@ from typing import Any, Callable, Literal, Mapping, Sequence
 
 from apps.backend.quantization.gguf import GGMLQuantizationType
 from apps.backend.runtime.tools.gguf_converter_quantization import requested_ggml_type
-from apps.backend.runtime.tools.gguf_converter_types import QuantizationType
+from apps.backend.runtime.tools.gguf_converter_types import QuantPolicyPreset, QuantizationType
 
 _TensorNameTargetLiteral = Literal["src", "dst", "both"]
 
@@ -91,6 +92,7 @@ class TensorTypeRule:
     preserve_source_dtype: bool = False
     apply_to: TensorNameTarget = TensorNameTarget.BOTH
     when: QuantizationCondition = QuantizationCondition()
+    policy_presets: frozenset[QuantPolicyPreset] | None = None
     reason: str = ""
 
     def __post_init__(self) -> None:
@@ -115,32 +117,29 @@ class CompiledTensorTypeRule:
             raise ValueError("CompiledTensorTypeRule requires ggml_type unless preserve_source_dtype is true")
 
 
+PolicyRuleFactory = Callable[[Mapping[str, Any], QuantizationType, QuantPolicyPreset], Sequence[TensorTypeRule]]
+
+
 @dataclass(frozen=True, slots=True)
 class QuantizationPolicySpec:
     id: str
     default_rules: tuple[TensorTypeRule, ...] = ()
+    default_rule_factories: tuple[PolicyRuleFactory, ...] = ()
     required_rules: tuple[TensorTypeRule, ...] = ()
 
     def compile(
         self,
         *,
         quant: QuantizationType,
+        policy_preset: QuantPolicyPreset,
+        model_config: Mapping[str, Any],
         user_rules: Sequence[str],
     ) -> list[CompiledTensorTypeRule]:
         compiled: list[CompiledTensorTypeRule] = []
 
-        for rule in self.default_rules:
-            if not rule.when.matches(quant):
-                continue
-            compiled.append(
-                CompiledTensorTypeRule(
-                    pattern=re.compile(rule.pattern),
-                    ggml_type=rule.ggml_type,
-                    preserve_source_dtype=rule.preserve_source_dtype,
-                    apply_to=rule.apply_to,
-                    reason=rule.reason,
-                )
-            )
+        for rule in self._iter_default_rules(model_config=model_config, quant=quant, policy_preset=policy_preset):
+            if self._rule_matches_context(rule, quant=quant, policy_preset=policy_preset):
+                compiled.append(self._compile_rule(rule))
 
         for entry in user_rules:
             raw = str(entry or "").strip()
@@ -170,19 +169,44 @@ class QuantizationPolicySpec:
             )
 
         for rule in self.required_rules:
-            if not rule.when.matches(quant):
-                continue
-            compiled.append(
-                CompiledTensorTypeRule(
-                    pattern=re.compile(rule.pattern),
-                    ggml_type=rule.ggml_type,
-                    preserve_source_dtype=rule.preserve_source_dtype,
-                    apply_to=rule.apply_to,
-                    reason=rule.reason,
-                )
-            )
+            if self._rule_matches_context(rule, quant=quant, policy_preset=policy_preset):
+                compiled.append(self._compile_rule(rule))
 
         return compiled
+
+    def _iter_default_rules(
+        self,
+        *,
+        model_config: Mapping[str, Any],
+        quant: QuantizationType,
+        policy_preset: QuantPolicyPreset,
+    ) -> tuple[TensorTypeRule, ...]:
+        generated: list[TensorTypeRule] = []
+        for factory in self.default_rule_factories:
+            generated.extend(factory(model_config, quant, policy_preset))
+        return (*self.default_rules, *generated)
+
+    def _rule_matches_context(
+        self,
+        rule: TensorTypeRule,
+        *,
+        quant: QuantizationType,
+        policy_preset: QuantPolicyPreset,
+    ) -> bool:
+        if not rule.when.matches(quant):
+            return False
+        if rule.policy_presets is not None and policy_preset not in rule.policy_presets:
+            return False
+        return True
+
+    def _compile_rule(self, rule: TensorTypeRule) -> CompiledTensorTypeRule:
+        return CompiledTensorTypeRule(
+            pattern=re.compile(rule.pattern),
+            ggml_type=rule.ggml_type,
+            preserve_source_dtype=rule.preserve_source_dtype,
+            apply_to=rule.apply_to,
+            reason=rule.reason,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +231,7 @@ __all__ = [
     "ConverterProfileSpec",
     "GGUFArch",
     "KeyMappingSpec",
+    "PolicyRuleFactory",
     "QuantizationCondition",
     "QuantizationPolicySpec",
     "TensorNameTarget",

@@ -7,12 +7,12 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: GGUF metadata injection helpers for the converter.
-Adds provenance/source metadata and minimal architecture keys required by loader tooling
+Adds provenance, quant-policy, and minimal architecture keys required by loader tooling
 (including Qwen Image transformer metadata and `codex.zimage.variant` when detectable from scheduler configs).
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_is_hf_repo_id` (function): Returns True when a string looks like a Hugging Face repo id (`org/repo`).
-- `add_basic_metadata` (function): Adds standard provenance/license metadata keys into the output GGUF.
+- `add_basic_metadata` (function): Adds standard provenance, architecture, quantization, and quant-policy metadata keys into the output GGUF.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from pathlib import Path
 
 from apps.backend.quantization.gguf import GGUFWriter
 from apps.backend.infra.config.provenance import CODEX_GENERATED_BY, CODEX_REPO_URL, best_effort_git_commit
-from apps.backend.runtime.tools.gguf_converter_types import QuantizationType
+from apps.backend.runtime.tools.gguf_converter_types import QuantPolicyPreset, QuantizationType
 
 
 def _is_hf_repo_id(value: str) -> bool:
@@ -42,6 +42,8 @@ def add_basic_metadata(
     config: dict,
     quant: QuantizationType,
     *,
+    quant_policy: str,
+    quant_policy_preset: QuantPolicyPreset,
     config_path: Path,
     safetensors_path: str,
 ) -> None:
@@ -94,6 +96,8 @@ def add_basic_metadata(
 
     writer.add_string("gguf.quantized_at_utc", _dt.datetime.now(tz=_dt.timezone.utc).isoformat())
     writer.add_string("gguf.quantization", str(quant.value))
+    writer.add_string("codex.quant_policy", str(quant_policy))
+    writer.add_string("codex.quant_policy_preset", str(quant_policy_preset.value))
 
     # Z-Image Turbo/Base disambiguation: when converting from a diffusers-style directory
     # layout, the scheduler_config.json contains the canonical `shift` (3.0 turbo / 6.0 base).
