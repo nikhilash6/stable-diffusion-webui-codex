@@ -7,12 +7,12 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: GGUF metadata injection helpers for the converter.
-Adds provenance, quant-policy, and minimal architecture keys required by loader tooling
+Adds provenance, quantization recipe/policy, and minimal architecture keys required by loader tooling
 (including Qwen Image transformer metadata and `codex.zimage.variant` when detectable from scheduler configs).
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_is_hf_repo_id` (function): Returns True when a string looks like a Hugging Face repo id (`org/repo`).
-- `add_basic_metadata` (function): Adds standard provenance, architecture, quantization, and quant-policy metadata keys into the output GGUF.
+- `add_basic_metadata` (function): Adds standard provenance, architecture, quant recipe, and optional quant-policy metadata keys into the output GGUF.
 """
 
 from __future__ import annotations
@@ -24,7 +24,8 @@ from pathlib import Path
 
 from apps.backend.quantization.gguf import GGUFWriter
 from apps.backend.infra.config.provenance import CODEX_GENERATED_BY, CODEX_REPO_URL, best_effort_git_commit
-from apps.backend.runtime.tools.gguf_converter_types import QuantPolicyPreset, QuantizationType
+from apps.backend.runtime.tools.gguf_converter_quantization import QuantizationRecipeSpec
+from apps.backend.runtime.tools.gguf_converter_types import QuantPolicyPreset
 
 
 def _is_hf_repo_id(value: str) -> bool:
@@ -40,10 +41,10 @@ def add_basic_metadata(
     writer: GGUFWriter,
     arch: str,
     config: dict,
-    quant: QuantizationType,
+    recipe: QuantizationRecipeSpec,
     *,
-    quant_policy: str,
-    quant_policy_preset: QuantPolicyPreset,
+    quant_policy: str | None,
+    quant_policy_preset: QuantPolicyPreset | None,
     config_path: Path,
     safetensors_path: str,
 ) -> None:
@@ -95,9 +96,14 @@ def add_basic_metadata(
         writer.add_array("codex.qwen_image.axes_dims_rope", axes_dims_rope)
 
     writer.add_string("gguf.quantized_at_utc", _dt.datetime.now(tz=_dt.timezone.utc).isoformat())
-    writer.add_string("gguf.quantization", str(quant.value))
-    writer.add_string("codex.quant_policy", str(quant_policy))
-    writer.add_string("codex.quant_policy_preset", str(quant_policy_preset.value))
+    writer.add_file_type(int(recipe.llama_file_type))
+    writer.add_quantization_version(int(recipe.quantization_version))
+    writer.add_string("gguf.quantization", recipe.recipe.value)
+    writer.add_string("codex.quant_recipe", recipe.recipe.value)
+    writer.add_string("codex.quant_base_type", recipe.default_tensor_type.value)
+    if quant_policy is not None and quant_policy_preset is not None:
+        writer.add_string("codex.quant_policy", str(quant_policy))
+        writer.add_string("codex.quant_policy_preset", str(quant_policy_preset.value))
 
     # Z-Image Turbo/Base disambiguation: when converting from a diffusers-style directory
     # layout, the scheduler_config.json contains the canonical `shift` (3.0 turbo / 6.0 base).

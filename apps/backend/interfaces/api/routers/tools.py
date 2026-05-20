@@ -7,8 +7,8 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Tools API routes (GGUF conversion + SafeTensors merge + file browser + PNG metadata inspection).
-Provides long-running conversion/merge job tracking, the source/native GGUF converter contract with quant-policy presets,
-filesystem browsing for file picker dialogs, and small utility endpoints used by the UI.
+Provides long-running conversion/merge job tracking, the source/native GGUF converter recipe/policy descriptor contract,
+preflighted conversion job creation, filesystem browsing for file picker dialogs, and small utility endpoints used by the UI.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `build_router` (function): Build the APIRouter for tools endpoints.
@@ -195,10 +195,36 @@ def build_router(*, codex_root: Path) -> APIRouter:
     @router.get("/api/tools/gguf-converter/presets")
     async def list_gguf_converter_presets() -> Dict[str, Any]:
         from apps.backend.runtime.tools.gguf_converter_model_metadata import list_vendored_gguf_converter_model_metadata
+        from apps.backend.runtime.tools.gguf_converter_profiles import profile_by_id
+        from apps.backend.runtime.tools.gguf_converter_quantization import (
+            all_quantization_recipe_specs,
+            all_tensor_quantization_type_specs,
+        )
 
         models = list_vendored_gguf_converter_model_metadata(codex_root=codex_root)
 
+        def component_quantization_payload(config_dir: str, profile_id: str | None) -> dict[str, Any] | None:
+            if profile_id is None:
+                return None
+            profile = profile_by_id(profile_id)
+            cfg = json.loads((Path(config_dir) / "config.json").read_text(encoding="utf-8"))
+            return profile.quant_policy.surface_descriptor(profile_id=profile.id, model_config=cfg).to_payload()
+
         return {
+            "quantization_recipes": [
+                {
+                    "id": spec.recipe.value,
+                    "label": spec.label,
+                    "group": spec.group,
+                    "description": spec.description,
+                    "default_tensor_type": spec.default_tensor_type.value,
+                    "file_type": spec.llama_file_type.name,
+                    "family": spec.family,
+                    "tier": spec.tier,
+                }
+                for spec in all_quantization_recipe_specs()
+            ],
+            "tensor_quantization_types": list(all_tensor_quantization_type_specs()),
             "models": [
                 {
                     "id": m.id,
@@ -212,6 +238,7 @@ def build_router(*, codex_root: Path) -> APIRouter:
                             "config_dir": c.config_dir,
                             "kind": c.kind,
                             "profile_id": c.profile_id,
+                            "quantization": component_quantization_payload(c.config_dir, c.profile_id),
                         }
                         for c in m.components
                     ],
@@ -226,10 +253,13 @@ def build_router(*, codex_root: Path) -> APIRouter:
         from apps.backend.runtime.tools.gguf_converter import (
             ConversionConfig,
             GGUFConversionCancelled,
-            QuantizationType,
             convert_safetensors_to_gguf,
+            preflight_conversion_contract,
         )
-        from apps.backend.runtime.tools.gguf_converter_types import QuantPolicyPreset, normalize_quant_policy_preset
+        from apps.backend.runtime.tools.gguf_converter_types import (
+            normalize_quant_policy_preset,
+            normalize_quantization_recipe,
+        )
 
         job_id = str(uuid.uuid4())[:8]
 
@@ -290,21 +320,13 @@ def build_router(*, codex_root: Path) -> APIRouter:
             raise HTTPException(status_code=400, detail=f"Output path is a directory: {final_path}")
 
         try:
-            quant = QuantizationType(quant_str)
-        except ValueError as exc:
-            allowed = ", ".join(q.value for q in QuantizationType)
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid quantization: {quant_str!r} (allowed: {allowed})",
-            ) from exc
-
-        if "quant_policy_preset" in payload:
-            try:
+            quant = normalize_quantization_recipe(quant_str)
+            if "quant_policy_preset" in payload:
                 quant_policy_preset = normalize_quant_policy_preset(quant_policy_preset_raw)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-        else:
-            quant_policy_preset = QuantPolicyPreset.MQ
+            else:
+                quant_policy_preset = None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         profile_id: str | None = None
         if profile_id_raw is not None:
@@ -322,6 +344,23 @@ def build_router(*, codex_root: Path) -> APIRouter:
             tensor_type_overrides = [ln.strip() for ln in overrides_raw.splitlines() if ln.strip()]
         elif isinstance(overrides_raw, list):
             tensor_type_overrides = [str(x).strip() for x in overrides_raw if str(x).strip()]
+
+        preflight_config = ConversionConfig(
+            config_path=config_path,
+            safetensors_path=safetensors_path,
+            output_path=str(final_path),
+            profile_id=profile_id,
+            quantization=quant,
+            quant_policy_preset=quant_policy_preset,
+            tensor_type_overrides=tensor_type_overrides,
+        )
+        try:
+            preflight = preflight_conversion_contract(
+                preflight_config,
+                quant_policy_preset_explicit="quant_policy_preset" in payload,
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         final_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_handle = tempfile.NamedTemporaryFile(
@@ -360,7 +399,7 @@ def build_router(*, codex_root: Path) -> APIRouter:
                     output_path=str(ctrl.tmp_path),
                     profile_id=profile_id,
                     quantization=quant,
-                    quant_policy_preset=quant_policy_preset,
+                    quant_policy_preset=preflight.quant_policy_preset,
                     tensor_type_overrides=tensor_type_overrides,
                 )
 

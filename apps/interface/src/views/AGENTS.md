@@ -1,7 +1,7 @@
 # apps/interface/src/views Overview
 <!-- tags: frontend, views, model-tabs -->
 Date: 2025-10-28
-Last Review: 2026-05-18
+Last Review: 2026-05-19
 Status: Active
 
 ## Purpose
@@ -57,8 +57,8 @@ Status: Active
 - 2026-01-13: `ToolsTab.vue` GGUF converter supports cancellation and an Overwrite toggle (default off; fails if the output file exists).
 - 2026-03-07: `ToolsTab.vue` GGUF converter emits source/native tensor names only, posts one `profile_id` per selected component, and no longer sends layout-selection payload fields.
 - 2026-01-14: `ToolsTab.vue` right-aligns GGUF converter action rows (Overwrite + Convert/Cancel).
-- 2026-05-18: `ToolsTab.vue` uses vendored model metadata only, exposes Mixed as a quant-variant toggle (`Q5_K_M` / `Q4_K_M`), and exposes global `Quant Policy` (`HQ|MQ|LQ`) for optional profile quality behavior.
-- 2026-05-18: `ToolsTab.vue` sends `quant_policy_preset` for quantized GGUF conversions, includes the policy in generated quantized filenames, and does not send removed dtype controls such as `precision_mode` or `float_group_overrides`.
+- 2026-05-19: `ToolsTab.vue` uses vendored model metadata plus backend-owned quantization descriptors only. It exposes canonical GGUF file recipes directly (`Q4_K_M`, `Q4_K_S`, `Q3_K_L/M/S`, etc.) and no separate quant-variant toggle.
+- 2026-05-19: `ToolsTab.vue` shows `Profile Policy` only for selected profile+recipe pairs with backend-reported distinct policy states, sends `quant_policy_preset` only then, and never sends dtype-control payload fields.
 - 2026-03-07: `ToolsTab.vue` GGUF converter presets are component-based and can surface denoisers or text encoders from vendored model metadata with truthful labels.
 - 2026-03-07: `ToolsTab.vue` exposes only the GGUF converter and SafeTensors Merger workflows in the Tools UI.
 - 2026-03-05: `ToolsTab.vue` now adds a second `Safetensors Merger` card (`POST /api/tools/merge-safetensors` + polling on `/api/tools/merge-safetensors/{job_id}`) with source/output browse, overwrite toggle, deterministic directory-picked output naming (`<stem>-merged.safetensors`), a dedicated merge status block, and a source contract limited to `.safetensors`, `*.safetensors.index.json`, or a folder (no generic `.index.json` picker/filter copy).

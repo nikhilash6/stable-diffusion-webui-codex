@@ -15,7 +15,9 @@ Symbols (top-level; keep in sync; no ghosts):
 - `ToolsTab` (component): Tools page SFC; owns GGUF + merger form state and the shared file browser modal.
 - `GGUFConverterModelComponent` (interface): Convertible component entry (config dir + unified profile id).
 - `GGUFConverterModelMetadata` (interface): Vendored model metadata entry returned by `/api/tools/gguf-converter/presets`.
-- `GGUFForm` (interface): GGUF converter form state (model metadata + component + quant/mixed/policy + overwrite).
+- `QuantizationSurfaceDescriptor` (interface): Backend-owned recipe/policy support descriptor for one GGUF component.
+- `QuantizationRecipeOption` (interface): Backend-owned public GGUF recipe option descriptor.
+- `GGUFForm` (interface): GGUF converter form state (model metadata + component + recipe/policy + overwrite).
 - `SafetensorsMergeForm` (interface): Safetensors merge form state (source path + output path + overwrite).
 - `ToolJobStatus` (interface): Polled tools job status payload (status + progress + current tensor + error).
 - `BrowserItem` (interface): Single file browser entry (file/directory + optional size).
@@ -40,9 +42,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `openItem` (function): Opens a directory (or confirms selection for files).
 - `confirmSelection` (function): Applies the selected path to the active form field and closes the modal.
 - `formatSize` (function): Formats byte sizes for display.
-- `mixedSupported` (computed): Whether the selected quantization supports mixed variants.
 - `policyPresetSupported` (computed): Whether the selected quantization uses profile policy presets.
-- `effectiveQuantization` (computed): Derived quantization name sent to the API (base type + Mixed toggle).
 - `outputFileName` (computed): Generated output filename derived from the safetensors path (base `.gguf`).
 - `outputFullPath` (computed): Output full path (folder + generated filename).
 - `mergeOutputFileName` (computed): Deterministic merge output filename derived from merge source path (`-merged.safetensors`).
@@ -94,51 +94,23 @@ Symbols (top-level; keep in sync; no ghosts):
           <div class="field">
             <label class="label-muted">Quantization</label>
             <div class="row-inline">
-              <select class="select-md cdx-tools-grow" v-model="ggufForm.quantization" :disabled="isConverting">
-                <optgroup label="Float (no quant)">
-                  <option value="F16">F16 — float16</option>
-                  <option value="F32">F32 — float32</option>
-                </optgroup>
-                <optgroup label="K-quants">
-                  <option value="Q8_0">Q8_0 — 8-bit</option>
-                  <option value="Q6_K">Q6_K — 6-bit K</option>
-                  <option value="Q5_K">Q5_K — 5-bit K</option>
-                  <option value="Q4_K">Q4_K — 4-bit K</option>
-                  <option value="Q3_K">Q3_K — 3-bit K</option>
-                  <option value="Q2_K">Q2_K — 2-bit K</option>
-                </optgroup>
-                <optgroup label="Legacy">
-                  <option value="Q5_1">Q5_1 — 5-bit legacy</option>
-                  <option value="Q5_0">Q5_0 — 5-bit legacy</option>
-                  <option value="Q4_1">Q4_1 — 4-bit legacy</option>
-                  <option value="Q4_0">Q4_0 — 4-bit legacy</option>
-                </optgroup>
-                <optgroup label="Experimental">
-                  <option value="IQ4_NL">IQ4_NL — 4-bit IQ (NL)</option>
+              <select class="select-md cdx-tools-grow" v-model="ggufForm.quantization" :disabled="isConverting || quantizationRecipeGroups.length === 0">
+                <optgroup v-for="group in quantizationRecipeGroups" :key="group.label" :label="group.label">
+                  <option v-for="recipe in group.options" :key="recipe.id" :value="recipe.id">
+                    {{ recipe.label }} — {{ recipe.description }}
+                  </option>
                 </optgroup>
               </select>
-              <button
-                :class="['btn', 'qs-toggle-btn', ggufForm.mixed ? 'qs-toggle-btn--on' : 'qs-toggle-btn--off']"
-                type="button"
-                :aria-pressed="ggufForm.mixed"
-                :disabled="isConverting || !mixedSupported"
-                title="Enable mixed quant variant when available (e.g., Q5_K → Q5_K_M, Q4_K → Q4_K_M)"
-                @click="ggufForm.mixed = !ggufForm.mixed"
-              >
-                Mixed
-              </button>
             </div>
             <p class="caption">
-              Mixed only selects the mixed quant variant when available. The policy preset controls optional quality tensors.
+              Choose the GGUF file recipe directly. Profile support is backend-owned per selected component.
             </p>
           </div>
 
           <div v-if="policyPresetSupported" class="field">
-            <label class="label-muted">Quant Policy</label>
+            <label class="label-muted">Profile Policy</label>
             <select class="select-md" v-model="ggufForm.quantPolicyPreset" :disabled="isConverting">
-              <option value="MQ">MQ — balanced default</option>
-              <option value="HQ">HQ — conservative, larger files</option>
-              <option value="LQ">LQ — compact, more aggressive</option>
+              <option v-for="preset in profilePolicyOptions" :key="preset.id" :value="preset.id">{{ preset.label }}</option>
             </select>
             <p class="caption">
               Controls which optional profile tensors are preserved or precision-bumped. Preserved tensors keep their source dtype.
@@ -310,12 +282,32 @@ Symbols (top-level; keep in sync; no ghosts):
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import Modal from '../components/ui/Modal.vue'
 
+interface QuantizationSurfaceDescriptor {
+  profile_id: string
+  supported_recipes: string[]
+  default_recipe: string
+  policy_presets_by_recipe: Record<string, string[]>
+  default_policy_preset_by_recipe: Record<string, string | null>
+}
+
+interface QuantizationRecipeOption {
+  id: string
+  label: string
+  group: string
+  description: string
+  default_tensor_type: string
+  file_type: string
+  family: string
+  tier: string
+}
+
 interface GGUFConverterModelComponent {
   id: string
   label: string
   config_dir: string
   kind: string
   profile_id: string | null
+  quantization: QuantizationSurfaceDescriptor | null
 }
 
 interface GGUFConverterModelMetadata {
@@ -331,8 +323,7 @@ interface GGUFForm {
   componentId: string
   safetensorsPath: string
   quantization: string
-  mixed: boolean
-  quantPolicyPreset: 'HQ' | 'MQ' | 'LQ'
+  quantPolicyPreset: 'HQ' | 'MQ' | 'LQ' | ''
   outputDir: string
   overwrite: boolean
 }
@@ -366,6 +357,7 @@ interface BrowserData {
 type BrowserMode = 'gguf_safetensors' | 'gguf_output_dir' | 'merge_source' | 'merge_output_dir'
 
 const modelMetadata = ref<GGUFConverterModelMetadata[]>([])
+const quantizationRecipes = ref<QuantizationRecipeOption[]>([])
 const metadataLoading = ref(false)
 const metadataError = ref<string | null>(null)
 
@@ -373,8 +365,7 @@ const ggufForm = ref<GGUFForm>({
   modelId: '',
   componentId: '',
   safetensorsPath: '',
-  quantization: 'Q5_K',
-  mixed: true,
+  quantization: 'Q4_K_M',
   quantPolicyPreset: 'MQ',
   outputDir: '',
   overwrite: false,
@@ -408,6 +399,46 @@ const selectedComponent = computed(() => {
 })
 
 const effectiveProfileId = computed(() => selectedComponent.value?.profile_id ?? null)
+const selectedQuantizationSurface = computed(() => selectedComponent.value?.quantization ?? null)
+
+const supportedQuantizationRecipes = computed(() => {
+  const surface = selectedQuantizationSurface.value
+  if (!surface) return []
+  const supported = new Set(surface.supported_recipes || [])
+  return quantizationRecipes.value.filter((recipe) => supported.has(recipe.id))
+})
+
+const quantizationRecipeGroups = computed(() => {
+  const groups: { label: string; options: QuantizationRecipeOption[] }[] = []
+  for (const recipe of supportedQuantizationRecipes.value) {
+    let group = groups.find((entry) => entry.label === recipe.group)
+    if (!group) {
+      group = { label: recipe.group, options: [] }
+      groups.push(group)
+    }
+    group.options.push(recipe)
+  }
+  return groups
+})
+
+const selectedRecipePolicyPresets = computed(() => {
+  const surface = selectedQuantizationSurface.value
+  const recipe = String(ggufForm.value.quantization || '').trim()
+  if (!surface || !recipe) return []
+  const values = surface.policy_presets_by_recipe?.[recipe]
+  return Array.isArray(values) ? values : []
+})
+
+const policyPresetSupported = computed(() => selectedRecipePolicyPresets.value.length > 0)
+
+const profilePolicyOptions = computed(() => {
+  const labels: Record<string, string> = {
+    HQ: 'HQ — conservative, larger files',
+    MQ: 'MQ — balanced default',
+    LQ: 'LQ — compact, more aggressive',
+  }
+  return selectedRecipePolicyPresets.value.map((id) => ({ id, label: labels[id] ?? id }))
+})
 
 function _titleizeWords(raw: string): string {
   return String(raw || '')
@@ -442,7 +473,10 @@ const isConverting = computed(() => {
 })
 
 const canConvert = computed(() => {
-  return Boolean(selectedComponent.value && ggufForm.value.safetensorsPath && ggufForm.value.outputDir)
+  const surface = selectedQuantizationSurface.value
+  const recipe = String(ggufForm.value.quantization || '').trim()
+  const recipeSupported = Boolean(surface && surface.supported_recipes.includes(recipe))
+  return Boolean(selectedComponent.value && recipeSupported && ggufForm.value.safetensorsPath && ggufForm.value.outputDir)
 })
 
 const isMerging = computed(() => {
@@ -454,16 +488,6 @@ const isMerging = computed(() => {
 
 const canMerge = computed(() => {
   return Boolean(String(mergeForm.value.sourcePath || '').trim() && String(mergeForm.value.outputPath || '').trim())
-})
-
-const mixedSupported = computed(() => {
-  const q = String(ggufForm.value.quantization || '').trim()
-  return q === 'Q5_K' || q === 'Q4_K'
-})
-
-const policyPresetSupported = computed(() => {
-  const q = String(ggufForm.value.quantization || '').trim()
-  return q !== 'F16' && q !== 'F32'
 })
 
 const browserTitle = computed(() => {
@@ -567,18 +591,42 @@ function _normalizeToolJobStatus(data: any): ToolJobStatus {
   }
 }
 
-const effectiveQuantization = computed(() => {
-  const q = String(ggufForm.value.quantization || 'F16').trim() || 'F16'
-  if (!ggufForm.value.mixed || !mixedSupported.value) return q
-  if (q === 'Q5_K') return 'Q5_K_M'
-  if (q === 'Q4_K') return 'Q4_K_M'
-  return q
-})
+function syncQuantizationSelection() {
+  const surface = selectedQuantizationSurface.value
+  if (!surface) {
+    ggufForm.value.quantPolicyPreset = ''
+    return
+  }
+
+  const supported = new Set(surface.supported_recipes || [])
+  const fallbackRecipe = surface.default_recipe || supportedQuantizationRecipes.value[0]?.id || 'F16'
+  if (!supported.has(String(ggufForm.value.quantization || '').trim())) {
+    ggufForm.value.quantization = fallbackRecipe
+  }
+
+  const recipe = String(ggufForm.value.quantization || '').trim()
+  const presets = Array.isArray(surface.policy_presets_by_recipe?.[recipe])
+    ? surface.policy_presets_by_recipe[recipe]
+    : []
+  if (presets.length === 0) {
+    ggufForm.value.quantPolicyPreset = ''
+    return
+  }
+
+  const current = String(ggufForm.value.quantPolicyPreset || '').trim()
+  if (!presets.includes(current)) {
+    const defaultPreset = surface.default_policy_preset_by_recipe?.[recipe]
+    ggufForm.value.quantPolicyPreset = (defaultPreset && presets.includes(defaultPreset) ? defaultPreset : presets[0]) as
+      | 'HQ'
+      | 'MQ'
+      | 'LQ'
+  }
+}
 
 const outputFileName = computed(() => {
   const stem = _sanitizeOutputStem(_deriveOutputStem())
-  const quant = String(effectiveQuantization.value || 'F16').trim() || 'F16'
-  const policySuffix = policyPresetSupported.value ? `-${ggufForm.value.quantPolicyPreset || 'MQ'}` : ''
+  const quant = String(ggufForm.value.quantization || 'F16').trim() || 'F16'
+  const policySuffix = policyPresetSupported.value && ggufForm.value.quantPolicyPreset ? `-${ggufForm.value.quantPolicyPreset}` : ''
   const base = `${stem}-${quant}${policySuffix}-Codex`
   return `${base}.gguf`
 })
@@ -596,30 +644,27 @@ async function loadModelMetadata() {
     }
 
     const models = Array.isArray((data as any)?.models) ? ((data as any).models as GGUFConverterModelMetadata[]) : []
+    const recipes = Array.isArray((data as any)?.quantization_recipes)
+      ? ((data as any).quantization_recipes as QuantizationRecipeOption[])
+      : []
     modelMetadata.value = models
+    quantizationRecipes.value = recipes
 
     if (!ggufForm.value.modelId && models.length > 0) {
       ggufForm.value.modelId = models[0].id
       ggufForm.value.componentId = models[0].components[0]?.id || ''
     }
+    syncQuantizationSelection()
 
     metadataError.value = null
   } catch (e: any) {
     modelMetadata.value = []
+    quantizationRecipes.value = []
     metadataError.value = String(e?.message || e)
   } finally {
     metadataLoading.value = false
   }
 }
-
-watch(
-  () => ggufForm.value.quantization,
-  (q) => {
-    if (!['Q5_K', 'Q4_K'].includes(String(q || '').trim())) {
-      ggufForm.value.mixed = false
-    }
-  },
-)
 
 watch(
   () => ggufForm.value.modelId,
@@ -632,6 +677,21 @@ watch(
     if (!model.components.find((c) => c.id === ggufForm.value.componentId)) {
       ggufForm.value.componentId = model.components[0]?.id || ''
     }
+    syncQuantizationSelection()
+  },
+)
+
+watch(
+  () => ggufForm.value.componentId,
+  () => {
+    syncQuantizationSelection()
+  },
+)
+
+watch(
+  () => ggufForm.value.quantization,
+  () => {
+    syncQuantizationSelection()
   },
 )
 
@@ -646,10 +706,10 @@ async function startConversion() {
       safetensors_path: ggufForm.value.safetensorsPath,
       output_path: outputFullPath.value,
       overwrite: ggufForm.value.overwrite,
-      quantization: effectiveQuantization.value,
+      quantization: ggufForm.value.quantization,
     }
     if (policyPresetSupported.value) {
-      payload.quant_policy_preset = ggufForm.value.quantPolicyPreset || 'MQ'
+      payload.quant_policy_preset = ggufForm.value.quantPolicyPreset
     }
 
     const profileId = effectiveProfileId.value

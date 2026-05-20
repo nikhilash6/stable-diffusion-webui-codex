@@ -10,12 +10,14 @@ Purpose: GGUF converter tool (SafeTensors → GGUF) with optional quantization, 
 Uses explicit converter profiles for supported text encoders and transformer/denoiser components, including sharded HF-style weights.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `QuantizationType` (enum): Supported “human” quantization selectors for conversion (maps to `GGMLQuantizationType`).
+- `QuantizationRecipe` (enum): Public file-level quantization recipe selector.
 - `QuantPolicyPreset` (enum): Quantization policy preset selector.
 - `ConversionConfig` (dataclass): Conversion configuration (input/output paths, quantization choices, profile/policy selection, and regex dtype overrides).
 - `ConversionProgress` (dataclass): Progress/report structure for long conversions (stage counters, timings, and status fields).
+- `ConversionPreflight` (dataclass): Resolved conversion contract returned by `preflight_conversion_contract`.
 - `GGUFConversionCancelled` (exception): Raised when a conversion is cancelled via a cooperative cancel signal.
 - `GGUFVerificationError` (exception): Raised when a written GGUF file fails validation/verification.
+- `preflight_conversion_contract` (function): Resolve and validate recipe/profile/policy before heavy tensor IO.
 - `convert_safetensors_to_gguf` (function): Main conversion entrypoint; reads SafeTensors (incl. sharded), quantizes tensors, writes GGUF,
   and optionally verifies the output (uses many helpers above).
 """
@@ -23,9 +25,10 @@ Symbols (top-level; keep in sync; no ghosts):
 from __future__ import annotations
 from apps.backend.runtime.logging import get_backend_logger
 
+from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
@@ -42,6 +45,8 @@ from apps.backend.runtime.tools import gguf_converter_safetensors_source as _saf
 from apps.backend.runtime.tools import gguf_converter_tensor_planner as _tensor_planner
 from apps.backend.runtime.tools import gguf_converter_verify as _verify
 from apps.backend.runtime.tools.gguf_converter_specs import (
+    CompiledTensorTypeRule,
+    ConverterProfileSpec,
     GGUFArch,
 )
 from apps.backend.runtime.tools.gguf_converter_types import (
@@ -49,8 +54,9 @@ from apps.backend.runtime.tools.gguf_converter_types import (
     ConversionProgress,
     GGUFVerificationError,
     QuantPolicyPreset,
-    QuantizationType,
-    normalize_quant_policy_preset,
+    QuantizationRecipe,
+    normalize_optional_quant_policy_preset,
+    normalize_quantization_recipe,
 )
 
 logger = get_backend_logger("backend.runtime.tools.gguf_converter")
@@ -60,45 +66,33 @@ class GGUFConversionCancelled(Exception):
     """Raised when a conversion is cancelled via a cooperative cancel signal."""
 
 
-def convert_safetensors_to_gguf(
-    config: ConversionConfig,
-    progress_callback: Optional[Callable[[ConversionProgress], None]] = None,
-    *,
-    should_cancel: Optional[Callable[[], bool]] = None,
-) -> str:
-    """Convert a Safetensors file to GGUF format.
-    
-    Args:
-        config: Conversion configuration
-        progress_callback: Optional callback for progress updates
-        
-    Returns:
-        Path to the output GGUF file
-    """
-    progress = ConversionProgress(status="loading_config")
-    
-    def update_progress():
-        if progress_callback:
-            progress_callback(progress)
+@dataclass(frozen=True, slots=True)
+class ConversionPreflight:
+    config_path: Path
+    model_config: dict[str, Any]
+    profile: ConverterProfileSpec
+    recipe: QuantizationRecipe
+    recipe_info: _quantization.QuantizationRecipeSpec
+    quant_policy_preset: QuantPolicyPreset | None
+    quant_policy_id: str | None
+    requested_type: GGMLQuantizationType
+    dtype_rules: list[CompiledTensorTypeRule]
+    arch: str
+    metadata_config: dict[str, Any]
+    key_mapping: dict[str, str]
 
-    def check_cancel() -> None:
-        if should_cancel is not None and should_cancel():
-            progress.status = "cancelled"
-            progress.error = "cancelled"
-            update_progress()
-            raise GGUFConversionCancelled("cancelled")
-    
-    update_progress()
-    check_cancel()
-    
-    # Load model config
+
+def preflight_conversion_contract(
+    config: ConversionConfig,
+    *,
+    quant_policy_preset_explicit: bool = False,
+) -> ConversionPreflight:
+    """Resolve and validate a GGUF conversion contract before heavy tensor IO."""
+
     config_path = _safetensors_source.resolve_config_json_path(config.config_path)
     with open(config_path, "r", encoding="utf-8") as f:
         model_config = json.load(f)
 
-    logger.info("Loaded config: %s", model_config.get("_class_name") or model_config.get("model_type") or "unknown")
-    check_cancel()
-    
     profile_id = getattr(config, "profile_id", None)
     if profile_id:
         profile = _profiles.profile_by_id(str(profile_id))
@@ -108,15 +102,42 @@ def convert_safetensors_to_gguf(
     else:
         profile = _profiles.resolve_profile(model_config)
 
-    quant_policy_preset = normalize_quant_policy_preset(getattr(config, "quant_policy_preset", None))
-    requested_type = _quantization.requested_ggml_type(config.quantization)
+    recipe = normalize_quantization_recipe(config.quantization)
+    profile.quant_policy.require_recipe_supported(recipe)
+    recipe_info = _quantization.recipe_spec(recipe)
+
+    requested_policy = normalize_optional_quant_policy_preset(getattr(config, "quant_policy_preset", None))
+    if quant_policy_preset_explicit and requested_policy is None:
+        allowed = ", ".join(preset.value for preset in QuantPolicyPreset)
+        raise ValueError(f"Invalid quant_policy_preset None; expected one of: {allowed}")
+    if recipe_info.is_float:
+        if quant_policy_preset_explicit or requested_policy is not None:
+            raise ValueError(f"quant_policy_preset is not accepted for float recipe {recipe.value}")
+        effective_policy: QuantPolicyPreset | None = None
+    elif requested_policy is not None:
+        if not profile.quant_policy.supports_policy_preset(
+            recipe=recipe,
+            policy_preset=requested_policy,
+            model_config=model_config,
+        ):
+            raise ValueError(
+                f"quant_policy_preset {requested_policy.value!r} has no supported effect for "
+                f"profile {profile.id.value!r} recipe {recipe.value!r}"
+            )
+        effective_policy = requested_policy
+    else:
+        effective_policy = profile.quant_policy.default_policy_preset(recipe=recipe, model_config=model_config)
+
+    requested_type = recipe_info.ggml_type
     dtype_rules = profile.quant_policy.compile(
-        quant=config.quantization,
-        policy_preset=quant_policy_preset,
+        recipe=recipe,
+        policy_preset=effective_policy,
         model_config=model_config,
         user_rules=config.tensor_type_overrides,
     )
-    quant_policy_id = f"{profile.quant_policy.id}_{quant_policy_preset.value.lower()}_v{profile.quant_policy.version}"
+    quant_policy_id = None
+    if effective_policy is not None:
+        quant_policy_id = f"{profile.quant_policy.id}_{effective_policy.value.lower()}_v{profile.quant_policy.version}"
 
     if profile.arch is GGUFArch.LLAMA:
         arch = str(model_config.get("model_type") or "llama")
@@ -130,6 +151,72 @@ def convert_safetensors_to_gguf(
     key_mapping: dict[str, str] = {}
     if profile.key_mapping is not None:
         key_mapping = profile.key_mapping.build(model_config)
+
+    return ConversionPreflight(
+        config_path=config_path,
+        model_config=model_config,
+        profile=profile,
+        recipe=recipe,
+        recipe_info=recipe_info,
+        quant_policy_preset=effective_policy,
+        quant_policy_id=quant_policy_id,
+        requested_type=requested_type,
+        dtype_rules=dtype_rules,
+        arch=arch,
+        metadata_config=metadata_config,
+        key_mapping=key_mapping,
+    )
+
+
+def convert_safetensors_to_gguf(
+    config: ConversionConfig,
+    progress_callback: Optional[Callable[[ConversionProgress], None]] = None,
+    *,
+    should_cancel: Optional[Callable[[], bool]] = None,
+) -> str:
+    """Convert a Safetensors file to GGUF format.
+
+    Args:
+        config: Conversion configuration
+        progress_callback: Optional callback for progress updates
+
+    Returns:
+        Path to the output GGUF file
+    """
+    progress = ConversionProgress(status="loading_config")
+
+    def update_progress():
+        if progress_callback:
+            progress_callback(progress)
+
+    def check_cancel() -> None:
+        if should_cancel is not None and should_cancel():
+            progress.status = "cancelled"
+            progress.error = "cancelled"
+            update_progress()
+            raise GGUFConversionCancelled("cancelled")
+
+    update_progress()
+    check_cancel()
+
+    preflight = preflight_conversion_contract(config)
+    model_config = preflight.model_config
+    config_path = preflight.config_path
+    profile = preflight.profile
+    requested_type = preflight.requested_type
+    dtype_rules = preflight.dtype_rules
+    arch = preflight.arch
+    metadata_config = preflight.metadata_config
+    key_mapping = preflight.key_mapping
+
+    logger.info(
+        "Loaded config: %s (profile=%s, recipe=%s, policy=%s)",
+        model_config.get("_class_name") or model_config.get("model_type") or "unknown",
+        profile.id.value,
+        preflight.recipe.value,
+        preflight.quant_policy_preset.value if preflight.quant_policy_preset is not None else "none",
+    )
+    check_cancel()
     
     # Load safetensors
     progress.status = "loading_weights"
@@ -155,9 +242,9 @@ def convert_safetensors_to_gguf(
             writer,
             arch,
             metadata_config,
-            config.quantization,
-            quant_policy=quant_policy_id,
-            quant_policy_preset=quant_policy_preset,
+            preflight.recipe_info,
+            quant_policy=preflight.quant_policy_id,
+            quant_policy_preset=preflight.quant_policy_preset,
             config_path=config_path,
             safetensors_path=config.safetensors_path,
         )
@@ -472,9 +559,11 @@ def convert_safetensors_to_gguf(
 __all__ = [
     "ConversionConfig",
     "ConversionProgress", 
+    "ConversionPreflight",
     "GGUFConversionCancelled",
     "QuantPolicyPreset",
-    "QuantizationType",
+    "QuantizationRecipe",
     "GGUFVerificationError",
     "convert_safetensors_to_gguf",
+    "preflight_conversion_contract",
 ]
