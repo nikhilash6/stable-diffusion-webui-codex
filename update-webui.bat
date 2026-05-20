@@ -7,7 +7,7 @@ if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 set "UV_BIN=%ROOT%\.uv\bin\uv.exe"
 set "PYTHON_BIN=%ROOT%\.venv\Scripts\python.exe"
 set "NODE_VERSION=%CODEX_NODE_VERSION%"
-if "%NODE_VERSION%"=="" set "NODE_VERSION=24.13.0"
+if "%NODE_VERSION%"=="" set "NODE_VERSION=24.15.0"
 set "NODEENV_DIR=%ROOT%\.nodeenv"
 set "NODE_BIN_PRIMARY=%NODEENV_DIR%\Scripts\node.exe"
 set "NODE_BIN_FALLBACK=%NODEENV_DIR%\bin\node.exe"
@@ -123,7 +123,7 @@ echo Optional env:
 echo   CODEX_TORCH_MODE=custom  ^(updater aborts before dependency sync to avoid overwriting custom PyTorch installs^)
 echo   CODEX_TORCH_BACKEND=cpu^|cu126^|cu128^|cu130^|rocm64
 echo   CODEX_CUDA_VARIANT=12.6^|12.8^|13^|cu126^|cu128^|cu130  ^(validated whenever set; used when CODEX_TORCH_BACKEND is not set^)
-echo   CODEX_NODE_VERSION=^<version^>  ^(default 24.13.0; used for nodeenv auto-provisioning^)
+echo   CODEX_NODE_VERSION=^<version^>  ^(default 24.15.0; used for nodeenv auto-provisioning^)
 echo   CODEX_FFMPEG_VERSION=^<version^>  ^(default 7.0.2^)
 exit /b 0
 

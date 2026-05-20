@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 UV_BIN="${ROOT_DIR}/.uv/bin/uv"
 PYTHON_BIN="${ROOT_DIR}/.venv/bin/python"
-NODE_VERSION="${CODEX_NODE_VERSION:-24.13.0}"
+NODE_VERSION="${CODEX_NODE_VERSION:-24.15.0}"
 NODEENV_DIR="${ROOT_DIR}/.nodeenv"
 NODE_BIN="${NODEENV_DIR}/bin/node"
 NPM_BIN="${NODEENV_DIR}/bin/npm"
@@ -36,7 +36,7 @@ Environment overrides:
 - CODEX_TORCH_MODE=custom (updater aborts before dependency sync to avoid overwriting custom PyTorch installs)
 - CODEX_TORCH_BACKEND=cpu|cu126|cu128|cu130|rocm64
 - CODEX_CUDA_VARIANT=12.6|12.8|13|cu126|cu128|cu130 (validated whenever set; used for backend selection when CODEX_TORCH_BACKEND is not set)
-- CODEX_NODE_VERSION=<version> (default: 24.13.0; used for nodeenv auto-provisioning)
+- CODEX_NODE_VERSION=<version> (default: 24.15.0; used for nodeenv auto-provisioning)
 - CODEX_FFMPEG_VERSION=<version> (default: 7.0.2)
 EOF
 }

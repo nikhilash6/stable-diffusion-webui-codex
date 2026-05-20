@@ -12,7 +12,7 @@
   <img alt="Status: alpha" src="https://img.shields.io/badge/status-alpha-yellow" />
   <img alt="License: PolyForm Noncommercial 1.0.0" src="https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue" />
   <img alt="Python 3.12.10 (managed)" src="https://img.shields.io/badge/python-3.12.10-3776AB?logo=python&logoColor=white" />
-  <img alt="Node.js 24.13.0 (managed)" src="https://img.shields.io/badge/node-24.13.0-339933?logo=node.js&logoColor=white" />
+  <img alt="Node.js 24.15.0 (managed)" src="https://img.shields.io/badge/node-24.15.0-339933?logo=node.js&logoColor=white" />
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white" />
   <img alt="Vue 3" src="https://img.shields.io/badge/Vue-3-4FC08D?logo=vue.js&logoColor=white" />
   <a href="https://huggingface.co/sangoi-exe/sd-webui-codex"><img alt="Hugging Face: sangoi-exe/sd-webui-codex" src="https://img.shields.io/badge/huggingface-sangoi--exe%2Fsd--webui--codex-yellow?logo=huggingface&logoColor=black" /></a>

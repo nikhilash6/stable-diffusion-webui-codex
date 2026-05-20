@@ -879,7 +879,7 @@ while ($true) {
   $script:Config = [ordered]@{
     UvVersion = Get-EnvOrDefault -Name "CODEX_UV_VERSION" -Default "0.9.17"
     PythonVersion = Get-EnvOrDefault -Name "CODEX_PYTHON_VERSION" -Default "3.12.10"
-    NodeVersion = Get-EnvOrDefault -Name "CODEX_NODE_VERSION" -Default "24.13.0"
+    NodeVersion = Get-EnvOrDefault -Name "CODEX_NODE_VERSION" -Default "24.15.0"
     FFmpegVersion = Get-EnvOrDefault -Name "CODEX_FFMPEG_VERSION" -Default "7.0.2"
     TorchMode = Get-EnvOrDefault -Name "CODEX_TORCH_MODE" -Default "auto"
     TorchBackend = Get-EnvValue -Name "CODEX_TORCH_BACKEND"
