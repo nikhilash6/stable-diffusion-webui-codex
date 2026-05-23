@@ -13,7 +13,7 @@ The hires stage delegates family-dispatched init preparation and continuation se
 When configured, the hires second pass parses LoRA-only prompt tags, inherits base/request LoRAs when the hires prompt omits them, resolves explicit hires request overrides by deriving a dedicated `SamplingPlan` for the hires pass, and calls the shared sampler with the internal fixed-step img2img continuation flag only from this hires seam.
 Sampler-specific hires plan options such as ER-SDE stay attached to the derived hires plan rather than leaking through flat processing fields.
 First-pass base decode before hires is now upscaler-aware (`latent:*` skips decode; pixel upscalers decode).
-Exact Z-Image L2P runs stay inside this canonical txt2img runner with pre-conditioning unsupported-surface guards, pixel RGB sampling, and `GenerationResult.decoded` propagation that avoids VAE decode fallback.
+Exact Z-Image L2P runs stay inside this canonical txt2img runner with pre-conditioning unsupported-surface guards, effective prompt/optional-negative validation, pixel RGB sampling, and `GenerationResult.decoded` propagation that avoids VAE decode fallback.
 When smart offload is enabled, keeps required text-encoder patchers loaded across cond+uncond and unloads them after conditioning.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -86,6 +86,7 @@ from apps.backend.patchers.lora_apply import selection_hash_for_request
 from apps.backend.runtime.logging import emit_backend_event
 from apps.backend.runtime.pipeline_stages.scripts import collect_lora_selections, run_process_scripts
 from apps.backend.runtime.sampling.driver import CodexSampler, SamplingBoundaryState
+from apps.backend.runtime.text_processing.extra_nets import ExtraNetsParseError, parse_prompts
 from apps.backend.core.engine_loader import EngineLoadOptions, load_engine as _load_engine
 from apps.backend.use_cases.txt2img_pipeline.refiner import (
     GlobalRefinerStage,
@@ -600,10 +601,21 @@ class Txt2ImgPipelineRunner:
                 "Z-Image L2P first tranche supports only batch_size=1 and iterations=1 "
                 f"(got batch_size={processing.batch_size}, iterations={processing.iterations})."
             )
-        if len(prompt_context.prompts) != 1 or len(prompt_context.negative_prompts) != 1:
+        effective_prompts = list(prompt_context.prompts)
+        effective_negative_prompts = (
+            list(prompt_context.negative_prompts) if prompt_context.negative_prompts else [processing.negative_prompt]
+        )
+        if len(effective_prompts) != 1 or len(effective_negative_prompts) != 1:
             raise RuntimeError(
-                "Z-Image L2P first tranche supports exactly one prompt and one negative prompt per request."
+                "Z-Image L2P first tranche supports exactly one prompt and at most one optional negative prompt per request."
             )
+        prompt_loras = list(getattr(prompt_context, "loras", ()) or ())
+        if not prompt_context.negative_prompts:
+            try:
+                _cleaned, scalar_negative_loras = parse_prompts(effective_prompts + effective_negative_prompts)
+            except ExtraNetsParseError as exc:
+                raise RuntimeError("Z-Image L2P does not support LoRA prompt selections in tranche 1.") from exc
+            prompt_loras.extend(scalar_negative_loras)
         if bool(getattr(getattr(processing, "hires", None), "enabled", False)):
             raise RuntimeError("Z-Image L2P does not support hires.")
         if getattr(processing, "firstpass_image", None) is not None:
@@ -617,7 +629,7 @@ class Txt2ImgPipelineRunner:
         ip_adapter = getattr(processing, "ip_adapter", None)
         if ip_adapter is not None and bool(getattr(ip_adapter, "enabled", False)):
             raise RuntimeError("Z-Image L2P does not support IP-Adapter.")
-        if tuple(collect_lora_selections(getattr(prompt_context, "loras", ()) or ())):
+        if tuple(collect_lora_selections(prompt_loras)):
             raise RuntimeError("Z-Image L2P does not support LoRA prompt selections in tranche 1.")
         if prompt_context.clip_skip is not None:
             raise RuntimeError("Z-Image L2P does not support clip_skip.")
