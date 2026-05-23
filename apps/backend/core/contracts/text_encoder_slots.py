@@ -9,6 +9,7 @@ Required Notice: see NOTICE
 Purpose: Header-only text encoder slot classification for sha-selected assets.
 Provides a fast, import-light helper used by API request paths to classify a resolved text encoder weights file into
 an explicit slot (`clip_l`, `clip_g`, `t5xxl`, `qwen3_4b`, `qwen3_06b`, `qwen2_5_vl_7b`, `gemma3_12b`) without loading any tensors.
+Dedicated Z-Image L2P Qwen3-4B GGUFs are classified from their Codex profile metadata, not from the generic Llama architecture name.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `TextEncoderSlotError` (class): Raised when a weights file cannot be classified into a known slot.
@@ -313,6 +314,24 @@ def _read_gguf_kv(path: Path) -> dict[str, object]:
 def _classify_gguf_kv(kv: Mapping[str, object], *, context: str) -> str:
     if _looks_like_mmproj_context(context) or _gguf_is_multimodal_projector(kv):
         raise TextEncoderSlotError(f"GGUF multimodal projector files are not supported text encoder slots: {context}")
+
+    l2p_profile_id = str(kv.get("codex.zimage_l2p.profile_id") or "").strip()
+    l2p_component = str(kv.get("codex.zimage_l2p.component") or "").strip()
+    l2p_family = str(kv.get("codex.zimage_l2p.family") or "").strip()
+    l2p_slot = str(kv.get("codex.zimage_l2p.tenc_slot") or "").strip()
+    if l2p_profile_id or l2p_component or l2p_family or l2p_slot:
+        if (
+            l2p_profile_id == "zimage_l2p_tenc"
+            and l2p_component == "tenc"
+            and l2p_family == "zimage_l2p"
+            and l2p_slot == "qwen3_4b"
+        ):
+            return "qwen3_4b"
+        raise TextEncoderSlotError(
+            "Invalid Z-Image L2P GGUF text-encoder metadata for %s "
+            "(expected profile_id='zimage_l2p_tenc', component='tenc', family='zimage_l2p', tenc_slot='qwen3_4b')."
+            % context
+        )
 
     arch = str(kv.get("general.architecture") or kv.get("model.architecture") or "").strip().lower()
     tok_model = str(kv.get("tokenizer.ggml.model") or "").strip().lower()

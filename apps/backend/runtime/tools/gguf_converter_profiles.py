@@ -14,6 +14,8 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_is_qwen_image` (function): Detect whether a config.json describes a Qwen Image transformer.
 - `_is_qwen_image_tenc` (function): Detect whether a config.json describes a Qwen Image Qwen2.5-VL text encoder.
 - `_is_zimage` (function): Detect whether a config.json describes a ZImage transformer.
+- `_is_zimage_l2p` (function): Detect whether a config.json describes the Z-Image L2P denoiser.
+- `_is_zimage_l2p_tenc` (function): Detect whether a config.json describes the exact Qwen3-4B L2P text encoder.
 - `_is_wan22` (function): Detect whether a config.json describes a WAN22 transformer.
 - `_is_ltx2` (function): Detect whether a config.json describes an LTX2 transformer.
 - `_is_gemma3_tenc` (function): Detect whether a config.json describes a Gemma3 text encoder export.
@@ -28,6 +30,8 @@ Symbols (top-level; keep in sync; no ghosts):
 - `WAN22_QUANT_POLICY` (constant): WAN22 recipe support and policy rules.
 - `LTX2_QUANT_POLICY` (constant): LTX2 recipe support and required invariants.
 - `ZIMAGE_QUANT_POLICY` (constant): ZImage recipe support and required invariants.
+- `ZIMAGE_L2P_DENOISER_QUANT_POLICY` (constant): L2P denoiser recipe support and required invariants.
+- `ZIMAGE_L2P_TENC_QUANT_POLICY` (constant): L2P Qwen3-4B text-encoder recipe support.
 - `LLAMA_QUANT_POLICY` (constant): Llama-family recipe support and recipe-intrinsic rules.
 - `PROFILE_REGISTRY` (constant): Registry of built-in converter profiles (table-driven dispatch).
 - `_PROFILES_BY_ID` (constant): Indexed lookup table for profile ids.
@@ -70,6 +74,14 @@ def _is_qwen_image_tenc(config: Mapping[str, Any]) -> bool:
 
 def _is_zimage(config: Mapping[str, Any]) -> bool:
     return _tensor_planner.is_zimage_transformer_config(config)
+
+
+def _is_zimage_l2p(config: Mapping[str, Any]) -> bool:
+    return _tensor_planner.is_zimage_l2p_denoiser_config(config)
+
+
+def _is_zimage_l2p_tenc(config: Mapping[str, Any]) -> bool:
+    return _tensor_planner.is_zimage_l2p_text_encoder_config(config)
 
 
 def _is_wan22(config: Mapping[str, Any]) -> bool:
@@ -831,6 +843,68 @@ ZIMAGE_QUANT_POLICY = QuantizationPolicySpec(
 )
 
 
+ZIMAGE_L2P_DENOISER_QUANT_POLICY = QuantizationPolicySpec(
+    id="zimage_l2p_denoiser",
+    supported_recipes=_SINGLE_PHYSICAL_PROFILE_RECIPES,
+    default_recipe=QuantizationRecipe.Q6_K,
+    required_rules=(
+        TensorTypeRule(
+            pattern=r"^(?:x_pad_token|cap_pad_token)$",
+            ggml_type=GGMLQuantizationType.F16,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            reason="L2P pad tokens must remain float (load_state_dict cannot load quantized tensors)",
+        ),
+        TensorTypeRule(
+            pattern=r".*\.bias$",
+            preserve_source_dtype=True,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            reason="L2P biases preserve source float dtype for stability",
+        ),
+        TensorTypeRule(
+            pattern=r"(?:^|\.)norm_[qk]\.weight$|(?:^|\.)(?:attention_norm|ffn_norm)\d?\.weight$|^cap_embedder\.0\.weight$",
+            preserve_source_dtype=True,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            reason="L2P RMSNorm scales preserve source float dtype for stability",
+        ),
+        TensorTypeRule(
+            pattern=r"^local_decoder\.out_conv\.weight$",
+            preserve_source_dtype=True,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            reason="L2P final local-decoder projection preserves source float dtype",
+        ),
+    ),
+)
+
+
+ZIMAGE_L2P_TENC_QUANT_POLICY = QuantizationPolicySpec(
+    id="zimage_l2p_tenc",
+    version=1,
+    supported_recipes=_ALL_RECIPES,
+    default_recipe=QuantizationRecipe.Q4_K_M,
+    recipe_rule_factories=(_llm_recipe_rules,),
+    required_rules=(
+        TensorTypeRule(
+            pattern=r".*\.bias$",
+            preserve_source_dtype=True,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            reason="L2P Qwen3-4B text-encoder biases preserve source float dtype for stability",
+        ),
+        TensorTypeRule(
+            pattern=r"^(?:model\.norm|model\.layers\.\d+\.(?:input_layernorm|post_attention_layernorm))\.weight$",
+            preserve_source_dtype=True,
+            apply_to=TensorNameTarget.BOTH,
+            when=_COND_QUANTIZED,
+            reason="L2P Qwen3-4B norm scales preserve source float dtype for stability",
+        ),
+    ),
+)
+
+
 LLAMA_QUANT_POLICY = QuantizationPolicySpec(
     id="llama",
     version=2,
@@ -871,6 +945,21 @@ PROFILE_REGISTRY: tuple[ConverterProfileSpec, ...] = (
         detect=_is_zimage,
         quant_policy=ZIMAGE_QUANT_POLICY,
         metadata_normalizer=_tensor_planner.normalize_zimage_transformer_metadata_config,
+    ),
+    ConverterProfileSpec(
+        id=ConverterProfileId.ZIMAGE_L2P_DENOISER,
+        arch=GGUFArch.ZIMAGE_L2P,
+        detect=_is_zimage_l2p,
+        quant_policy=ZIMAGE_L2P_DENOISER_QUANT_POLICY,
+        metadata_normalizer=_tensor_planner.normalize_zimage_l2p_denoiser_metadata_config,
+    ),
+    ConverterProfileSpec(
+        id=ConverterProfileId.ZIMAGE_L2P_TENC,
+        arch=GGUFArch.LLAMA,
+        detect=_is_zimage_l2p_tenc,
+        quant_policy=ZIMAGE_L2P_TENC_QUANT_POLICY,
+        key_mapping=_LLAMA_KEY_MAPPING,
+        metadata_normalizer=_tensor_planner.normalize_zimage_l2p_text_encoder_metadata_config,
     ),
     ConverterProfileSpec(
         id=ConverterProfileId.WAN22_TRANSFORMER,

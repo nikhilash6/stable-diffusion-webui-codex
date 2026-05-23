@@ -7,11 +7,13 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Lazy state-dict signal extraction helpers for model detection.
-Wraps a checkpoint mapping in a `SignalBundle` that exposes keys and lazily computed shapes, plus small helpers used across detectors.
+Wraps a checkpoint mapping in a `SignalBundle` that exposes keys, optional source metadata, and lazily computed shapes,
+plus small helpers used across detectors.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `SignalBundle` (dataclass): State-dict wrapper exposing keys and lazy/cached shape lookup.
+- `SignalBundle` (dataclass): State-dict wrapper exposing keys, optional source metadata, and lazy/cached shape lookup.
 - `_resolve_source_format` (function): Resolves source format hints (`safetensors|gguf`) from a mapping/view chain.
+- `_resolve_source_metadata` (function): Resolves mapping-attached metadata without tensor materialization.
 - `build_bundle` (function): Builds a `SignalBundle` without materializing all tensors.
 - `count_blocks` (function): Counts sequential blocks matching a template prefix pattern.
 - `has_all_keys` (function): Returns True if all required keys exist in a bundle.
@@ -30,6 +32,7 @@ class SignalBundle:
     keys: Tuple[str, ...]
     shapes: MutableMapping[str, Tuple[int, ...]]
     source_format: str | None = None
+    metadata: Mapping[str, Any] | None = None
 
     def shape(self, key: str) -> Tuple[int, ...] | None:
         # Fast path: cached
@@ -119,12 +122,37 @@ def _resolve_source_format(state_dict: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _resolve_source_metadata(state_dict: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    current: object | None = state_dict
+    seen_ids: set[int] = set()
+    while current is not None:
+        marker = id(current)
+        if marker in seen_ids:
+            break
+        seen_ids.add(marker)
+
+        for attr in ("source_metadata", "gguf_metadata"):
+            metadata = getattr(current, attr, None)
+            if isinstance(metadata, Mapping):
+                return metadata
+
+        current = getattr(current, "_base", None)
+    return None
+
+
 def build_bundle(state_dict: Mapping[str, Any]) -> SignalBundle:
     # Do not materialize all tensors; only list keys and compute shapes lazily via SignalBundle.shape()
     keys = tuple(state_dict.keys())
     shapes: dict[str, Tuple[int, ...]] = {}
     source_format = _resolve_source_format(state_dict)
-    return SignalBundle(state_dict=state_dict, keys=keys, shapes=shapes, source_format=source_format)
+    metadata = _resolve_source_metadata(state_dict)
+    return SignalBundle(
+        state_dict=state_dict,
+        keys=keys,
+        shapes=shapes,
+        source_format=source_format,
+        metadata=metadata,
+    )
 
 
 def count_blocks(keys: Iterable[str], template: str) -> int:

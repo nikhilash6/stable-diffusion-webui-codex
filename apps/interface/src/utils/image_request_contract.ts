@@ -9,7 +9,8 @@ Required Notice: see NOTICE
 Purpose: Pure helper for explicit frontend image request contract resolution.
 Resolves checkpoint metadata, FLUX.2 guidance mode, asset-contract-backed text-encoder/VAE selectors, and canonical image `extras`
 without importing Pinia/Vue stores directly. Qwen Image text encoders are accepted only as `qwen_image/<path>` labels that resolve through
-the Qwen Image text-encoder root, so raw/global/basename labels cannot cross into `tenc_sha`. Callers inject store-backed resolver callbacks
+the Qwen Image text-encoder root, and Z-Image L2P text encoders are accepted only as `zimage_l2p/<path>` labels that resolve through
+the shared Z-Image text-encoder root. No-VAE engines emit no VAE selector extras. Callers inject store-backed resolver callbacks
 and remain responsible for translating thrown contract `Error`s into UI state.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -18,6 +19,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `BuildExplicitImageRequestContractArgs` (interface): Input contract for explicit image selector resolution + `extras` assembly.
 - `ExplicitImageRequestContract` (interface): Resolved guidance mode + canonical `extras` payload for one image request.
 - `normalizeQwenImageTextEncoderLabel` / `resolveQwenImageTextEncoderSha` (function): Fail-loud Qwen Image text-encoder label/root contract helpers.
+- `normalizeZImageL2PTextEncoderLabel` / `resolveZImageL2PTextEncoderSha` (function): Fail-loud Z-Image L2P Qwen3-4B text-encoder label/root contract helpers.
 - `buildExplicitImageRequestContract` (function): Resolves fail-loud image request selectors and required asset SHAs into canonical `extras`.
 */
 
@@ -27,6 +29,8 @@ export type ImageRequestGuidanceMode = 'cfg' | 'distilled_cfg'
 
 const QWEN_IMAGE_ENGINE_ID = 'qwen_image'
 const QWEN_IMAGE_TEXT_ENCODER_LABEL_PREFIX = 'qwen_image/'
+const ZIMAGE_L2P_ENGINE_ID = 'zimage_l2p'
+const ZIMAGE_L2P_TEXT_ENCODER_LABEL_PREFIX = 'zimage_l2p/'
 
 export interface ImageRequestContractResolvers {
   requireModelInfo: (label: string) => ModelInfo
@@ -112,6 +116,46 @@ function resolveQwenImageTextEncoderSha(
   return sha
 }
 
+function normalizeZImageL2PTextEncoderLabel(label: string): string {
+  const normalized = label.replace(/\\+/g, '/').trim()
+  if (
+    !normalized.startsWith(ZIMAGE_L2P_TEXT_ENCODER_LABEL_PREFIX)
+    || normalized.length <= ZIMAGE_L2P_TEXT_ENCODER_LABEL_PREFIX.length
+  ) {
+    throw new Error('Z-Image L2P text encoder selection must use zimage_l2p/<path> labels from zimage_tenc roots.')
+  }
+  return normalized
+}
+
+function resolveZImageL2PTextEncoderSha(
+  label: string,
+  assetContract: EngineAssetContract,
+  resolvers: ImageRequestContractResolvers,
+): string {
+  const normalized = normalizeZImageL2PTextEncoderLabel(label)
+  const sha = resolvers.resolveTextEncoderSha(normalized)
+  if (!sha) {
+    throw new Error(`Z-Image L2P text encoder SHA not found for '${normalized}'. Re-select a zimage_tenc text encoder.`)
+  }
+
+  const expectedSlots = Array.isArray(assetContract.tenc_slots)
+    ? assetContract.tenc_slots
+        .map((value) => String(value || '').trim())
+        .filter((value) => value.length > 0)
+    : []
+  if (expectedSlots.length > 0) {
+    const slot = String(resolvers.resolveTextEncoderSlot(normalized) || '').trim()
+    if (!slot) {
+      throw new Error(`Z-Image L2P text encoder slot metadata not found for '${normalized}'. Refresh inventory and retry.`)
+    }
+    if (!expectedSlots.includes(slot)) {
+      throw new Error(`Z-Image L2P text encoder slot mismatch: got '${slot}', expected '${expectedSlots.join('|')}'.`)
+    }
+  }
+
+  return sha
+}
+
 export function buildExplicitImageRequestContract(
   args: BuildExplicitImageRequestContractArgs,
 ): ExplicitImageRequestContract {
@@ -134,6 +178,14 @@ export function buildExplicitImageRequestContract(
   const checkpointCoreOnly = modelInfo.core_only
   if (typeof checkpointCoreOnly !== 'boolean') {
     throw new Error('Selected checkpoint is missing core-only metadata. Refresh model inventory and retry.')
+  }
+  if (args.engineKey === ZIMAGE_L2P_ENGINE_ID) {
+    if (modelFormat !== 'checkpoint' && modelFormat !== 'gguf') {
+      throw new Error('Z-Image L2P requires a SafeTensors checkpoint or GGUF denoiser model.')
+    }
+    if (checkpointCoreOnly !== true) {
+      throw new Error('Z-Image L2P requires a core-only denoiser checkpoint.')
+    }
   }
 
   let guidanceMode = args.fallbackGuidanceMode
@@ -168,7 +220,12 @@ export function buildExplicitImageRequestContract(
     if (textEncoderLabels.length === 0) {
       throw new Error(requiredTextEncoderMessage(assetContract))
     }
-    if (args.engineKey === QWEN_IMAGE_ENGINE_ID) {
+    if (args.engineKey === ZIMAGE_L2P_ENGINE_ID) {
+      if (requiredTencCount !== 1 || textEncoderLabels.length !== 1) {
+        throw new Error(requiredTextEncoderMessage(assetContract))
+      }
+      extras.tenc_sha = resolveZImageL2PTextEncoderSha(textEncoderLabels[0], assetContract, args.resolvers)
+    } else if (args.engineKey === QWEN_IMAGE_ENGINE_ID) {
       if (requiredTencCount !== 1 || textEncoderLabels.length !== 1) {
         throw new Error(requiredTextEncoderMessage(assetContract))
       }
@@ -224,22 +281,28 @@ export function buildExplicitImageRequestContract(
     }
   }
 
-  const selectedVae = args.resolvers.requireVaeSelection(args.selectedVaeLabel)
-  const selectedVaeIsSentinel = selectedVae === 'built-in' || selectedVae === 'none'
-  const resolvedVaeSha = selectedVaeIsSentinel
-    ? ''
-    : String(args.resolvers.resolveVaeSha(selectedVae) || '').trim().toLowerCase()
-  if (!selectedVaeIsSentinel && !resolvedVaeSha) {
-    throw new Error('Selected VAE is invalid or stale. Re-select a VAE and retry.')
-  }
-  extras.vae_source = resolvedVaeSha ? 'external' : 'built_in'
   if (assetContract.requires_vae) {
+    const selectedVae = args.resolvers.requireVaeSelection(args.selectedVaeLabel)
+    const selectedVaeIsSentinel = selectedVae === 'built-in' || selectedVae === 'none'
+    const resolvedVaeSha = selectedVaeIsSentinel
+      ? ''
+      : String(args.resolvers.resolveVaeSha(selectedVae) || '').trim().toLowerCase()
+    if (!selectedVaeIsSentinel && !resolvedVaeSha) {
+      throw new Error('Selected VAE is invalid or stale. Re-select a VAE and retry.')
+    }
+    extras.vae_source = resolvedVaeSha ? 'external' : 'built_in'
     if (!resolvedVaeSha) {
       throw new Error('Select a VAE so the request can include vae_sha.')
     }
     extras.vae_sha = resolvedVaeSha
-  } else if (resolvedVaeSha) {
-    extras.vae_sha = resolvedVaeSha
+  } else {
+    const rawSelectedVae = String(args.selectedVaeLabel || '').trim()
+    if (rawSelectedVae) {
+      const selectedVae = args.resolvers.requireVaeSelection(rawSelectedVae)
+      if (selectedVae !== 'built-in' && selectedVae !== 'none') {
+        throw new Error(`Engine '${args.engineKey}' does not support VAE selection.`)
+      }
+    }
   }
 
   if (args.engineKey === 'zimage') {

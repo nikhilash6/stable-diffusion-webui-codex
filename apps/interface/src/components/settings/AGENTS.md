@@ -1,15 +1,16 @@
 <!-- tags: frontend, settings, paths -->
 # apps/interface/src/components/settings Overview
 Date: 2025-12-04
-Last Review: 2026-03-12
+Last Review: 2026-05-23
 Status: Active
 
 ## Purpose
 - Settings panels for the Codex WebUI (paths, advanced options) that are shared across engine tabs.
 
 ## Notes
-- `SettingsPaths.vue` surfaces engine-specific search roots for models/VAEs/LoRAs/Text Encoders by wiring directly to `apps/paths.json` keys (`sd15_*`, `sdxl_*`, `flux1_*`, `flux2_*`, `qwen_image_*`, `anima_*`, `ltx2_*`, `wan22_*`) via `/api/paths`.
+- `SettingsPaths.vue` surfaces engine-specific search roots for models/VAEs/LoRAs/Text Encoders by wiring directly to `apps/paths.json` keys (`sd15_*`, `sdxl_*`, `flux1_*`, `flux2_*`, `qwen_image_*`, `zimage_l2p_ckpt`, `zimage_tenc`, `anima_*`, `ltx2_*`, `wan22_*`) via `/api/paths`.
 - 2026-05-17: `SettingsPaths.vue` includes a Qwen Image section for `qwen_image_ckpt`, `qwen_image_vae`, and `qwen_image_tenc`; Qwen Image does not expose a LoRA path editor in the current UI contract.
+- 2026-05-23: `SettingsPaths.vue` includes a Z-Image L2P section for `zimage_l2p_ckpt` and the shared `zimage_tenc` Qwen3-4B root; L2P does not expose VAE or LoRA path editors.
 - 2026-03-12: `SettingsPaths.vue` now includes an `LTX 2.3` section covering `ltx2_ckpt`, `ltx2_vae`, `ltx2_connectors`, `ltx2_loras`, and `ltx2_tenc`.
 - Keep the UI layout compatible with other settings panels (use `panel-section`, `label-muted`, and shared widgets such as `PathList.vue`).
 - When extending settings here, keep DTOs in sync with `apps/interface/src/api/types.ts` and backend routes under `apps/backend/interfaces/api/run_api.py`.

@@ -8,6 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: Typed “profile + policy” specs for the GGUF converter.
 Defines converter architecture buckets, profile ids, metadata normalizers, key mappings, public recipe support, recipe-intrinsic rules, and per-model tensor policy rules for the source/native tooling surface.
+Includes exact Z-Image L2P denoiser and Qwen3-4B text-encoder profile ids without aliasing them to latent Z-Image profiles.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `GGUFArch` (enum): High-level GGUF architecture buckets used by conversion profiles.
@@ -55,6 +56,7 @@ class GGUFArch(str, Enum):
     QWEN_IMAGE = "qwen_image"
     QWEN2_5_VL = "qwen2_5_vl"
     ZIMAGE = "zimage"
+    ZIMAGE_L2P = "zimage_l2p"
     WAN22 = "wan22"
     LTX2 = "ltx2"
 
@@ -80,6 +82,8 @@ class ConverterProfileId(str, Enum):
     QWEN_IMAGE_TRANSFORMER = "qwen_image_transformer"
     QWEN_IMAGE_TENC = "qwen_image_tenc"
     ZIMAGE_TRANSFORMER = "zimage_transformer"
+    ZIMAGE_L2P_DENOISER = "zimage_l2p_denoiser"
+    ZIMAGE_L2P_TENC = "zimage_l2p_tenc"
     WAN22_TRANSFORMER = "wan22_transformer"
     LTX2_TRANSFORMER = "ltx2_transformer"
     GEMMA3_TENC = "gemma3_tenc"

@@ -8,7 +8,8 @@ Required Notice: see NOTICE
 
 Purpose: Built-in detector registrations for the model registry.
 Imports all detector modules so they can self-register into the shared `REGISTRY` at import time.
-Includes the Anima detector for `net.*` Cosmos Predict2-style checkpoints, the FLUX.2 Klein 4B detector, and the LTX2 monolithic-combined detector.
+Includes the Anima detector for `net.*` Cosmos Predict2-style checkpoints, the FLUX.2 Klein 4B detector, the LTX2 monolithic-combined detector,
+and the Z-Image L2P no-VAE pixel DiT detector.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `__all__` (constant): Empty export list; import detector classes from their defining modules.
@@ -29,7 +30,8 @@ from . import sdxl as _sdxl
 from . import stable_cascade as _stable_cascade
 from . import wan22 as _wan22
 from . import zimage as _zimage
+from . import zimage_l2p as _zimage_l2p
 
-del _aura, _anima, _chroma, _flux, _flux2, _ltx2, _qwen_image, _sd3, _sd_v1, _sdxl, _stable_cascade, _wan22, _zimage
+del _aura, _anima, _chroma, _flux, _flux2, _ltx2, _qwen_image, _sd3, _sd_v1, _sdxl, _stable_cascade, _wan22, _zimage, _zimage_l2p
 
 __all__ = []

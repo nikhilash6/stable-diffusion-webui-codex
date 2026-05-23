@@ -2,14 +2,15 @@
 
 # apps/backend/runtime/families Overview
 Date: 2026-01-17
-Last Review: 2026-05-17
+Last Review: 2026-05-23
 Status: Active
 
 ## Purpose
-- Host model-family runtime code (WAN22/Flux/SD/ZImage/Chroma/LTX2/Netflix VOID/Qwen Image) under a single `families/` root so `apps/backend/runtime/` stays reserved for generic, cross-family runtime modules (models/loaders, ops, sampling, memory, vision, etc.).
+- Host model-family runtime code (WAN22/Flux/SD/ZImage/Z-Image L2P/Chroma/LTX2/Netflix VOID/Qwen Image) under a single `families/` root so `apps/backend/runtime/` stays reserved for generic, cross-family runtime modules (models/loaders, ops, sampling, memory, vision, etc.).
 
 ## Structure
-- `wan22/`, `flux/`, `sd/`, `zimage/`, `chroma/` — family runtimes (implementation-specific).
+- `wan22/`, `flux/`, `sd/`, `zimage/`, `zimage_l2p/`, `chroma/` — family runtimes (implementation-specific).
+- `zimage_l2p/` — public `zhen-nan/L2P` pixel-space no-VAE runtime owner; separate from latent Z-Image Turbo/Base.
 - `ltx2/` — native-only LTX2 runtime seam (video + audio + external Gemma3 asset contract) with family-owned model, scheduler, and execution code under `apps/**`.
 - `netflix_void/` — native-only Netflix VOID vid2vid scaffold (explicit base bundle + literal Pass 1/Pass 2 overlays; execution still fail-loud until the repo-owned runtime port lands).
 - `qwen_image/` — Qwen Image architecture-family runtime contracts for the internal `2512` txt2img and `edit_2511` img2img edit variants.

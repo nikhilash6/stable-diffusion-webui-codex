@@ -10,7 +10,7 @@ Purpose: Backend-owned engine dependency check contract for WebUI readiness surf
 Builds deterministic per-engine check rows from backend inventory/model-registry state so the frontend can render a strict
 "Dependency Check" panel and disable generation when required assets are missing. Semantic-engine asset checks resolve through the
 canonical contract owner seam (`contract_owner_for_semantic_engine`) to prevent drift between API surfaces, including Qwen Image
-scoped split-asset roots, the
+and Z-Image L2P scoped split-asset roots, the
 vendored LTX2 metadata/config readiness required by explicit execution profiles and the explicit Netflix VOID base-bundle +
 literal overlay-pair readiness contract. Mode-scoped rows can now report exact masked-runtime readiness (for example SDXL `fooocus_inpaint`)
 without making the whole semantic engine globally unready.
@@ -100,6 +100,7 @@ _CHECKPOINT_REQUIRED_ENGINES: frozenset[str] = frozenset(
         "qwen_image",
         "chroma",
         "zimage",
+        "zimage_l2p",
         "anima",
         "ltx2",
         "netflix_void",
@@ -119,6 +120,7 @@ _CHECKPOINT_ROOT_KEYS_BY_ENGINE: dict[str, tuple[str, ...]] = {
     "qwen_image": ("qwen_image_ckpt",),
     "chroma": ("flux1_ckpt",),
     "zimage": ("zimage_ckpt",),
+    "zimage_l2p": ("zimage_l2p_ckpt",),
     "anima": ("anima_ckpt",),
     "wan22": ("wan22_ckpt",),
     "ltx2": ("ltx2_ckpt",),
@@ -133,6 +135,7 @@ _CHECKPOINT_FAMILY_HINTS_BY_ENGINE: dict[str, tuple[str, ...]] = {
     "qwen_image": ("qwen_image",),
     "chroma": ("chroma", "flux1"),
     "zimage": ("zimage",),
+    "zimage_l2p": ("zimage_l2p",),
     "anima": ("anima",),
     "wan22": ("wan22",),
     "ltx2": ("ltx2",),
@@ -156,6 +159,7 @@ _TEXT_ENCODER_ROOT_KEYS_BY_CONTRACT_OWNER: dict[str, tuple[str, ...]] = {
     "flux2": ("flux2_tenc",),
     "qwen_image": ("qwen_image_tenc",),
     "zimage": ("zimage_tenc",),
+    "zimage_l2p": ("zimage_tenc",),
     "anima": ("anima_tenc",),
     "wan22_5b": ("wan22_tenc",),
     "wan22_14b": ("wan22_tenc",),

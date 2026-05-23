@@ -14,7 +14,7 @@ When `CODEX_TRACE_CONTRACT=1`, emits prompt-redacted contract-trace JSONL events
 
 Symbols (top-level; keep in sync; no ghosts):
 - `encode_images` (function): Encode PIL images to base64 PNG payloads, optionally injecting PNG text metadata.
-- `build_engine_options` (function): Build `engine_options` dict from request extras + options snapshot (TE/VAE overrides, explicit checkpoint selectors, Z-Image/Qwen Image variants, core streaming).
+- `build_engine_options` (function): Build `engine_options` dict from request extras + options snapshot (TE/VAE overrides, no-VAE contracts, explicit checkpoint selectors, Z-Image/Qwen Image variants, core streaming).
 - `resolve_request_smart_flags` (function): Parse/validate per-request smart flags (`smart_offload`/`smart_fallback`/`smart_cache`) as strict booleans.
 - `force_runtime_memory_cleanup` (function): Best-effort runtime cleanup used on worker error paths (orchestrator cache + memory manager + CUDA cache).
 - `_format_parameters_infotext` (function): Serializes generation `info` dicts into A1111-compatible infotext for PNG `parameters`.
@@ -108,6 +108,18 @@ def encode_images(images: Any, *, metadata: Optional[Mapping[str, str]] = None) 
 def build_engine_options(*, req: Any, opts_snapshot: Callable[[], Any]) -> dict[str, object]:
     engine_options: dict[str, object] = {}
     extras = getattr(req, "extras", {}) or {}
+    engine_id = str(getattr(req, "engine", "") or "").strip().lower()
+    checkpoint_core_only_hint = extras.get("checkpoint_core_only")
+    requires_vae = True
+    try:
+        if isinstance(checkpoint_core_only_hint, bool):
+            from apps.backend.core.contracts.asset_requirements import contract_for_request
+
+            requires_vae = bool(
+                contract_for_request(engine_id=engine_id, checkpoint_core_only=checkpoint_core_only_hint).requires_vae
+            )
+    except Exception:
+        requires_vae = True
 
     te_override = extras.get("text_encoder_override")
     if isinstance(te_override, dict):
@@ -117,14 +129,20 @@ def build_engine_options(*, req: Any, opts_snapshot: Callable[[], Any]) -> dict[
     if isinstance(vae_path_from_extras, str) and vae_path_from_extras.strip():
         engine_options["vae_path"] = vae_path_from_extras.strip()
     vae_source_from_extras = extras.get("vae_source")
-    if vae_source_from_extras is None:
-        raise RuntimeError("Missing extras.vae_source.")
-    if not isinstance(vae_source_from_extras, str) or not vae_source_from_extras.strip():
-        raise RuntimeError("extras.vae_source must be 'built_in' or 'external'.")
-    normalized_vae_source = vae_source_from_extras.strip().lower()
-    if normalized_vae_source not in {"built_in", "external"}:
-        raise RuntimeError("extras.vae_source must be 'built_in' or 'external'.")
-    engine_options["vae_source"] = normalized_vae_source
+    if requires_vae:
+        if vae_source_from_extras is None:
+            raise RuntimeError("Missing extras.vae_source.")
+        if not isinstance(vae_source_from_extras, str) or not vae_source_from_extras.strip():
+            raise RuntimeError("extras.vae_source must be 'built_in' or 'external'.")
+        normalized_vae_source = vae_source_from_extras.strip().lower()
+        if normalized_vae_source not in {"built_in", "external"}:
+            raise RuntimeError("extras.vae_source must be 'built_in' or 'external'.")
+        engine_options["vae_source"] = normalized_vae_source
+    else:
+        if vae_source_from_extras is not None:
+            raise RuntimeError(f"Engine '{engine_id}' does not use extras.vae_source.")
+        if "vae_path" in engine_options:
+            raise RuntimeError(f"Engine '{engine_id}' does not use extras.vae_path.")
 
     checkpoint_core_only_from_extras = extras.get("checkpoint_core_only")
     if checkpoint_core_only_from_extras is None:

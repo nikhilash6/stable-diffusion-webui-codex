@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Settings panel for model search paths (`/api/paths`).
-Edits engine-specific checkpoint/VAE/LoRA/text-encoder/connectors roots (`sd15/sdxl/flux1/flux2/qwen_image/anima/ltx2/wan22`) plus dedicated IP-Adapter model/image-encoder roots,
+Edits engine-specific checkpoint/VAE/LoRA/text-encoder/connectors roots (`sd15/sdxl/flux1/flux2/qwen_image/zimage_l2p/anima/ltx2/wan22`) plus dedicated IP-Adapter model/image-encoder roots,
 using `PathList` to manage per-key lists and persisting them via the backend paths API.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -126,6 +126,20 @@ Symbols (top-level; keep in sync; no ghosts):
     </div>
 
     <div class="panel-section">
+      <h3 class="label-muted">Z-Image L2P</h3>
+      <div class="space-y-2">
+        <div>
+          <label class="label-muted">Models</label>
+          <PathList v-model="paths.zimage_l2p.ckpt" />
+        </div>
+        <div>
+          <label class="label-muted">Qwen3-4B Text Encoders</label>
+          <PathList v-model="paths.zimage_l2p.tenc" />
+        </div>
+      </div>
+    </div>
+
+    <div class="panel-section">
       <h3 class="label-muted">Anima</h3>
       <div class="space-y-2">
         <div>
@@ -221,7 +235,7 @@ import { onMounted, reactive } from 'vue'
 import { fetchPaths, updatePaths } from '../../api/client'
 import PathList from './widgets/PathList.vue'
 
-type EngineId = 'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'qwen_image' | 'anima' | 'ltx2' | 'wan22'
+type EngineId = 'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'qwen_image' | 'zimage_l2p' | 'anima' | 'ltx2' | 'wan22'
 type EnginePaths = { ckpt: string[]; vae: string[]; loras: string[]; tenc: string[]; connectors: string[] }
 type EnginePathsState = Record<EngineId, EnginePaths>
 type IpAdapterPaths = { models: string[]; imageEncoders: string[] }
@@ -233,6 +247,7 @@ const paths = reactive<EnginePathsState>({
   flux1: { ckpt: [], vae: [], loras: [], tenc: [], connectors: [] },
   flux2: { ckpt: [], vae: [], loras: [], tenc: [], connectors: [] },
   qwen_image: { ckpt: [], vae: [], loras: [], tenc: [], connectors: [] },
+  zimage_l2p: { ckpt: [], vae: [], loras: [], tenc: [], connectors: [] },
   anima: { ckpt: [], vae: [], loras: [], tenc: [], connectors: [] },
   ltx2: { ckpt: [], vae: [], loras: [], tenc: [], connectors: [] },
   wan22: { ckpt: [], vae: [], loras: [], tenc: [], connectors: [] },
@@ -288,6 +303,12 @@ async function reload(): Promise<void> {
     paths.qwen_image.loras = []
     paths.qwen_image.tenc = getList(loaded, 'qwen_image_tenc')
     paths.qwen_image.connectors = []
+
+    paths.zimage_l2p.ckpt = getList(loaded, 'zimage_l2p_ckpt')
+    paths.zimage_l2p.vae = []
+    paths.zimage_l2p.loras = []
+    paths.zimage_l2p.tenc = getList(loaded, 'zimage_tenc')
+    paths.zimage_l2p.connectors = []
 
     paths.anima.ckpt = getList(loaded, 'anima_ckpt')
     paths.anima.vae = getList(loaded, 'anima_vae')
@@ -346,6 +367,9 @@ async function save(): Promise<void> {
   next.qwen_image_ckpt = [...paths.qwen_image.ckpt]
   next.qwen_image_vae = [...paths.qwen_image.vae]
   next.qwen_image_tenc = [...paths.qwen_image.tenc]
+
+  next.zimage_l2p_ckpt = [...paths.zimage_l2p.ckpt]
+  next.zimage_tenc = [...paths.zimage_l2p.tenc]
 
   next.anima_ckpt = [...paths.anima.ckpt]
   next.anima_vae = [...paths.anima.vae]

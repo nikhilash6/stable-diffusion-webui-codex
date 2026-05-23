@@ -8,7 +8,8 @@ Required Notice: see NOTICE
 
 Purpose: Shared model-family filtering helpers for quicksettings/checkpoint selectors.
 Applies the same family/root heuristics used by QuickSettings so every checkpoint selector (including swap-model inputs) shows identical values.
-Qwen Image checkpoint selection is root-only through `qwen_image_ckpt`; no filename/title fallback is used for that family.
+Qwen Image and Z-Image L2P checkpoint selection are root-only through `qwen_image_ckpt` / `zimage_l2p_ckpt`; no filename/title fallback is used
+for those families.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `enginePrefixForFamily` (function): Maps UI tab family to path prefix key (`*_ckpt` roots).
@@ -25,11 +26,12 @@ function normalizePath(path: string): string {
 
 export function enginePrefixForFamily(
   family: TabFamily,
-): 'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'qwen_image' | 'wan22' | 'zimage' | 'anima' | 'ltx2' {
+): 'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'qwen_image' | 'wan22' | 'zimage' | 'zimage_l2p' | 'anima' | 'ltx2' {
   if (isWanTabFamily(family)) return 'wan22'
   if (family === 'chroma') return 'flux1'
   if (family === 'flux2') return 'flux2'
   if (family === 'qwen_image') return 'qwen_image'
+  if (family === 'zimage_l2p') return 'zimage_l2p'
   if (family === 'anima') return 'anima'
   if (family === 'ltx2') return 'ltx2'
   return family
@@ -60,7 +62,7 @@ export function modelMatchesFamily(
   if ((pathsByKey[rootsKey] || []).length > 0) {
     return fileInPaths(model.filename, rootsKey, pathsByKey)
   }
-  if (family === 'qwen_image') return false
+  if (family === 'qwen_image' || family === 'zimage_l2p') return false
 
   const metadata = (model.metadata || {}) as Record<string, unknown>
   const metadataFamily = String((metadata.family as string) || (metadata.model_family as string) || '').toLowerCase()

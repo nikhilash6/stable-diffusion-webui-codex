@@ -78,12 +78,17 @@ def quantize_blocks_q8_0(blocks: np.ndarray) -> np.ndarray:
     """Quantize float32 blocks (n, 32) to GGML Q8_0 packed blocks (n, 34)."""
     if blocks.ndim != 2 or blocks.shape[1] != 32:
         raise ValueError(f"Q8_0 quantize expects (n_blocks, 32), got {blocks.shape}")
-    x = blocks.astype(np.float32, copy=False)
-    d = np.abs(x).max(axis=1, keepdims=True) / np.float32(127.0)
-    with np.errstate(divide="ignore"):
-        inv = np.where(d == 0, 0, 1.0 / d)
-    qs = _np_roundf(x * inv)
-    header = d.astype(np.float16).view(np.uint8)
+    values = blocks.astype(np.float32, copy=False)
+    if not np.all(np.isfinite(values)):
+        raise ValueError("Q8_0 quantize received non-finite values")
+
+    scale = np.abs(values).max(axis=1, keepdims=True) / np.float32(127.0)
+    stored_scale = scale.astype(np.float16)
+    stored_scale_is_nonzero = stored_scale != np.float16(0.0)
+    inv = np.zeros_like(scale, dtype=np.float32)
+    np.divide(np.float32(1.0), scale, out=inv, where=stored_scale_is_nonzero)
+    qs = _np_roundf(values * inv)
+    header = stored_scale.view(np.uint8)
     payload = qs.astype(np.int8).view(np.uint8)
     return np.concatenate([header, payload], axis=1)
 

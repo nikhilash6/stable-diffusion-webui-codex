@@ -17,6 +17,8 @@ Symbols (top-level; keep in sync; no ghosts):
 - `ConversionPreflight` (dataclass): Resolved conversion contract returned by `preflight_conversion_contract`.
 - `GGUFConversionCancelled` (exception): Raised when a conversion is cancelled via a cooperative cancel signal.
 - `GGUFVerificationError` (exception): Raised when a written GGUF file fails validation/verification.
+- `_format_size_delta` (function): Formats Q8 underflow promotion size deltas for operator logs.
+- `_log_q8_underflow_reports` (function): Emits per-tensor Q8_0 underflow promotion/retention reports.
 - `preflight_conversion_contract` (function): Resolve and validate recipe/profile/policy before heavy tensor IO.
 - `convert_safetensors_to_gguf` (function): Main conversion entrypoint; reads SafeTensors (incl. sharded), quantizes tensors, writes GGUF,
   and optionally verifies the output (uses many helpers above).
@@ -40,6 +42,7 @@ from apps.backend.quantization.gguf import (
 )
 from apps.backend.runtime.tools import gguf_converter_metadata as _metadata
 from apps.backend.runtime.tools import gguf_converter_profiles as _profiles
+from apps.backend.runtime.tools import gguf_converter_q8_underflow as _q8_underflow
 from apps.backend.runtime.tools import gguf_converter_quantization as _quantization
 from apps.backend.runtime.tools import gguf_converter_safetensors_source as _safetensors_source
 from apps.backend.runtime.tools import gguf_converter_tensor_planner as _tensor_planner
@@ -80,6 +83,52 @@ class ConversionPreflight:
     arch: str
     metadata_config: dict[str, Any]
     key_mapping: dict[str, str]
+
+
+def _format_size_delta(delta_bytes: int | None) -> str:
+    if delta_bytes is None:
+        return "unknown"
+    sign = "+" if delta_bytes >= 0 else "-"
+    return f"{sign}{GGUFWriter.format_n_bytes_to_str(abs(delta_bytes))}"
+
+
+def _log_q8_underflow_reports(reports: tuple[_q8_underflow.Q8UnderflowReport, ...]) -> None:
+    if not reports:
+        return
+
+    promoted_count = sum(1 for report in reports if report.promoted)
+    retained_count = len(reports) - promoted_count
+    logger.warning(
+        "Q8_0 stored-scale underflow affected %d tensor(s); promoted=%d retained_q8_0=%d",
+        len(reports),
+        promoted_count,
+        retained_count,
+    )
+    for report in reports:
+        ratio_percent = report.affected_ratio * 100.0
+        if report.promoted:
+            assert report.selected_ggml_type is not None
+            logger.warning(
+                "Promoting Q8_0 tensor %s -> %s due to stored-scale underflow: "
+                "affected=%d/%d (%.6f%%), size_delta=%s, reason=%s",
+                report.gguf_name,
+                report.selected_ggml_type.name,
+                report.affected_blocks,
+                report.total_blocks,
+                ratio_percent,
+                _format_size_delta(report.size_delta_bytes),
+                report.reason,
+            )
+        else:
+            logger.warning(
+                "Keeping Q8_0 tensor %s with non-material stored-scale underflow: "
+                "affected=%d/%d (%.6f%%), reason=%s",
+                report.gguf_name,
+                report.affected_blocks,
+                report.total_blocks,
+                ratio_percent,
+                report.reason,
+            )
 
 
 def preflight_conversion_contract(
@@ -232,7 +281,25 @@ def convert_safetensors_to_gguf(
         tensor_names = list(sf.keys())
         check_cancel()
 
+        # Shared streaming row chunk size for pre-header analysis and tensor writes.
+        chunk_rows = 1024
+
         plans = _tensor_planner.plan_tensors(tensor_names, sf, key_mapping, requested_type, dtype_rules)
+
+        def note_q8_underflow_scan(plan: _tensor_planner.TensorPlan) -> None:
+            progress.current_tensor = f"q8 underflow scan: {plan.gguf_name}"
+            update_progress()
+
+        promotion_result = _q8_underflow.apply_q8_underflow_promotions(
+            plans,
+            sf,
+            check_cancel=check_cancel,
+            chunk_rows=chunk_rows,
+            on_scan_tensor=note_q8_underflow_scan,
+        )
+        plans = promotion_result.plans
+        progress.current_tensor = ""
+        _log_q8_underflow_reports(promotion_result.reports)
 
         progress.total_steps = len(plans)
         check_cancel()
@@ -271,9 +338,6 @@ def convert_safetensors_to_gguf(
             assert writer.fout is not None
             out = writer.fout[0]
             writer.write_padding(out, out.tell())
-
-            # Stream-write tensors in the same order used for tensor-info offsets.
-            chunk_rows = 1024
 
             def _write_bf16_bytes(tensor: torch.Tensor) -> int:
                 bf16_tensor = tensor.to(torch.bfloat16).contiguous()

@@ -10,8 +10,8 @@ Purpose: Typed signature specs produced by model detectors and consumed by loade
 Defines the core enums and dataclasses for checkpoint signatures (family, prediction kind, latent format, quantization hints, and component signatures).
 Includes explicit WAN 2.2 families (`WAN22_5B`, `WAN22_14B`, `WAN22_ANIMATE`), `ModelFamily.FLUX2` for FLUX.2 Klein
 checkpoints, `ModelFamily.LTX2` for LTX 2.x monolithic combined checkpoints, `ModelFamily.NETFLIX_VOID` for the
-CogVideoX-Fun-backed VOID inpainting family scaffold, and `ModelFamily.ANIMA` for Cosmos Predict2 / MiniTrainDiT-style
-flow checkpoints.
+CogVideoX-Fun-backed VOID inpainting family scaffold, `ModelFamily.ANIMA` for Cosmos Predict2 / MiniTrainDiT-style
+flow checkpoints, and `ModelFamily.ZIMAGE_L2P` for the pixel-space no-VAE L2P Z-Image derivative.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `ModelFamily` (enum): Checkpoint family tags (SD/SDXL/Flux.1/WAN22/etc).
@@ -50,6 +50,7 @@ class ModelFamily(Enum):
     KOALA = "koala"
     ZERO123 = "zero123"
     ZIMAGE = "zimage"
+    ZIMAGE_L2P = "zimage_l2p"
     QWEN_IMAGE = "qwen_image"
     ANIMA = "anima"
     WAN22_5B = "wan22_5b"
@@ -83,6 +84,7 @@ class LatentFormat(Enum):
     CASCADE = "cascade"
     WAN22 = "wan22"
     ZIMAGE = "zimage"
+    PIXEL_RGB = "pixel_rgb"
     QWEN_IMAGE = "qwen_image"
     OTHER = "other"
 

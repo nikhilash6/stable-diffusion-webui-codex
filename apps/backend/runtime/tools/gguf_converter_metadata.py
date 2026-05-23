@@ -8,7 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: GGUF metadata injection helpers for the converter.
 Adds provenance, quantization recipe/policy, and minimal architecture keys required by loader tooling
-(including Qwen Image transformer metadata and `codex.zimage.variant` when detectable from scheduler configs).
+(including Qwen Image/L2P profile/component metadata and `codex.zimage.variant` when detectable from scheduler configs).
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_is_hf_repo_id` (function): Returns True when a string looks like a Hugging Face repo id (`org/repo`).
@@ -94,6 +94,71 @@ def add_basic_metadata(
         writer.add_uint32("codex.qwen_image.out_channels", int(config.get("codex.qwen_image.out_channels", 0)))
         writer.add_uint32("codex.qwen_image.patch_size", int(config.get("codex.qwen_image.patch_size", 0)))
         writer.add_array("codex.qwen_image.axes_dims_rope", axes_dims_rope)
+
+    l2p_component = str(config.get("codex.zimage_l2p.component") or "").strip()
+    if l2p_component:
+        l2p_profile_id = str(config.get("codex.zimage_l2p.profile_id") or "").strip()
+        l2p_family = str(config.get("codex.zimage_l2p.family") or "").strip()
+        if not l2p_profile_id:
+            raise RuntimeError("L2P GGUF metadata requires codex.zimage_l2p.profile_id")
+        if l2p_family != "zimage_l2p":
+            raise RuntimeError("L2P GGUF metadata requires codex.zimage_l2p.family='zimage_l2p'")
+        if config.get("codex.zimage_l2p.pixel_space") is not True:
+            raise RuntimeError("L2P GGUF metadata requires codex.zimage_l2p.pixel_space=true")
+        writer.add_string("codex.zimage_l2p.profile_id", l2p_profile_id)
+        writer.add_string("codex.zimage_l2p.component", l2p_component)
+        writer.add_string("codex.zimage_l2p.family", l2p_family)
+        writer.add_bool("codex.zimage_l2p.pixel_space", True)
+        writer.add_bool("codex.zimage_l2p.requires_vae", bool(config.get("codex.zimage_l2p.requires_vae") is True))
+        if l2p_component == "denoiser":
+            if l2p_profile_id != "zimage_l2p_denoiser":
+                raise RuntimeError("L2P denoiser GGUF metadata requires profile_id='zimage_l2p_denoiser'")
+            axes_dims = config.get("codex.zimage_l2p.axes_dims")
+            axes_lens = config.get("codex.zimage_l2p.axes_lens")
+            if not isinstance(axes_dims, (list, tuple)) or len(axes_dims) != 3:
+                raise RuntimeError("L2P denoiser GGUF metadata requires codex.zimage_l2p.axes_dims")
+            if not isinstance(axes_lens, (list, tuple)) or len(axes_lens) != 3:
+                raise RuntimeError("L2P denoiser GGUF metadata requires codex.zimage_l2p.axes_lens")
+            writer.add_uint32("codex.zimage_l2p.patch_size", int(config.get("codex.zimage_l2p.patch_size", 16)))
+            writer.add_uint32(
+                "codex.zimage_l2p.frame_patch_size",
+                int(config.get("codex.zimage_l2p.frame_patch_size", 1)),
+            )
+            writer.add_uint32("codex.zimage_l2p.in_channels", int(config.get("codex.zimage_l2p.in_channels", 3)))
+            writer.add_uint32("codex.zimage_l2p.context_dim", int(config.get("codex.zimage_l2p.context_dim", 2560)))
+            writer.add_uint32(
+                "codex.zimage_l2p.num_refiner_layers",
+                int(config.get("codex.zimage_l2p.num_refiner_layers", 2)),
+            )
+            writer.add_array("codex.zimage_l2p.axes_dims", [int(value) for value in axes_dims])
+            writer.add_array("codex.zimage_l2p.axes_lens", [int(value) for value in axes_lens])
+            writer.add_bool("codex.zimage_l2p.local_decoder", bool(config.get("codex.zimage_l2p.local_decoder") is True))
+        elif l2p_component == "tenc":
+            if l2p_profile_id != "zimage_l2p_tenc":
+                raise RuntimeError("L2P TEnc GGUF metadata requires profile_id='zimage_l2p_tenc'")
+            writer.add_string("codex.zimage_l2p.tenc_slot", str(config.get("codex.zimage_l2p.tenc_slot") or "qwen3_4b"))
+            writer.add_uint32(
+                "codex.zimage_l2p.qwen_hidden_size",
+                int(config.get("codex.zimage_l2p.qwen_hidden_size", 2560)),
+            )
+            writer.add_uint32(
+                "codex.zimage_l2p.qwen_layers",
+                int(config.get("codex.zimage_l2p.qwen_layers", 36)),
+            )
+            writer.add_uint32(
+                "codex.zimage_l2p.qwen_heads",
+                int(config.get("codex.zimage_l2p.qwen_heads", 32)),
+            )
+            writer.add_uint32(
+                "codex.zimage_l2p.qwen_kv_heads",
+                int(config.get("codex.zimage_l2p.qwen_kv_heads", 8)),
+            )
+            writer.add_uint32(
+                "codex.zimage_l2p.qwen_vocab",
+                int(config.get("codex.zimage_l2p.qwen_vocab", 151936)),
+            )
+        else:
+            raise RuntimeError(f"Unsupported L2P GGUF component metadata: {l2p_component!r}")
 
     writer.add_string("gguf.quantized_at_utc", _dt.datetime.now(tz=_dt.timezone.utc).isoformat())
     writer.add_file_type(int(recipe.llama_file_type))

@@ -1,7 +1,7 @@
 # apps/interface/src/views Overview
 <!-- tags: frontend, views, model-tabs -->
 Date: 2025-10-28
-Last Review: 2026-05-19
+Last Review: 2026-05-23
 Status: Active
 
 ## Purpose
@@ -17,6 +17,7 @@ Status: Active
 - 2026-03-25: `ImageModelTab.vue` now exposes the generic first-pass swap stage via `SwapStageSettingsCard.vue` on txt2img only (`params.swapModel`), keeps `params.hires.swapModel` as the second-pass whole-engine selector, and disables the global swap stage when the tab enters img2img so no hidden active first-pass swap survives.
 - 2026-04-29: `Home.vue` Docs & Help reference paths point only to repo-shipped docs under `apps/**` and the root WebUI Atlas in `AGENTS.md`, with no `.sangoi` path mentions.
 - 2026-03-06: `Home.vue` and `ModelsList.vue` tab-creation selectors include `flux2`; `PngInfo.vue` treats `flux2` tabs as path-labeled VAE consumers; `ImageModelTab.vue` persists per-tab profiles under a dedicated `flux2` key, preserves capability-driven img2img state, resolves FLUX.2 CFG/negative-prompt semantics from the selected Klein 4B vs base-4B checkpoint, keeps FLUX.2 img2img denoise truthful/visible, and gates img2img hires through shared capability + mask policy (Kontext defaults remain FLUX.1-only).
+- 2026-05-23: `Home.vue` and `ModelsList.vue` expose `Z-Image L2P` tab creation only when backend capabilities advertise `zimage_l2p`; `ImageModelTab.vue` treats L2P as exact 1024x1024 one-shot txt2img, hides VAE/batch/action/CLIP Skip/hires/swap/refiner/IP-Adapter/advanced-guidance controls, and omits VAE from L2P workflow snapshots.
 - `PngInfo.vue` and `ImageModelTab.vue` are writers of real image-tab init images. When either seam materializes `initImageData`, it must also set `initSource.mode='img'` in the same patch so shared INPAINT gating stays truthful.
 - 2026-04-07: `WorkflowsList.vue` restore now treats sparse image snapshots as ownerful for `inpaintMode`: if a workflow snapshot omits that key (for example after backend scrub of a stale invalid value), restore must seed the type default before patching an existing compatible tab so the target tab cannot silently keep an old exact inpaint lane like `brushnet`/`fooocus_inpaint`.
 - 2026-04-11: `WorkflowsList.vue` may create a replacement tab only when the bound `source_tab_id` is missing. If the stored workflow points at an existing tab of a different exact type, restore must fail loud and let `/api/ui/workflows` own the repair boundary instead of silently rebinding to a fresh tab.
@@ -25,7 +26,7 @@ Status: Active
 - 2026-04-28: `VideoModelTab.vue` prompt token counters use exact WAN token engines (`wan22_14b` for high/low 14B prompts, `wan22_5b` for the 5B prompt). Do not route token counting through generic `wan` / `wan22` aliases.
 - All generation workspaces live under model tabs (`/models/:tabId`):
   - `ModelTabView.vue` mounts `VideoTabRouteView.vue` when `tab.type === 'wan22_14b' | 'wan22_5b' | 'ltx2'`.
-  - `ModelTabView.vue` mounts `ImageModelTab.vue` for non-video image tab types, including `sd15|sdxl|flux1|flux2|chroma|zimage|anima|qwen_image`.
+  - `ModelTabView.vue` mounts `ImageModelTab.vue` for non-video image tab types, including `sd15|sdxl|flux1|flux2|chroma|zimage|zimage_l2p|anima|qwen_image`.
 - 2026-04-13: `ModelTabView.vue` and `VideoTabRouteView.vue` now share exact video-lane truth through `src/utils/engine_taxonomy.ts::isVideoTabFamily(...)`; do not duplicate the `wan22_14b|wan22_5b|ltx2` split in each route view. The live WAN runtimes and the `WanVideoWorkspace.vue` baseline should query `engine_capabilities.ts` by exact lane id (`wan22_14b` / `wan22_5b`), not by semantic `'wan22'`.
 - 2026-04-03: `VideoTabRouteView.vue` is the thin route selector for current video families, `VideoModelTab.vue` is the sole live body owner for `wan22_14b|wan22_5b|ltx2`, `views/video-model/**` holds the renderless family runtime helpers, `components/video/**` holds the shared generic video cards, and `components/model-tabs/WanVideoWorkspace.vue` remains a reference-only mechanical baseline with maintenance-only compatibility/truth sync allowed while it stays in-tree.
 - 2026-04-08: `QuickSettingsBar.vue` still owns the LTX `TXT2VID/IMG2VID` mode toggle plus checkpoint/VAE/text-encoder selection, while `VideoModelTab.vue` renders the LTX prompt/init-image/body controls through the shared cards plus `components/InitialImageBlock.vue` without mirroring those selector values back into prompt/output helper copy, and `VideoModelTabLtxRuntime.vue` keeps the strict `useLtxVideoGeneration(tabId)` runtime contract renderless.

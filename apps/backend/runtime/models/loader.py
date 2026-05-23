@@ -9,7 +9,7 @@ Required Notice: see NOTICE
 Purpose: Central model loader for diffusion engines (checkpoint/diffusers parsing, component assembly, and runtime-friendly overrides).
 Resolves TE/VAE overrides (`tenc_path` shorthand), applies family-scoped keyspace interpretation plus source-key rewrite guards where needed, and selects storage/compute dtypes
 (storage defaults to weights primary SafeTensors dtype when detectable; compute defaults to fp32 for stability unless overridden).
-Includes core-only families (e.g., Anima) that are not diffusers repositories: the loader returns a minimal bundle and leaves external asset loading to engines.
+Includes core-only families (e.g., Anima and Z-Image L2P) that are not diffusers repositories: the loader returns a minimal bundle and leaves external asset loading to engines.
 Partial-metadata fallback stays structural only; loader compatibility no longer invents inpaint-model semantics from channels or name hints.
 NF4/FP4 is not supported (fail loud); GGUF is the only supported pre-quant format.
 WAN22 variants use explicit families (`WAN22_5B`, `WAN22_14B`, `WAN22_ANIMATE`) with no shared family alias bucket.
@@ -174,6 +174,7 @@ SUPPORTED_INFERENCE_DTYPES: Dict[ModelFamily, tuple[torch.dtype, ...]] = {
     ModelFamily.FLUX_KONTEXT: (torch.bfloat16, torch.float16, torch.float32),
     ModelFamily.FLUX2: (torch.bfloat16, torch.float16, torch.float32),
     ModelFamily.QWEN_IMAGE: (torch.bfloat16, torch.float16, torch.float32),
+    ModelFamily.ZIMAGE_L2P: (torch.bfloat16, torch.float16, torch.float32),
     ModelFamily.CHROMA: (torch.bfloat16, torch.float16, torch.float32),
 }
 DEFAULT_SUPPORTED_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
@@ -235,6 +236,7 @@ ENGINE_KEY_TO_FAMILY: Dict[str, ModelFamily] = {
     "sd20": ModelFamily.SD20,
     "sd15": ModelFamily.SD15,
     "anima": ModelFamily.ANIMA,
+    "zimage_l2p": ModelFamily.ZIMAGE_L2P,
     "ltx2": ModelFamily.LTX2,
     "wan22_5b": ModelFamily.WAN22_5B,
     "wan22_14b": ModelFamily.WAN22_14B,
@@ -255,6 +257,7 @@ FAMILY_TO_ENGINE_KEY: Dict[ModelFamily, str] = {
     ModelFamily.SD20: "sd20",
     ModelFamily.SD15: "sd15",
     ModelFamily.ANIMA: "anima",
+    ModelFamily.ZIMAGE_L2P: "zimage_l2p",
     ModelFamily.WAN22_5B: "wan22_5b",
     ModelFamily.WAN22_14B: "wan22_14b",
     ModelFamily.WAN22_ANIMATE: "wan22_14b_animate",
@@ -1299,6 +1302,13 @@ def _parse_checkpoint(
         base_state = resolve_sdxl_checkpoint_keyspace(base_state).view
     if expected_family is ModelFamily.ZIMAGE:
         signature = _zimage_signature_from_vendored_hf(model_path=primary_path)
+    elif expected_family is ModelFamily.ZIMAGE_L2P:
+        signature = registry_detect(base_state)
+        if signature.family is not ModelFamily.ZIMAGE_L2P:
+            raise ValueError(
+                "Expected Z-Image L2P checkpoint, but registry detected "
+                f"{signature.family.value!r}."
+            )
     elif expected_family is ModelFamily.FLUX2:
         signature = _flux2_signature_from_vendored_hf(model_path=primary_path)
     elif expected_family is ModelFamily.LTX2:
@@ -1338,6 +1348,13 @@ def _parse_checkpoint(
                 extra_state = resolve_sdxl_checkpoint_keyspace(extra_state).view
             if expected_family is ModelFamily.ZIMAGE:
                 extra_signature = _zimage_signature_from_vendored_hf(model_path=extra)
+            elif expected_family is ModelFamily.ZIMAGE_L2P:
+                extra_signature = registry_detect(extra_state)
+                if extra_signature.family is not ModelFamily.ZIMAGE_L2P:
+                    raise ValueError(
+                        "Expected Z-Image L2P additional checkpoint, but registry detected "
+                        f"{extra_signature.family.value!r}."
+                    )
             elif expected_family is ModelFamily.FLUX2:
                 extra_signature = _flux2_signature_from_vendored_hf(model_path=extra)
             elif expected_family is ModelFamily.LTX2:
@@ -2745,6 +2762,39 @@ def codex_loader(
                 "tenc_override_paths": dict(te_override_paths),
                 "tenc_path": resolved_tenc_path,
                 "vae_path": resolved_vae_path,
+            },
+        )
+
+    if parsed.signature.family is ModelFamily.ZIMAGE_L2P:
+        if te_override_cfg is None:
+            raise RuntimeError(
+                "Z-Image L2P checkpoint requires an external text encoder (Qwen3-4B; sha-selected). "
+                "Provide one via request extras.tenc_sha so the API can pass a valid tenc_path."
+            )
+        resolved_tenc_candidates = [
+            value.strip() for value in te_override_paths.values() if isinstance(value, str) and value.strip()
+        ]
+        if len(resolved_tenc_candidates) != 1:
+            raise RuntimeError(
+                "Z-Image L2P text encoder override resolution failed: expected exactly one non-empty external path, "
+                f"got {len(resolved_tenc_candidates)}."
+            )
+        resolved_tenc_path = os.path.expanduser(resolved_tenc_candidates[0])
+        if not os.path.isfile(resolved_tenc_path):
+            raise RuntimeError(f"Z-Image L2P text encoder path not found: {resolved_tenc_path}")
+        return _build_diffusion_bundle(
+            model_ref=sd_path,
+            family=parsed.signature.family,
+            estimated_config=config,
+            components={name: comp.state_dict for name, comp in config.components.items()},
+            signature=parsed.signature,
+            source="state_dict",
+            metadata={
+                "engine_key": "zimage_l2p",
+                "core_only": True,
+                "requires_vae": False,
+                "tenc_override_paths": dict(te_override_paths),
+                "tenc_path": resolved_tenc_path,
             },
         )
 
