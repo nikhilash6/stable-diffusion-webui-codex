@@ -40,6 +40,7 @@ Applies to `apps/backend/runtime/models/*` including `loader.py`, `registry.py`,
 - Keyspace interpretation converges on Diffusers-style text encoder keys: converts legacy resblocks to `text_model.*` and accepts plain `text_model.*` roots without treating key rewriting as an allowed runtime operation.
 
 ## Updates
+- 2026-05-23: `registry.py` preserves route-required Z-Image L2P denoiser GGUF metadata (`model.architecture`, profile/component/family, pixel/no-VAE, local-decoder, context-dim) in checkpoint inventory records after header validation so API preflight revalidation does not lose the required architecture key.
 - 2026-03-21: `loader.py` now validates that VAE state dicts do not require wrapper-prefix rewriting before layout detection/lane resolution; any such path is now an explicit stop-ship failure instead of a silent key rewrite seam.
 - 2026-03-25: `loader.py` now resolves SDXL diffusers base vs refiner truth from native `model_index.json` + `unet/config.json` evidence (no Diffusers config helper), expected-family SDXL checkpoint parsing can mark UNet-only checkpoints as `core_only`, SDXL CLIP slots no longer retype T5/CLIP payloads across family boundaries, and `ModelRegistry` marks SDXL UNet-only `.safetensors` checkpoints as `core_only` via header-only detection.
 - 2026-03-20: `loader.py` no longer exports/consumes a loader-side `inpaint_model()` checkpoint heuristic; image runtime behavior must come from explicit request selectors plus validated inventory metadata, not channel-count guesses.

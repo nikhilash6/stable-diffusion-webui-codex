@@ -9,8 +9,8 @@ Required Notice: see NOTICE
 Purpose: Checkpoint/VAE discovery with sha256 and layout-metadata caching.
 Scans configured model roots (via `apps/paths.json` accessors) for checkpoint and VAE weight files, including file-level checkpoint entries,
 computes sha256 hashes, and maintains a persistent cache in `models/.hashes.json` (schema v2) for fast UI inventory, backend SHA-based
-resolution, CLIP layout metadata reuse, and checkpoint-scoped metadata forwarding such as the current LTX2 execution-profile/default hints
-and Netflix VOID overlay pairing readiness. Paths config resolution is fail-loud (no silent fallback to defaults on invalid config payloads).
+resolution, CLIP layout metadata reuse, and checkpoint-scoped metadata forwarding such as current LTX2 execution-profile/default hints,
+Netflix VOID overlay pairing readiness, and Z-Image L2P GGUF admission metadata. Paths config resolution is fail-loud (no silent fallback to defaults on invalid config payloads).
 Family hints and root selection cover SD/Flux/Qwen Image/Anima/WAN/ZImage/ZImage L2P/LTX2/Netflix VOID keyspaces while generic VAE inventory excludes audio-bundle files.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -180,6 +180,11 @@ def _inspect_zimage_l2p_core_checkpoint(path: Path) -> dict[str, object] | None:
                 "codex.zimage_l2p.family": str(metadata.get("codex.zimage_l2p.family") or ""),
                 "codex.zimage_l2p.pixel_space": bool(metadata.get("codex.zimage_l2p.pixel_space") is True),
                 "codex.zimage_l2p.requires_vae": bool(metadata.get("codex.zimage_l2p.requires_vae") is True),
+                "model.architecture": str(metadata.get("model.architecture") or ""),
+                "codex.zimage_l2p.local_decoder": bool(
+                    metadata.get("codex.zimage_l2p.local_decoder") is True
+                ),
+                "codex.zimage_l2p.context_dim": metadata.get("codex.zimage_l2p.context_dim"),
             }
             if suffix == ".gguf"
             else {}

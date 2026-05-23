@@ -9,6 +9,7 @@ Required Notice: see NOTICE
 Purpose: Vendored config metadata for the GGUF converter UI.
 Scans the local Hugging Face mirror under `apps/backend/huggingface/**` and exposes “model metadata” entries (org/repo)
 with supported conversion components (Flux/Qwen Image/ZImage/Z-Image L2P/WAN22/LTX2 denoisers plus supported text encoders).
+The L2P Qwen3-4B text encoder is listed from the `Qwen/Qwen3-4B` mirror, not as a `zhen-nan/L2P` subcomponent.
 The preset list is metadata-only; conversion weights are supplied separately by the operator.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -67,6 +68,7 @@ def _classify_config(cfg: dict[str, Any], *, org: str, repo: str, subdir: str) -
     text_cfg = cfg.get("text_config")
     text_model_type = str(text_cfg.get("model_type") or "").strip() if isinstance(text_cfg, dict) else ""
     is_l2p_repo = org == "zhen-nan" and repo == "L2P"
+    is_l2p_tenc_repo = org == "Qwen" and repo == "Qwen3-4B"
     if class_name == "FluxTransformer2DModel":
         return ("flux_transformer", "flux_transformer")
     if _tensor_planner.is_qwen_image_transformer_config(cfg):
@@ -75,7 +77,7 @@ def _classify_config(cfg: dict[str, Any], *, org: str, repo: str, subdir: str) -
         return ("qwen_image_tenc", "qwen_image_tenc")
     if is_l2p_repo and subdir == "denoiser" and _tensor_planner.is_zimage_l2p_denoiser_config(cfg):
         return ("zimage_l2p_denoiser", "zimage_l2p_denoiser")
-    if is_l2p_repo and subdir == "text_encoder" and _tensor_planner.is_zimage_l2p_text_encoder_config(cfg):
+    if is_l2p_tenc_repo and subdir == "text_encoder" and _tensor_planner.is_zimage_l2p_text_encoder_config(cfg):
         return ("zimage_l2p_tenc", "zimage_l2p_tenc")
     if class_name == "ZImageTransformer2DModel":
         return ("zimage_transformer", "zimage_transformer")

@@ -16,7 +16,7 @@ workspace state, not a second raw sampler/scheduler control surface in the share
 with readiness/blocking resolved from the same diagnostics owner used by the body surface. Outside `/models/:tabId`, model-asset selectors stay summary-only/read-only
 and redirect the user back to a real model-tab owner instead of mutating misleading global checkpoint/VAE/text-encoder state. The non-WAN VAE selector
 also keeps Anima choices scoped to the truthful WanVAE-compatible root instead of laundering unrelated family VAEs into the Anima lane. Z-Image L2P quicksettings
-expose only the denoiser checkpoint and Qwen3-4B text-encoder selector; no VAE selector is rendered for that no-VAE engine.
+expose only the denoiser checkpoint and shared `zimage/<path>` Qwen3-4B text-encoder selector; no VAE selector is rendered for that no-VAE engine.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `QuickSettingsBar` (component): Main QuickSettings SFC; includes “advanced” UI, per-family subcomponents, and selector filtering logic.
@@ -1166,7 +1166,7 @@ function stripFamilyPrefix(label: string): string {
   const prefix = norm.slice(0, idx)
   const rest = norm.slice(idx + 1)
   if (!rest) return norm
-  if (['sd15', 'sdxl', 'flux1', 'flux2', 'chroma', 'qwen_image', 'wan22', 'zimage', 'zimage_l2p'].includes(prefix)) return rest
+  if (['sd15', 'sdxl', 'flux1', 'flux2', 'chroma', 'qwen_image', 'wan22', 'zimage'].includes(prefix)) return rest
   return norm
 }
 
@@ -1466,7 +1466,7 @@ const filteredTextEncoderChoices = computed(() => {
   if (fam === 'zimage_l2p') {
     return inventoryTextEncoders.value
       .filter((item) => typeof item.path === 'string' && fileInPaths(item.path, 'zimage_tenc'))
-      .map((item) => `zimage_l2p/${item.path}`)
+      .map((item) => `zimage/${item.path}`)
   }
   if (fam === 'qwen_image') {
     return inventoryTextEncoders.value

@@ -12,6 +12,23 @@
     justify-content: flex-end;
   }
 
+  .cdx-tools .row-inline.cdx-tools-quant-row {
+    align-items: stretch;
+    gap: var(--space-sm);
+  }
+
+  .cdx-tools .cdx-tools-quant-suffixes {
+    display: inline-flex;
+    align-items: stretch;
+    gap: 0.35rem;
+    flex: 0 0 auto;
+  }
+
+  .cdx-tools .cdx-tools-quant-suffixes .qs-toggle-btn {
+    min-width: 2.25rem;
+    justify-content: center;
+  }
+
   .cdx-tools .row-inline .btn-icon {
     flex-shrink: 0;
   }
@@ -145,5 +162,19 @@
     flex-shrink: 0;
     font-size: 0.75rem;
     opacity: 0.7;
+  }
+
+  @media (max-width: 640px) {
+    .cdx-tools .row-inline.cdx-tools-quant-row {
+      flex-wrap: wrap;
+    }
+
+    .cdx-tools .cdx-tools-quant-suffixes {
+      width: 100%;
+    }
+
+    .cdx-tools .cdx-tools-quant-suffixes .qs-toggle-btn {
+      flex: 1 1 0;
+    }
   }
 }

@@ -8,6 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: Converter profile registry for GGUF conversion.
 Selects source/native metadata normalizers, key mappings, supported quantization recipes, recipe-intrinsic tensor distributions, and per-model policy overlays.
+Single-physical denoiser profiles expose public K-suffix file recipes while retaining backend-owned final recipe ids.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_is_flux` (function): Detect whether a config.json describes a Flux transformer.
@@ -150,9 +151,14 @@ _SINGLE_PHYSICAL_PROFILE_RECIPES = frozenset(
         QuantizationRecipe.F32,
         QuantizationRecipe.Q8_0,
         QuantizationRecipe.Q6_K,
+        QuantizationRecipe.Q5_K_M,
         QuantizationRecipe.Q5_K_S,
+        QuantizationRecipe.Q4_K_M,
         QuantizationRecipe.Q4_K_S,
+        QuantizationRecipe.Q3_K_L,
+        QuantizationRecipe.Q3_K_M,
         QuantizationRecipe.Q3_K_S,
+        QuantizationRecipe.Q2_K,
         QuantizationRecipe.Q2_K_S,
         QuantizationRecipe.Q5_1,
         QuantizationRecipe.Q5_0,

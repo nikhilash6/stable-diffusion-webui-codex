@@ -58,7 +58,7 @@ Status: Active
 - 2026-01-13: `ToolsTab.vue` GGUF converter supports cancellation and an Overwrite toggle (default off; fails if the output file exists).
 - 2026-03-07: `ToolsTab.vue` GGUF converter emits source/native tensor names only, posts one `profile_id` per selected component, and no longer sends layout-selection payload fields.
 - 2026-01-14: `ToolsTab.vue` right-aligns GGUF converter action rows (Overwrite + Convert/Cancel).
-- 2026-05-19: `ToolsTab.vue` uses vendored model metadata plus backend-owned quantization descriptors only. It exposes canonical GGUF file recipes directly (`Q4_K_M`, `Q4_K_S`, `Q3_K_L/M/S`, etc.) and no separate quant-variant toggle.
+- 2026-05-23: `ToolsTab.vue` uses vendored model metadata plus backend-owned quantization descriptors only. It keeps `quantization` as the canonical final recipe id while rendering a compact base recipe dropdown plus mutually exclusive `L`/`M`/`S` suffix buttons for K-quant variants; `M` is the default when supported.
 - 2026-05-19: `ToolsTab.vue` shows `Profile Policy` only for selected profile+recipe pairs with backend-reported distinct policy states, sends `quant_policy_preset` only then, and never sends dtype-control payload fields.
 - 2026-03-07: `ToolsTab.vue` GGUF converter presets are component-based and can surface denoisers or text encoders from vendored model metadata with truthful labels.
 - 2026-03-07: `ToolsTab.vue` exposes only the GGUF converter and SafeTensors Merger workflows in the Tools UI.

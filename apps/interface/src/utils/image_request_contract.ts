@@ -9,8 +9,8 @@ Required Notice: see NOTICE
 Purpose: Pure helper for explicit frontend image request contract resolution.
 Resolves checkpoint metadata, FLUX.2 guidance mode, asset-contract-backed text-encoder/VAE selectors, and canonical image `extras`
 without importing Pinia/Vue stores directly. Qwen Image text encoders are accepted only as `qwen_image/<path>` labels that resolve through
-the Qwen Image text-encoder root, and Z-Image L2P text encoders are accepted only as `zimage_l2p/<path>` labels that resolve through
-the shared Z-Image text-encoder root. No-VAE engines emit no VAE selector extras. Callers inject store-backed resolver callbacks
+the Qwen Image text-encoder root, and Z-Image L2P text encoders are accepted only as shared `zimage/<path>` labels that resolve through
+the Z-Image text-encoder root. No-VAE engines emit no VAE selector extras. Callers inject store-backed resolver callbacks
 and remain responsible for translating thrown contract `Error`s into UI state.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -30,7 +30,7 @@ export type ImageRequestGuidanceMode = 'cfg' | 'distilled_cfg'
 const QWEN_IMAGE_ENGINE_ID = 'qwen_image'
 const QWEN_IMAGE_TEXT_ENCODER_LABEL_PREFIX = 'qwen_image/'
 const ZIMAGE_L2P_ENGINE_ID = 'zimage_l2p'
-const ZIMAGE_L2P_TEXT_ENCODER_LABEL_PREFIX = 'zimage_l2p/'
+const ZIMAGE_L2P_TEXT_ENCODER_LABEL_PREFIX = 'zimage/'
 
 export interface ImageRequestContractResolvers {
   requireModelInfo: (label: string) => ModelInfo
@@ -122,7 +122,7 @@ function normalizeZImageL2PTextEncoderLabel(label: string): string {
     !normalized.startsWith(ZIMAGE_L2P_TEXT_ENCODER_LABEL_PREFIX)
     || normalized.length <= ZIMAGE_L2P_TEXT_ENCODER_LABEL_PREFIX.length
   ) {
-    throw new Error('Z-Image L2P text encoder selection must use zimage_l2p/<path> labels from zimage_tenc roots.')
+    throw new Error('Z-Image L2P text encoder selection must use zimage/<path> labels from zimage_tenc roots.')
   }
   return normalized
 }

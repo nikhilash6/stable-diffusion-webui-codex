@@ -24,7 +24,7 @@ them truthfully without silently rewriting stored raw profile ids.
 Image-tab sampler/scheduler defaults are consumed only from backend capabilities; when those defaults are unavailable the store leaves fields blank for request-boundary validation instead of inventing frontend fallback values.
 Qwen Image tabs are capability-derived like Anima/LTX2, use the single canonical `qwen_image` image-tab type, and reject persisted text-encoder labels
 that are not `qwen_image/<path>` selections. Z-Image L2P tabs are capability-derived exact txt2img tabs, keep fixed 1024 defaults, and reject persisted text-encoder labels
-that are not `zimage_l2p/<path>` selections.
+that are not shared `zimage/<path>` selections.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `BaseTabType` (type): API tab type discriminator (from backend `ApiTab['type']`).
@@ -80,7 +80,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `shouldPersistWan14bStageSamplingBackfill` (function): Detects persisted WAN 14B params requiring High/Low stage sampler/scheduler migration (`sampler='uni-pc bh2'`, `scheduler='simple'`).
 - `buildImageTopLevelBackfillPatch` (function): Builds a missing-top-level-only image-tab backfill patch from the normalized owner shape so hydration can persist absent canonical keys without widening into unrelated nested drift.
 - `normalizeQwenImageTextEncoders` (function): Validates Qwen Image persisted text-encoder labels as one `qwen_image/<path>` selector.
-- `normalizeZImageL2PTextEncoders` (function): Validates Z-Image L2P persisted text-encoder labels as one `zimage_l2p/<path>` selector.
+- `normalizeZImageL2PTextEncoders` (function): Validates Z-Image L2P persisted text-encoder labels as one shared `zimage/<path>` selector.
 - `normalizeImageParams` (function): Applies image-tab nested merge normalization (`hires/refiner`) with sampler/scheduler and strict inpaint-mode reset.
 - `normalizeParamsForType` (function): Normalizes raw params payload based on tab type (shape checking; discards invalid fields).
 - `normalizeTab` (function): Normalizes a raw tab record (id/type/params/meta) into the store shape.
@@ -1527,14 +1527,14 @@ function normalizeZImageL2PTextEncoders(labels: string[]): string[] {
   if (labels.length !== 1) {
     throw new ModelTabsStoreError(
       'invalid_response',
-      'Z-Image L2P requires exactly one zimage_l2p/<path> text encoder selection.',
+      'Z-Image L2P requires exactly one zimage/<path> text encoder selection.',
     )
   }
   const normalized = labels[0].replace(/\\+/g, '/').trim()
-  if (!normalized.startsWith('zimage_l2p/') || normalized.length <= 'zimage_l2p/'.length) {
+  if (!normalized.startsWith('zimage/') || normalized.length <= 'zimage/'.length) {
     throw new ModelTabsStoreError(
       'invalid_response',
-      'Z-Image L2P text encoder selections must use zimage_l2p/<path> labels from zimage_tenc roots.',
+      'Z-Image L2P text encoder selections must use zimage/<path> labels from zimage_tenc roots.',
     )
   }
   return [normalized]
