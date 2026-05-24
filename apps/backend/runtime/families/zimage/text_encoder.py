@@ -6,14 +6,14 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Qwen3-4B text encoder wrapper for Z Image and Z-Image L2P (GGUF or safetensors) with strict fail-loud load semantics.
+Purpose: Qwen3-4B text encoder wrapper for Z Image and Z-Image L2P (GGUF or safetensors) with strict fail-loud load and logical output dtype semantics.
 Wraps the Qwen3 model used by Z Image (Turbo/Base variants) and L2P for text encoding, preferring vendored HF tokenizers under `apps/backend/huggingface/Tongyi-MAI/**`.
 GGUF loads are constructed under `using_codex_operations(weight_format="gguf")` so `torch.nn` layers can load packed `CodexParameter` weights.
 Safetensors loads apply strict generic Qwen key-style normalization before native strict model load.
 This module follows the “Flux pattern” by providing a small text-processing engine wrapper for consistent interfaces.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `ZImageTextEncoder` (class): nn.Module wrapper for Qwen3-4B; supports loading from GGUF/safetensors with strict key validation, tokenization, and embedding extraction
+- `ZImageTextEncoder` (class): nn.Module wrapper for Qwen3-4B; supports loading from GGUF/safetensors with strict key validation, tokenization, logical floating output dtype resolution, and embedding extraction
   (contains nested helpers for tokenizer loading, chat templating, debug tracing, and encode/tokenize/masked-encode APIs).
 - `ZImageTextProcessingEngine` (class): Thin adapter providing a consistent callable interface (`__call__`, `tokenize`) around `ZImageTextEncoder`.
 """
@@ -276,11 +276,51 @@ class ZImageTextEncoder(nn.Module):
     
     @property
     def dtype(self) -> torch.dtype:
-        """Get the dtype of the model parameters."""
-        try:
-            return next(self.model.parameters()).dtype
-        except StopIteration:
+        """Get the logical floating output dtype for encoded hidden states."""
+        model_compute_dtype = getattr(self.model, "compute_dtype", None)
+        if self._is_floating_dtype(model_compute_dtype):
+            return model_compute_dtype
+
+        parameters = list(self.model.parameters())
+        if not parameters:
             return torch.float32
+
+        computation_dtypes: list[str] = []
+        storage_dtypes: list[str] = []
+        for parameter in parameters:
+            parameter_compute_dtype = getattr(parameter, "computation_dtype", None)
+            if self._is_floating_dtype(parameter_compute_dtype):
+                return parameter_compute_dtype
+            computation_dtypes.append(str(parameter_compute_dtype) if parameter_compute_dtype is not None else "<missing>")
+            storage_dtypes.append(str(getattr(parameter, "dtype", None)))
+
+        for parameter in parameters:
+            parameter_storage_dtype = getattr(parameter, "dtype", None)
+            if self._is_floating_dtype(parameter_storage_dtype):
+                return parameter_storage_dtype
+
+        raise RuntimeError(
+            "Z Image Qwen3 text encoder could not resolve a floating output dtype. "
+            f"model_compute_dtype={model_compute_dtype!r} "
+            f"parameter_computation_dtypes={self._summarize_dtype_values(computation_dtypes)} "
+            f"parameter_storage_dtypes={self._summarize_dtype_values(storage_dtypes)}"
+        )
+
+    @staticmethod
+    def _is_floating_dtype(dtype: object) -> bool:
+        if not isinstance(dtype, torch.dtype):
+            return False
+        try:
+            return bool(torch.empty((), dtype=dtype).is_floating_point())
+        except (TypeError, RuntimeError):
+            return False
+
+    @staticmethod
+    def _summarize_dtype_values(values: list[str]) -> list[str]:
+        unique_values = sorted(set(values))
+        if len(unique_values) <= 8:
+            return unique_values
+        return [*unique_values[:8], f"... +{len(unique_values) - 8} more"]
     
     def load_tokenizer(self, tokenizer_path: Optional[str] = None):
         """Load the Qwen tokenizer.
