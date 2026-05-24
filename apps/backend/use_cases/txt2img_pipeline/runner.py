@@ -13,7 +13,7 @@ The hires stage delegates family-dispatched init preparation and continuation se
 When configured, the hires second pass parses LoRA-only prompt tags, inherits base/request LoRAs when the hires prompt omits them, resolves explicit hires request overrides by deriving a dedicated `SamplingPlan` for the hires pass, and calls the shared sampler with the internal fixed-step img2img continuation flag only from this hires seam.
 Sampler-specific hires plan options such as ER-SDE stay attached to the derived hires plan rather than leaking through flat processing fields.
 First-pass base decode before hires is now upscaler-aware (`latent:*` skips decode; pixel upscalers decode).
-Exact Z-Image L2P runs stay inside this canonical txt2img runner with pre-conditioning unsupported-surface guards, effective prompt/optional-negative validation, pixel RGB sampling, and `GenerationResult.decoded` propagation that avoids VAE decode fallback.
+Exact Z-Image L2P runs stay inside this canonical txt2img runner with pre-conditioning unsupported-surface guards, effective prompt/optional-negative validation, pixel RGB sampling, canonical `BackendState` sampling-progress publication, and `GenerationResult.decoded` propagation that avoids VAE decode fallback.
 When smart offload is enabled, keeps required text-encoder patchers loaded across cond+uncond and unloads them after conditioning.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -39,6 +39,7 @@ import numpy as np
 import torch
 
 from apps.backend.core import devices
+from apps.backend.core.state import state as backend_state
 from apps.backend.core.rng import ImageRNG
 from apps.backend.infra.config import args as backend_args
 from apps.backend.runtime.diagnostics.pipeline_debug import log as pipeline_log, pipeline_trace
@@ -912,19 +913,61 @@ class Txt2ImgPipelineRunner:
             if not callable(hook):
                 raise RuntimeError("Z-Image L2P engine is missing required sample_pixel_txt2img hook.")
 
-            def _l2p_progress(info: dict[str, object]) -> None:
-                processing.update_extra_param("Z-Image L2P Progress", dict(info))
+            progress_owner_token = str(getattr(processing, "_codex_progress_owner_token", "") or "").strip()
+            if not progress_owner_token:
+                raise RuntimeError("Z-Image L2P progress owner token is missing.")
+            sampling_steps = int(state.sampling_plan.steps)
+            if sampling_steps <= 0:
+                raise RuntimeError("Z-Image L2P sampling steps must be positive for progress reporting.")
 
-            pixel_samples = hook(
-                cond=state.cond,
-                uncond=state.uncond,
-                sampling_plan=state.sampling_plan,
-                prompt_context=state.prompt_context,
-                rng=state.rng,
-                width=int(processing.width),
-                height=int(processing.height),
-                progress_callback=_l2p_progress,
+            def _l2p_progress_int(payload: dict[str, object], key: str) -> int:
+                if key not in payload:
+                    raise RuntimeError(f"Z-Image L2P progress payload missing required progress key '{key}'.")
+                value = payload[key]
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise RuntimeError(f"Z-Image L2P progress payload key '{key}' must be a non-bool int.")
+                return int(value)
+
+            def _l2p_progress(info: dict[str, object]) -> None:
+                payload = dict(info)
+                if backend_state.should_stop:
+                    raise RuntimeError("cancelled")
+                step = _l2p_progress_int(payload, "step")
+                payload_steps = _l2p_progress_int(payload, "steps")
+                if payload_steps <= 0:
+                    raise RuntimeError("Z-Image L2P progress payload steps must be positive.")
+                if payload_steps != sampling_steps:
+                    raise RuntimeError(
+                        "Z-Image L2P progress payload steps "
+                        f"does not match sampling plan steps (payload={payload_steps}, plan={sampling_steps})."
+                    )
+                if step < 1 or step > sampling_steps:
+                    raise RuntimeError(
+                        f"Z-Image L2P progress step out of range (step={step}, steps={sampling_steps})."
+                    )
+                backend_state.update_sampling(step=step, total=sampling_steps, owner_token=progress_owner_token)
+                backend_state.reset_sampling_blocks(owner_token=progress_owner_token)
+                processing.update_extra_param("Z-Image L2P Progress", payload)
+
+            backend_state.start(
+                job_count=1,
+                sampling_steps=sampling_steps,
+                progress_owner_token=progress_owner_token,
             )
+            try:
+                pixel_samples = hook(
+                    cond=state.cond,
+                    uncond=state.uncond,
+                    sampling_plan=state.sampling_plan,
+                    prompt_context=state.prompt_context,
+                    rng=state.rng,
+                    width=int(processing.width),
+                    height=int(processing.height),
+                    progress_callback=_l2p_progress,
+                )
+            finally:
+                backend_state.end()
+                backend_state.clear_flags()
             if not isinstance(pixel_samples, torch.Tensor) or pixel_samples.ndim != 4:
                 raise RuntimeError(
                     "Z-Image L2P pixel hook returned invalid output; "
