@@ -7,12 +7,13 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Native Z-Image L2P pixel-space DiT runtime.
-Implements the L2P checkpoint keyspace exactly (`all_x_embedder.16-1`, transformer blocks, and `local_decoder`) without VAE or layer-name rewriting.
-Loads SafeTensors/GGUF state-dict views through the repo-owned strict loaders, keeps GGUF timestep activations on floating compute dtypes rather than packed storage dtypes, and returns pixel tensors in the native [-1, 1] image range.
+Implements the native checkpoint keyspace exactly without VAE/layer-name rewriting and loads SafeTensors/GGUF through strict views.
+Keeps GGUF timestep activations floating, returns native [-1, 1] pixel tensors, and logs the first forced-PyTorch SDPA attention call.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_is_floating_dtype` (function): Returns true only for floating `torch.dtype` values.
 - `_resolve_timestep_activation_dtype` (function): Resolves the floating dtype used for L2P timestep MLP activations.
+- `_l2p_sdpa_policy_label` (function): Reports the PyTorch SDPA policy L2P forced attention will request.
 - `ZImageL2PConfig` (dataclass): Architecture constants for the first supported L2P 1K checkpoint.
 - `RMSNorm` (class): RMS normalization layer matching checkpoint `*.weight` names.
 - `TimestepEmbedder` (class): Sinusoidal timestep embedder feeding adaLN modulation.
@@ -39,6 +40,8 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 
 from apps.backend.runtime.attention import attention_function_pre_shaped
+from apps.backend.runtime.logging import emit_backend_message
+from apps.backend.runtime.memory import memory_management
 from apps.backend.runtime.memory.config import AttentionBackend
 from apps.backend.runtime.misc.autocast import autocast_disabled
 from apps.backend.runtime.ops.operations import using_codex_operations
@@ -47,6 +50,7 @@ from apps.backend.runtime.models.state_dict import safe_load_state_dict
 _SEQ_MULTI_OF = 32
 _ADALN_EMBED_DIM = 256
 _L2P_PATCH_KEY = "16-1"
+_L2P_ATTENTION_SHAPE_LOGGED = False
 _L2P_REQUIRED_KEYS: tuple[str, ...] = (
     "all_x_embedder.16-1.weight",
     "local_decoder.out_conv.weight",
@@ -54,6 +58,24 @@ _L2P_REQUIRED_KEYS: tuple[str, ...] = (
     "noise_refiner.0.adaLN_modulation.0.weight",
     "cap_embedder.1.weight",
 )
+
+
+def _l2p_sdpa_policy_label() -> str:
+    try:
+        attention_cfg = memory_management.manager.config.attention
+    except Exception:
+        return "auto"
+    if getattr(attention_cfg, "backend", None) != AttentionBackend.PYTORCH:
+        return "auto"
+    enable_flash = bool(getattr(attention_cfg, "enable_flash", False))
+    enable_mem_efficient = bool(getattr(attention_cfg, "enable_mem_efficient", False))
+    if enable_flash and enable_mem_efficient:
+        return "auto"
+    if enable_flash:
+        return "flash"
+    if enable_mem_efficient:
+        return "mem_efficient"
+    return "math"
 
 
 def _is_floating_dtype(dtype: object) -> bool:
@@ -205,6 +227,27 @@ class L2PAttention(nn.Module):
             rotated = torch.view_as_real(x_complex * freqs).flatten(3)
             return rotated.to(dtype=x_in.dtype)
 
+    def _log_attention_shape_once(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> None:
+        global _L2P_ATTENTION_SHAPE_LOGGED
+        if _L2P_ATTENTION_SHAPE_LOGGED:
+            return
+        _L2P_ATTENTION_SHAPE_LOGGED = True
+        emit_backend_message(
+            "[zimage_l2p] first attention call",
+            logger=__name__,
+            backend=AttentionBackend.PYTORCH.value,
+            sdpa_policy=_l2p_sdpa_policy_label(),
+            mask="none",
+            is_causal=False,
+            q_shape=tuple(q.shape),
+            k_shape=tuple(k.shape),
+            v_shape=tuple(v.shape),
+            dtype=str(q.dtype),
+            device=str(q.device),
+            heads=self.num_heads,
+            head_dim=self.head_dim,
+        )
+
     def forward(self, hidden_states: torch.Tensor, *, freqs_cis: torch.Tensor | None) -> torch.Tensor:
         batch, tokens, _ = hidden_states.shape
         query = self.to_q(hidden_states).unflatten(-1, (self.num_heads, self.head_dim))
@@ -217,10 +260,14 @@ class L2PAttention(nn.Module):
             query = self._apply_rotary(query, freqs_cis)
             key = self._apply_rotary(key, freqs_cis)
 
+        query_shaped = query.transpose(1, 2)
+        key_shaped = key.transpose(1, 2)
+        value_shaped = value.transpose(1, 2)
+        self._log_attention_shape_once(query_shaped, key_shaped, value_shaped)
         out = attention_function_pre_shaped(
-            query.transpose(1, 2),
-            key.transpose(1, 2),
-            value.transpose(1, 2),
+            query_shaped,
+            key_shaped,
+            value_shaped,
             mask=None,
             is_causal=False,
             backend=AttentionBackend.PYTORCH,
