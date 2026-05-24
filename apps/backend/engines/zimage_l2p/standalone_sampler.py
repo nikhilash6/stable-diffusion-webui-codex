@@ -8,15 +8,14 @@ Required Notice: see NOTICE
 
 Purpose: Pixel-space FlowMatch sampler for Z-Image L2P.
 Implements the upstream Z-Image scheduler math for exact 1024x1024 L2P txt2img without VAE decode or latent-space fallthrough,
-including runtime CFG fused/split batching, conservative prompt-length eligibility, CUDA-OOM fallback, and effective sampling logs.
+including runtime CFG fused/split batching for variable-length positive/negative prompts, CUDA-OOM fallback, and effective sampling logs.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `build_zimage_l2p_sigmas` (function): Builds shifted FlowMatch sigma schedule for L2P.
 - `_require_prompt_embeddings` (function): Validates per-prompt L2P text embeddings.
 - `_move_embeddings` (function): Moves prompt embeddings to the active denoiser device/dtype.
 - `_is_cuda_oom` (function): Classifies CUDA OOM failures for fused-CFG fallback.
-- `_rounded_l2p_tokens` (function): Computes L2P text token length after `_SEQ_MULTI_OF` padding.
-- `_can_fuse_l2p_cfg` (function): Checks whether cond/uncond prompt embeddings can share one fused CFG forward.
+- `_can_fuse_l2p_cfg` (function): Checks whether cond/uncond prompt embedding ranks and dimensions can share one fused CFG forward.
 - `_run_l2p_split_cfg` (function): Executes serial cond/uncond CFG forwards.
 - `_run_l2p_fused_cfg` (function): Executes fused uncond+cond CFG in one model forward.
 - `sample_zimage_l2p_pixel_txt2img` (function): Runs classic-CFG L2P pixel-space Euler sampling and returns decoded RGB tensors.
@@ -29,14 +28,11 @@ from typing import Any
 
 import torch
 
-from apps.backend.infra.config.env_flags import env_str
-from apps.backend.runtime.families.zimage_l2p.l2p_model import _SEQ_MULTI_OF, _l2p_sdpa_policy_label
+from apps.backend.runtime.families.zimage_l2p.l2p_model import _l2p_sdpa_policy_label
 from apps.backend.runtime.logging import emit_backend_message
 from apps.backend.runtime.memory import memory_management
 from apps.backend.runtime.memory.config import AttentionBackend
-
-
-_CFG_BATCH_MODE_ENV = "CODEX_CFG_BATCH_MODE"
+from apps.backend.runtime.sampling.cfg_batch import resolve_cfg_batch_mode
 
 
 def build_zimage_l2p_sigmas(
@@ -100,12 +96,6 @@ def _is_cuda_oom(exc: BaseException) -> bool:
     )
 
 
-def _rounded_l2p_tokens(tensor: torch.Tensor) -> int:
-    tokens = int(tensor.shape[0])
-    padding = (-tokens) % int(_SEQ_MULTI_OF)
-    return tokens + padding
-
-
 def _can_fuse_l2p_cfg(
     cond_list: Sequence[torch.Tensor],
     uncond_list: Sequence[torch.Tensor],
@@ -119,13 +109,6 @@ def _can_fuse_l2p_cfg(
             return False, (
                 f"prompt embed dim mismatch at sample {index}: "
                 f"{tuple(cond_tensor.shape)} vs {tuple(uncond_tensor.shape)}"
-            )
-        cond_tokens = _rounded_l2p_tokens(cond_tensor)
-        uncond_tokens = _rounded_l2p_tokens(uncond_tensor)
-        if cond_tokens != uncond_tokens:
-            return False, (
-                f"rounded prompt token length mismatch at sample {index}: "
-                f"{cond_tokens} != {uncond_tokens}"
             )
     return True, "ok"
 
@@ -215,11 +198,7 @@ def sample_zimage_l2p_pixel_txt2img(
     sigmas = build_zimage_l2p_sigmas(steps=int(steps), shift=float(flow_shift), device=device)
     sigma_next = torch.cat([sigmas[1:], torch.zeros((1,), dtype=sigmas.dtype, device=device)], dim=0)
 
-    requested_cfg_batch_mode = env_str(
-        _CFG_BATCH_MODE_ENV,
-        default="fused",
-        allowed={"fused", "split"},
-    )
+    requested_cfg_batch_mode = resolve_cfg_batch_mode()
     has_cfg = uncond_list is not None and cfg_scale > 1.0
     fused_allowed = False
     fused_block_reason = "cfg disabled"

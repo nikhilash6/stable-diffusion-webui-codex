@@ -11,7 +11,7 @@ Implements conditioning batching, CFG routing (including optional APG/rescale/tr
 (prepare/cleanup) for native samplers.
 Sampling prepare/cleanup delegates generic smart-offload load/unload event emission to the memory manager.
 Emits optional profiling sections (torch-profiler `record_function`) at key seams when `CODEX_PROFILE` is enabled.
-Supports an opt-in CFG cond+uncond fused batch mode (`CODEX_CFG_BATCH_MODE=fused|split`) that can reduce `apply_model` calls when memory allows,
+Supports an opt-in CFG cond+uncond fused batch mode through the shared `CODEX_CFG_BATCH_MODE=fused|split` resolver that can reduce `apply_model` calls when memory allows,
 with a best-effort fallback to split on CUDA OOM.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -45,6 +45,7 @@ from apps.backend.runtime.memory.smart_offload import smart_offload_enabled
 from apps.backend.runtime import utils
 from apps.backend.infra.config.env_flags import env_flag, env_int, env_str
 from apps.backend.runtime.diagnostics.profiler import profiler
+from apps.backend.runtime.sampling.cfg_batch import resolve_cfg_batch_mode
 from .condition import Condition, compile_conditions, compile_weighted_conditions
 
 
@@ -358,11 +359,7 @@ def calc_cond_uncond_batch(model, cond, uncond, x_in, timestep, model_options):
     COND = 0
     UNCOND = 1
 
-    cfg_batch_mode = env_str(
-        "CODEX_CFG_BATCH_MODE",
-        default="fused",
-        allowed={"fused", "split"},
-    )
+    cfg_batch_mode = resolve_cfg_batch_mode()
     fused_enabled = cfg_batch_mode == "fused"
     force_fused_retry = env_str(
         "CODEX_CFG_FUSED_FORCE_RETRY",
