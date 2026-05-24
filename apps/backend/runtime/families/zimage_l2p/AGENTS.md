@@ -17,3 +17,4 @@ Status: Active
 - L2P is a no-VAE RGB pixel-space model; do not add dummy VAE paths or latent Z-Image aliases.
 - Native checkpoint keys stay native (`all_x_embedder.16-1`, `local_decoder`, `noise_refiner`, `context_refiner`, `layers`).
 - GGUF support must preserve the same native lookup keyspace; converter/keymap fixes belong at the GGUF/converter seam, not in runtime prefix strippers.
+- 2026-05-23: L2P timestep embeddings must use a floating activation dtype owned by the caller/model compute path. Packed GGUF storage dtypes such as `torch.int8` must never drive timestep MLP activations; direct embedder calls may use floating `weight.computation_dtype` or floating weight dtype, and otherwise fail loud.

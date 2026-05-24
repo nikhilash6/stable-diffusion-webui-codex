@@ -8,9 +8,11 @@ Required Notice: see NOTICE
 
 Purpose: Native Z-Image L2P pixel-space DiT runtime.
 Implements the L2P checkpoint keyspace exactly (`all_x_embedder.16-1`, transformer blocks, and `local_decoder`) without VAE or layer-name rewriting.
-Loads SafeTensors/GGUF state-dict views through the repo-owned strict loaders and returns pixel tensors in the native [-1, 1] image range.
+Loads SafeTensors/GGUF state-dict views through the repo-owned strict loaders, keeps GGUF timestep activations on floating compute dtypes rather than packed storage dtypes, and returns pixel tensors in the native [-1, 1] image range.
 
 Symbols (top-level; keep in sync; no ghosts):
+- `_is_floating_dtype` (function): Returns true only for floating `torch.dtype` values.
+- `_resolve_timestep_activation_dtype` (function): Resolves the floating dtype used for L2P timestep MLP activations.
 - `ZImageL2PConfig` (dataclass): Architecture constants for the first supported L2P 1K checkpoint.
 - `RMSNorm` (class): RMS normalization layer matching checkpoint `*.weight` names.
 - `TimestepEmbedder` (class): Sinusoidal timestep embedder feeding adaLN modulation.
@@ -52,6 +54,37 @@ _L2P_REQUIRED_KEYS: tuple[str, ...] = (
     "noise_refiner.0.adaLN_modulation.0.weight",
     "cap_embedder.1.weight",
 )
+
+
+def _is_floating_dtype(dtype: object) -> bool:
+    return isinstance(dtype, torch.dtype) and bool(dtype.is_floating_point)
+
+
+def _resolve_timestep_activation_dtype(
+    *,
+    requested_dtype: torch.dtype | None,
+    weight: object,
+) -> torch.dtype:
+    if requested_dtype is not None:
+        if not _is_floating_dtype(requested_dtype):
+            raise RuntimeError(
+                "L2P timestep embedder requires a floating caller dtype; "
+                f"got {requested_dtype!r}."
+            )
+        return requested_dtype
+
+    computation_dtype = getattr(weight, "computation_dtype", None)
+    if _is_floating_dtype(computation_dtype):
+        return computation_dtype
+
+    weight_dtype = getattr(weight, "dtype", None)
+    if _is_floating_dtype(weight_dtype):
+        return weight_dtype
+
+    raise RuntimeError(
+        "L2P timestep embedder could not resolve a floating activation dtype "
+        f"(weight_dtype={weight_dtype!r}, computation_dtype={computation_dtype!r})."
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,10 +157,10 @@ class TimestepEmbedder(nn.Module):
                 embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
             return embedding
 
-    def forward(self, timestep: torch.Tensor) -> torch.Tensor:
-        dtype = self.mlp[0].weight.dtype
+    def forward(self, timestep: torch.Tensor, dtype: torch.dtype | None = None) -> torch.Tensor:
+        activation_dtype = _resolve_timestep_activation_dtype(requested_dtype=dtype, weight=self.mlp[0].weight)
         freq = self.timestep_embedding(timestep, self.frequency_embedding_size)
-        return self.mlp(freq.to(dtype=dtype))
+        return self.mlp(freq.to(dtype=activation_dtype))
 
 
 class FeedForward(nn.Module):
@@ -531,7 +564,7 @@ class ZImageL2PDiT(nn.Module):
         sigma = sigma.to(device=device, dtype=torch.float32).reshape(-1)
         if int(sigma.shape[0]) != batch_size:
             raise RuntimeError(f"L2P sigma batch mismatch: sigma={tuple(sigma.shape)} batch={batch_size}.")
-        adaln_input = self.t_embedder((1.0 - sigma) * self.t_scale)
+        adaln_input = self.t_embedder((1.0 - sigma) * self.t_scale, dtype=images[0].dtype)
 
         (
             image_items,
