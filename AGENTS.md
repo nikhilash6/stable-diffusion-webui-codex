@@ -26,6 +26,18 @@ You do **not** materialize eager `dict(...)` copies of checkpoint mappings as co
 
 ---
 
+### ABSOLUTE LAW — USE THE LOCAL TEST TOOLCHAIN
+
+Repository tests and validation commands use this checkout's toolchains.
+
+- Python commands must run through local `uv`: `./.uv/bin/uv run --python .venv/bin/python --no-sync ...`.
+- Backend CPU checks must keep the explicit CPU env pattern: `CODEX_ROOT="$PWD" PYTHONPATH="$PWD" CODEX_TORCH_MODE=cpu CODEX_TORCH_BACKEND=cpu`.
+- Node/npm/frontend commands must use the local nodeenv by prepending `"$PWD/.nodeenv/bin"` to `PATH` from the repository root.
+- Do **not** use system/global `python`, `uv`, `node`, `npm`, or `npx` for repository tests or validation.
+- If `./.uv/bin/uv`, `.venv/bin/python`, or `.nodeenv/bin/{node,npm,npx}` is missing, stop and report the missing local toolchain path unless the user explicitly requests non-local execution for that command.
+
+---
+
 ### ACT II – WHERE THE TRUTH LIVES: `.sangoi`, REUSE, AND THE WEBUI ATLAS
 
 Before broad grep, use the WebUI Atlas below as the prompt-resident owner map for this repository.
