@@ -8,12 +8,15 @@ Required Notice: see NOTICE
 
 Purpose: Native Z-Image L2P pixel-space DiT runtime.
 Implements the native checkpoint keyspace exactly without VAE/layer-name rewriting and loads SafeTensors/GGUF through strict views.
-Keeps GGUF timestep activations floating, returns native [-1, 1] pixel tensors, and logs the first forced-PyTorch SDPA attention call.
+Keeps GGUF timestep activations floating, masks cross-sample batch padding for variable-length prompt fusion, returns native [-1, 1]
+pixel tensors, and logs first forced-PyTorch SDPA attention calls.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_is_floating_dtype` (function): Returns true only for floating `torch.dtype` values.
 - `_resolve_timestep_activation_dtype` (function): Resolves the floating dtype used for L2P timestep MLP activations.
 - `_l2p_sdpa_policy_label` (function): Reports the PyTorch SDPA policy L2P forced attention will request.
+- `_l2p_attention_mask_label` (function): Formats attention masks for one-shot backend logs.
+- `_batch_padding_attention_mask` (function): Builds bool SDPA masks for cross-sample `pad_sequence` padding.
 - `ZImageL2PConfig` (dataclass): Architecture constants for the first supported L2P 1K checkpoint.
 - `RMSNorm` (class): RMS normalization layer matching checkpoint `*.weight` names.
 - `TimestepEmbedder` (class): Sinusoidal timestep embedder feeding adaLN modulation.
@@ -50,7 +53,7 @@ from apps.backend.runtime.models.state_dict import safe_load_state_dict
 _SEQ_MULTI_OF = 32
 _ADALN_EMBED_DIM = 256
 _L2P_PATCH_KEY = "16-1"
-_L2P_ATTENTION_SHAPE_LOGGED = False
+_L2P_ATTENTION_SHAPE_LOGGED: set[str] = set()
 _L2P_REQUIRED_KEYS: tuple[str, ...] = (
     "all_x_embedder.16-1.weight",
     "local_decoder.out_conv.weight",
@@ -76,6 +79,27 @@ def _l2p_sdpa_policy_label() -> str:
     if enable_mem_efficient:
         return "mem_efficient"
     return "math"
+
+
+def _l2p_attention_mask_label(mask: torch.Tensor | None) -> str:
+    if mask is None:
+        return "none"
+    return f"{tuple(mask.shape)} {mask.dtype} {mask.device}"
+
+
+def _batch_padding_attention_mask(lengths: Sequence[int], *, device: torch.device) -> torch.Tensor | None:
+    token_lengths = [int(length) for length in lengths]
+    if not token_lengths:
+        raise RuntimeError("L2P attention mask requires at least one sequence length.")
+    if any(length <= 0 for length in token_lengths):
+        raise RuntimeError(f"L2P attention mask requires positive sequence lengths; got {token_lengths}.")
+    max_tokens = max(token_lengths)
+    if all(length == max_tokens for length in token_lengths):
+        return None
+    positions = torch.arange(max_tokens, device=device)
+    length_tensor = torch.tensor(token_lengths, device=device)
+    key_keep_mask = positions.unsqueeze(0) < length_tensor.unsqueeze(1)
+    return key_keep_mask.view(len(token_lengths), 1, 1, max_tokens)
 
 
 def _is_floating_dtype(dtype: object) -> bool:
@@ -227,17 +251,25 @@ class L2PAttention(nn.Module):
             rotated = torch.view_as_real(x_complex * freqs).flatten(3)
             return rotated.to(dtype=x_in.dtype)
 
-    def _log_attention_shape_once(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> None:
-        global _L2P_ATTENTION_SHAPE_LOGGED
-        if _L2P_ATTENTION_SHAPE_LOGGED:
+    def _log_attention_shape_once(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        attention_mask: torch.Tensor | None,
+    ) -> None:
+        mask_label = _l2p_attention_mask_label(attention_mask)
+        mask_key = "none" if attention_mask is None else "masked"
+        if mask_key in _L2P_ATTENTION_SHAPE_LOGGED:
             return
-        _L2P_ATTENTION_SHAPE_LOGGED = True
+        _L2P_ATTENTION_SHAPE_LOGGED.add(mask_key)
         emit_backend_message(
             "[zimage_l2p] first attention call",
             logger=__name__,
             backend=AttentionBackend.PYTORCH.value,
             sdpa_policy=_l2p_sdpa_policy_label(),
-            mask="none",
+            mask=mask_label,
             is_causal=False,
             q_shape=tuple(q.shape),
             k_shape=tuple(k.shape),
@@ -248,7 +280,13 @@ class L2PAttention(nn.Module):
             head_dim=self.head_dim,
         )
 
-    def forward(self, hidden_states: torch.Tensor, *, freqs_cis: torch.Tensor | None) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        freqs_cis: torch.Tensor | None,
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         batch, tokens, _ = hidden_states.shape
         query = self.to_q(hidden_states).unflatten(-1, (self.num_heads, self.head_dim))
         key = self.to_k(hidden_states).unflatten(-1, (self.num_heads, self.head_dim))
@@ -263,12 +301,12 @@ class L2PAttention(nn.Module):
         query_shaped = query.transpose(1, 2)
         key_shaped = key.transpose(1, 2)
         value_shaped = value.transpose(1, 2)
-        self._log_attention_shape_once(query_shaped, key_shaped, value_shaped)
+        self._log_attention_shape_once(query_shaped, key_shaped, value_shaped, attention_mask=attention_mask)
         out = attention_function_pre_shaped(
             query_shaped,
             key_shaped,
             value_shaped,
-            mask=None,
+            mask=attention_mask,
             is_causal=False,
             backend=AttentionBackend.PYTORCH,
         )
@@ -313,6 +351,7 @@ class ZImageL2PTransformerBlock(nn.Module):
         *,
         freqs_cis: torch.Tensor,
         adaln_input: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.modulation:
             if adaln_input is None:
@@ -320,12 +359,16 @@ class ZImageL2PTransformerBlock(nn.Module):
             scale_msa, gate_msa, scale_mlp, gate_mlp = self.adaLN_modulation(adaln_input).unsqueeze(1).chunk(4, dim=2)
             scale_msa = 1.0 + scale_msa
             scale_mlp = 1.0 + scale_mlp
-            attn_out = self.attention(self.attention_norm1(x) * scale_msa, freqs_cis=freqs_cis)
+            attn_out = self.attention(
+                self.attention_norm1(x) * scale_msa,
+                freqs_cis=freqs_cis,
+                attention_mask=attention_mask,
+            )
             x = x + gate_msa.tanh() * self.attention_norm2(attn_out)
             x = x + gate_mlp.tanh() * self.ffn_norm2(self.feed_forward(self.ffn_norm1(x) * scale_mlp))
             return x
 
-        attn_out = self.attention(self.attention_norm1(x), freqs_cis=freqs_cis)
+        attn_out = self.attention(self.attention_norm1(x), freqs_cis=freqs_cis, attention_mask=attention_mask)
         x = x + self.attention_norm2(attn_out)
         x = x + self.ffn_norm2(self.feed_forward(self.ffn_norm1(x)))
         return x
@@ -626,6 +669,9 @@ class ZImageL2PDiT(nn.Module):
         image_lengths = [int(item.shape[0]) for item in image_items]
         if any(length % _SEQ_MULTI_OF != 0 for length in image_lengths):
             raise RuntimeError(f"L2P image sequence lengths must be multiples of {_SEQ_MULTI_OF}; got {image_lengths}.")
+        image_token_len = image_lengths[0]
+        if any(length != image_token_len for length in image_lengths):
+            raise RuntimeError("L2P first tranche supports uniform image token lengths only.")
         image_embed = torch.cat(image_items, dim=0)
         image_embed = self.all_x_embedder[_L2P_PATCH_KEY](image_embed)
         image_pad_mask = torch.cat(image_pad_masks, dim=0)
@@ -649,9 +695,10 @@ class ZImageL2PDiT(nn.Module):
         caption_freqs_items = self._split_padded_sequence(self.rope_embedder(torch.cat(caption_pos_ids, dim=0)), caption_lengths)
         caption_batch = pad_sequence(caption_items, batch_first=True, padding_value=0.0)
         caption_freqs_batch = pad_sequence(caption_freqs_items, batch_first=True, padding_value=0.0)
+        caption_attention_mask = _batch_padding_attention_mask(caption_lengths, device=caption_batch.device)
 
         for layer in self.context_refiner:
-            caption_batch = layer(caption_batch, freqs_cis=caption_freqs_batch)
+            caption_batch = layer(caption_batch, freqs_cis=caption_freqs_batch, attention_mask=caption_attention_mask)
 
         unified_items: list[torch.Tensor] = []
         unified_freqs_items: list[torch.Tensor] = []
@@ -663,13 +710,16 @@ class ZImageL2PDiT(nn.Module):
         unified_lengths = [int(item.shape[0]) for item in unified_items]
         unified = pad_sequence(unified_items, batch_first=True, padding_value=0.0)
         unified_freqs = pad_sequence(unified_freqs_items, batch_first=True, padding_value=0.0)
+        unified_attention_mask = _batch_padding_attention_mask(unified_lengths, device=unified.device)
 
         for layer in self.layers:
-            unified = layer(unified, freqs_cis=unified_freqs, adaln_input=adaln_input)
+            unified = layer(
+                unified,
+                freqs_cis=unified_freqs,
+                adaln_input=adaln_input,
+                attention_mask=unified_attention_mask,
+            )
 
-        image_token_len = image_lengths[0]
-        if any(length != image_token_len for length in image_lengths):
-            raise RuntimeError("L2P first tranche supports uniform image token lengths only.")
         image_features = unified[:, :image_token_len, :]
         _, height, width = image_sizes[0]
         feature_height = height // self.config.patch_size

@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: WAN22 GGUF sampling helpers (geometry + scheduler + per-stage sampling loops).
-Builds patch geometry, prepares per-stage latent tensors, and runs the stage sampling loop (generator yields progress events); CFG execution uses sequential cond/uncond passes to lower VRAM peaks, I2V conditioning channels are cached once per stage loop to avoid redundant per-step buffer copies, and scheduler aliases/sampler overrides are validated fail-loud against the real WAN22 runtime lanes (`uni-pc`, `euler`, `euler a`) without collapsing cfg++ labels into plain Euler paths.
+Builds patch geometry, prepares per-stage latent tensors, and runs the stage sampling loop (generator yields progress events); CFG execution honors the shared fused/split batch-mode contract, fused batches duplicate full model state including I2V conditioning channels, I2V conditioning channels are cached once per stage loop to avoid redundant per-step buffer copies, and scheduler aliases/sampler overrides are validated fail-loud against the real WAN22 runtime lanes (`uni-pc`, `euler`, `euler a`) without collapsing cfg++ labels into plain Euler paths.
 Per-step compute runs under `torch.inference_mode()` to reduce overhead (model assembly/load stays outside inference mode); block-progress callback wiring is strict/mandatory and must be provided through `transformer_options` by the WAN unified progress adapter. Stage latents and stochastic scheduler draws consume the caller-owned request/chunk `torch.Generator`.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -20,6 +20,9 @@ Symbols (top-level; keep in sync; no ghosts):
 - `resolve_init_noise_sigma` (function): Resolves the scheduler initial noise sigma (`init_noise_sigma`) for seeding parity with Diffusers.
 - `_assert_finite_tensor` (function): Fail-loud finite check helper with stage/step context and numeric summaries.
 - `cfg_merge` (function): Classifier-free guidance merge helper (uncond/cond + scale).
+- `_is_cuda_oom` (function): Classifies CUDA OOM failures for fused-CFG fallback.
+- `_run_wan22_split_cfg` (function): Executes serial WAN22 cond/uncond CFG.
+- `_run_wan22_fused_cfg` (function): Executes fused WAN22 uncond+cond CFG in one transformer call.
 - `time_snr_shift` (function): Time/SNR shift helper used in scheduler-time transformations.
 - `prepare_stage_seed_latents` (function): Prepares seeded stage latents (for determinism across runs/stages).
 - `build_i2v_mask4` (function): Builds the 4-channel I2V first-frame mask (Diffusers-compatible; latent time scale=4).
@@ -40,10 +43,12 @@ from typing import Any, Optional, Tuple
 import torch
 
 from apps.backend.runtime.attention.sram import sram_attention_runtime_metrics_set_stage
+from apps.backend.runtime.memory import memory_management
 from apps.backend.runtime.sampling.block_progress import (
     BLOCK_PROGRESS_CALLBACK_KEY,
     resolve_block_progress_callback,
 )
+from apps.backend.runtime.sampling.cfg_batch import resolve_cfg_batch_mode
 
 from .config import WAN_FLOW_MULTIPLIER, resolve_i2v_order
 from .diagnostics import (
@@ -351,6 +356,134 @@ def cfg_merge(uncond: torch.Tensor, cond: torch.Tensor, scale: float | None) -> 
     uncond.mul_(1.0 - guidance)
     uncond.add_(cond, alpha=guidance)
     return uncond
+
+
+def _is_cuda_oom(exc: BaseException) -> bool:
+    oom_types = []
+    for owner, name in ((torch, "OutOfMemoryError"), (torch, "CUDAOutOfMemoryError"), (torch.cuda, "OutOfMemoryError")):
+        candidate = getattr(owner, name, None)
+        if isinstance(candidate, type):
+            oom_types.append(candidate)
+    if oom_types and isinstance(exc, tuple(oom_types)):  # type: ignore[arg-type]
+        return True
+    message = str(exc).lower()
+    return (
+        "cuda out of memory" in message
+        or "cublas_status_alloc_failed" in message
+        or "cudnn_status_alloc_failed" in message
+    )
+
+
+def _run_wan22_split_cfg(
+    *,
+    model: Any,
+    model_state: torch.Tensor,
+    timestep_buffer: torch.Tensor,
+    prompt_embeds: torch.Tensor,
+    negative_embeds: torch.Tensor,
+    transformer_options: dict[str, Any] | None,
+    cfg_scale: float,
+    stage_name: str,
+    local_step: int,
+    total_steps: int,
+    global_idx: int,
+    timestep: Any,
+) -> torch.Tensor:
+    cond_velocity = model(
+        model_state,
+        timestep_buffer,
+        prompt_embeds,
+        transformer_options=transformer_options,
+    )
+    _assert_finite_tensor(
+        cond_velocity,
+        tensor_name="model_output_cfg_cond",
+        stage_name=stage_name,
+        local_step=local_step,
+        total_steps=total_steps,
+        global_idx=global_idx,
+        timestep=timestep,
+    )
+    uncond_velocity = model(
+        model_state,
+        timestep_buffer,
+        negative_embeds,
+        transformer_options=transformer_options,
+    )
+    _assert_finite_tensor(
+        uncond_velocity,
+        tensor_name="model_output_cfg_uncond",
+        stage_name=stage_name,
+        local_step=local_step,
+        total_steps=total_steps,
+        global_idx=global_idx,
+        timestep=timestep,
+    )
+    merged = cfg_merge(uncond_velocity, cond_velocity, cfg_scale)
+    _assert_finite_tensor(
+        merged,
+        tensor_name="cfg_merge_output",
+        stage_name=stage_name,
+        local_step=local_step,
+        total_steps=total_steps,
+        global_idx=global_idx,
+        timestep=timestep,
+    )
+    return merged
+
+
+def _run_wan22_fused_cfg(
+    *,
+    model: Any,
+    model_state: torch.Tensor,
+    timestep_buffer: torch.Tensor,
+    prompt_embeds: torch.Tensor,
+    negative_embeds: torch.Tensor,
+    transformer_options: dict[str, Any] | None,
+    cfg_scale: float,
+    stage_name: str,
+    local_step: int,
+    total_steps: int,
+    global_idx: int,
+    timestep: Any,
+) -> torch.Tensor:
+    model_batch = int(model_state.shape[0])
+    fused_state = torch.cat([model_state, model_state], dim=0)
+    fused_timestep = torch.cat([timestep_buffer, timestep_buffer], dim=0)
+    fused_prompt_embeds = torch.cat([negative_embeds, prompt_embeds], dim=0)
+    fused_velocity = model(
+        fused_state,
+        fused_timestep,
+        fused_prompt_embeds,
+        transformer_options=transformer_options,
+    )
+    _assert_finite_tensor(
+        fused_velocity,
+        tensor_name="model_output_cfg_fused",
+        stage_name=stage_name,
+        local_step=local_step,
+        total_steps=total_steps,
+        global_idx=global_idx,
+        timestep=timestep,
+    )
+    expected_batch = model_batch * 2
+    if int(fused_velocity.shape[0]) != expected_batch:
+        raise RuntimeError(
+            "WAN22 GGUF fused CFG expected model output batch "
+            f"{expected_batch}, got {tuple(fused_velocity.shape)}."
+        )
+    uncond_velocity, cond_velocity = fused_velocity.split(model_batch, dim=0)
+    merged = cfg_merge(uncond_velocity, cond_velocity, cfg_scale)
+    _assert_finite_tensor(
+        merged,
+        tensor_name="cfg_merge_output",
+        stage_name=stage_name,
+        local_step=local_step,
+        total_steps=total_steps,
+        global_idx=global_idx,
+        timestep=timestep,
+    )
+    return merged
 
 
 def time_snr_shift(alpha: float, t: float) -> float:
@@ -762,6 +895,8 @@ def sample_stage_latents_generator(
         else:
             effective_cfg_scale = cfg_value
 
+    requested_cfg_batch_mode = resolve_cfg_batch_mode()
+    effective_cfg_batch_mode = "none"
     if effective_cfg_scale is not None:
         if int(prompt_embeds.shape[0]) != int(batch):
             raise RuntimeError(
@@ -773,6 +908,17 @@ def sample_stage_latents_generator(
                 "WAN22 GGUF: negative embeds batch does not match latent batch for CFG "
                 f"(negative_B={int(negative_embeds.shape[0])} latent_B={int(batch)})."
             )
+        if prompt_embeds.ndim != negative_embeds.ndim:
+            raise RuntimeError(
+                "WAN22 GGUF: prompt/negative embed rank mismatch for CFG "
+                f"(prompt_shape={tuple(prompt_embeds.shape)} negative_shape={tuple(negative_embeds.shape)})."
+            )
+        if requested_cfg_batch_mode == "fused" and tuple(prompt_embeds.shape[1:]) != tuple(negative_embeds.shape[1:]):
+            raise RuntimeError(
+                "WAN22 GGUF: prompt/negative embed tail shape mismatch for fused CFG batching "
+                f"(prompt_shape={tuple(prompt_embeds.shape)} negative_shape={tuple(negative_embeds.shape)})."
+            )
+        effective_cfg_batch_mode = "fused" if requested_cfg_batch_mode == "fused" else "split"
     else:
         if int(prompt_embeds.shape[0]) != int(batch):
             raise RuntimeError(
@@ -797,6 +943,23 @@ def sample_stage_latents_generator(
             # I2V conditioning channels are invariant across steps in this loop; cast once.
             state_cond_model_static = state_cond_static.to(dtype=dtype)
         cond_channels = int(state_cond_model_static.shape[1])
+    emit_backend_message(
+        "[wan22.gguf] sampling CFG config",
+        logger=log.name,
+        stage=stage_name,
+        requested_cfg_batch_mode=requested_cfg_batch_mode,
+        effective_cfg_batch_mode=effective_cfg_batch_mode,
+        cfg_scale=None if effective_cfg_scale is None else float(effective_cfg_scale),
+        steps=int(total),
+        input_shape=tuple(state.shape),
+        prompt_shape=tuple(prompt_embeds.shape),
+        negative_shape=tuple(negative_embeds.shape),
+        dtype=str(dtype),
+        device=str(device),
+        has_conditioning=has_conditioning,
+        conditioning_channels=cond_channels,
+    )
+    fused_cfg_enabled_for_run = effective_cfg_batch_mode == "fused"
     model_state_buffer: torch.Tensor | None = None
     cfg_timestep_buffer: torch.Tensor | None = None
     non_cfg_timestep_buffer: torch.Tensor | None = None
@@ -945,46 +1108,68 @@ def sample_stage_latents_generator(
                     cfg_timestep_buffer = torch.empty((model_batch,), device=device, dtype=torch.float32)
                 cfg_timestep_buffer.fill_(float(di_timestep))
 
-                v_cond = model(
-                    model_state,
-                    cfg_timestep_buffer,
-                    prompt_embeds,
-                    transformer_options=model_transformer_options,
-                )
-                _assert_finite_tensor(
-                    v_cond,
-                    tensor_name="model_output_cfg_cond",
-                    stage_name=stage_name,
-                    local_step=step_number,
-                    total_steps=total,
-                    global_idx=idx,
-                    timestep=timestep,
-                )
-                v_uncond = model(
-                    model_state,
-                    cfg_timestep_buffer,
-                    negative_embeds,
-                    transformer_options=model_transformer_options,
-                )
-                _assert_finite_tensor(
-                    v_uncond,
-                    tensor_name="model_output_cfg_uncond",
-                    stage_name=stage_name,
-                    local_step=step_number,
-                    total_steps=total,
-                    global_idx=idx,
-                    timestep=timestep,
-                )
-                eps_model = cfg_merge(v_uncond, v_cond, effective_cfg_scale)
-                _assert_finite_tensor(
-                    eps_model,
-                    tensor_name="cfg_merge_output",
-                    stage_name=stage_name,
-                    local_step=step_number,
-                    total_steps=total,
-                    global_idx=idx,
-                    timestep=timestep,
-                )
+                if fused_cfg_enabled_for_run:
+                    try:
+                        eps_model = _run_wan22_fused_cfg(
+                            model=model,
+                            model_state=model_state,
+                            timestep_buffer=cfg_timestep_buffer,
+                            prompt_embeds=prompt_embeds,
+                            negative_embeds=negative_embeds,
+                            transformer_options=model_transformer_options,
+                            cfg_scale=float(effective_cfg_scale),
+                            stage_name=stage_name,
+                            local_step=step_number,
+                            total_steps=total,
+                            global_idx=idx,
+                            timestep=timestep,
+                        )
+                    except Exception as exc:
+                        if not _is_cuda_oom(exc):
+                            raise
+                        fused_cfg_enabled_for_run = False
+                        effective_cfg_batch_mode = "split"
+                        emit_backend_message(
+                            "[wan22.gguf] fused CFG OOM; falling back to split",
+                            logger=log.name,
+                            level=logging.WARNING,
+                            stage=stage_name,
+                            step=step_number,
+                            steps=int(total),
+                            requested_cfg_batch_mode=requested_cfg_batch_mode,
+                            effective_cfg_batch_mode=effective_cfg_batch_mode,
+                            reason=str(exc),
+                        )
+                        memory_management.manager.soft_empty_cache()
+                        eps_model = _run_wan22_split_cfg(
+                            model=model,
+                            model_state=model_state,
+                            timestep_buffer=cfg_timestep_buffer,
+                            prompt_embeds=prompt_embeds,
+                            negative_embeds=negative_embeds,
+                            transformer_options=model_transformer_options,
+                            cfg_scale=float(effective_cfg_scale),
+                            stage_name=stage_name,
+                            local_step=step_number,
+                            total_steps=total,
+                            global_idx=idx,
+                            timestep=timestep,
+                        )
+                else:
+                    eps_model = _run_wan22_split_cfg(
+                        model=model,
+                        model_state=model_state,
+                        timestep_buffer=cfg_timestep_buffer,
+                        prompt_embeds=prompt_embeds,
+                        negative_embeds=negative_embeds,
+                        transformer_options=model_transformer_options,
+                        cfg_scale=float(effective_cfg_scale),
+                        stage_name=stage_name,
+                        local_step=step_number,
+                        total_steps=total,
+                        global_idx=idx,
+                        timestep=timestep,
+                    )
 
             if eps_model.ndim != 5 or eps_model.shape[0] != state.shape[0] or eps_model.shape[2:] != state.shape[2:]:
                 raise RuntimeError(

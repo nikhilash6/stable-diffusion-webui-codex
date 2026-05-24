@@ -1,6 +1,6 @@
 # apps/backend/runtime/sampling Overview
 <!-- tags: runtime, sampling, sigma, scheduler -->
-Last Review: 2026-05-17
+Last Review: 2026-05-24
 Status: Active
 
 ## Purpose
@@ -32,6 +32,9 @@ Status: Active
 - `block_progress.py`
   - `RichBlockProgressController` owns the console-only block-progress bar contract.
   - The controller must materialize its Rich task on the first real callback update, not with a fake `total=1` placeholder, so fast transformer lanes like Anima start with truthful block totals.
+- `cfg_batch.py`
+  - `resolve_cfg_batch_mode(...)` is the single runtime resolver for `CODEX_CFG_BATCH_MODE=fused|split`.
+  - Explicit unsupported values fail loud instead of being laundered back to the default.
 - `interval_noise.py`
   - Nested-interval normalized-noise helper used by base `dpm++ sde` to reproduce Brownian-style interval covariance from driver-owned iid draws.
 - `__init__.py`
@@ -118,6 +121,10 @@ Status: Active
 - Runtime boundaries:
   - No imports from archived upstream snapshots into active runtime code.
   - If a required runtime invariant is missing (predictor data, malformed schedule, invalid options), fail loud.
+- CFG batch-mode ownership:
+  - Generic and family-local samplers must call `cfg_batch.py::resolve_cfg_batch_mode(...)` for `CODEX_CFG_BATCH_MODE`.
+  - `fused` means one cond+uncond model batch when the owner can preserve semantics; `split` means serial cond/uncond forwards.
+  - Fused CUDA OOM may fall back to split with an explicit warning; non-OOM shape/rank/contract failures stay fail-loud.
 
 ## Risks / Invariants
 - `steps >= 1`; sigma ladders must include a terminal zero.

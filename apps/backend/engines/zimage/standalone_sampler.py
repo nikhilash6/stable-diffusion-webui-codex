@@ -7,16 +7,17 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Standalone Z Image sampler using Diffusers scheduler math.
-Runs the Z-Image transformer directly while following `FlowMatchEulerDiscreteScheduler` semantics (including `shift` and terminal sigma handling) without the native sampler driver stack.
+Runs the Z-Image transformer directly while following `FlowMatchEulerDiscreteScheduler` semantics (including `shift` and terminal sigma handling) without the native sampler driver stack, and honors the shared CFG fused/split batch-mode contract.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_default_zimage_sampler_device` (function): Resolves default sampler device identity from memory-manager mount authority.
+- `_is_cuda_oom` (function): Classifies CUDA OOM failures for fused-CFG fallback.
 - `sample_zimage_diffusers_math` (function): Samples Z Image latents using Diffusers math/scheduler steps with optional classic CFG
   (positive/negative embeddings) and explicit `shift` selection (no double-negation of the model output).
 """
 
 from __future__ import annotations
-from apps.backend.runtime.logging import get_backend_logger
+from apps.backend.runtime.logging import emit_backend_message, get_backend_logger
 
 import logging
 from typing import Optional
@@ -25,6 +26,7 @@ import torch
 from diffusers import FlowMatchEulerDiscreteScheduler
 
 from apps.backend.runtime.memory import memory_management
+from apps.backend.runtime.sampling.cfg_batch import resolve_cfg_batch_mode
 
 logger = get_backend_logger("backend.zimage.standalone")
 
@@ -36,6 +38,22 @@ def _default_zimage_sampler_device() -> str:
             "ZImage standalone sampler requires memory manager mount_device() to return torch.device."
         )
     return str(mount_device)
+
+
+def _is_cuda_oom(exc: BaseException) -> bool:
+    oom_types = []
+    for owner, name in ((torch, "OutOfMemoryError"), (torch, "CUDAOutOfMemoryError"), (torch.cuda, "OutOfMemoryError")):
+        candidate = getattr(owner, name, None)
+        if isinstance(candidate, type):
+            oom_types.append(candidate)
+    if oom_types and isinstance(exc, tuple(oom_types)):  # type: ignore[arg-type]
+        return True
+    message = str(exc).lower()
+    return (
+        "cuda out of memory" in message
+        or "cublas_status_alloc_failed" in message
+        or "cudnn_status_alloc_failed" in message
+    )
 
 
 def sample_zimage_diffusers_math(
@@ -91,6 +109,14 @@ def sample_zimage_diffusers_math(
                 f"negative_text_embeddings shape {tuple(negative_text_embeddings.shape)} does not match "
                 f"text_embeddings shape {tuple(text_embeddings.shape)}"
             )
+    requested_cfg_batch_mode = resolve_cfg_batch_mode()
+    effective_cfg_batch_mode = (
+        "none"
+        if not apply_cfg
+        else "fused"
+        if requested_cfg_batch_mode == "fused"
+        else "split"
+    )
     
     # Calculate latent dimensions (VAE downscale = 8)
     vae_scale = 8
@@ -125,8 +151,22 @@ def sample_zimage_diffusers_math(
     # Flow-matching starts with pure noise (sigma=1), no scaling needed
     
     logger.debug("[diffusers-sampler] latents shape=%s", latents.shape)
+    emit_backend_message(
+        "[zimage.standalone] sampling CFG config",
+        logger=logger.name,
+        requested_cfg_batch_mode=requested_cfg_batch_mode,
+        effective_cfg_batch_mode=effective_cfg_batch_mode,
+        guidance_scale=float(guidance_scale),
+        steps=int(num_inference_steps),
+        latent_shape=tuple(latents.shape),
+        text_shape=tuple(text_embeddings.shape),
+        negative_text_shape=None if negative_text_embeddings is None else tuple(negative_text_embeddings.shape),
+        dtype=str(dtype),
+        device=str(device_name),
+    )
     
     # Sampling loop
+    fused_cfg_enabled_for_run = effective_cfg_batch_mode == "fused"
     with torch.no_grad():
         for i, t in enumerate(timesteps):
             # Prepare model input
@@ -139,20 +179,63 @@ def sample_zimage_diffusers_math(
             # Scheduler returns timesteps t = sigma * 1000 (1000=start → 0=end), so sigma = t/1000.
             sigma = float(t) / 1000.0
             if apply_cfg:
-                sigma_tensor = torch.full((batch_size * 2,), sigma, device=device_name, dtype=dtype)
-                latent_model_input = latent_model_input.repeat(2, 1, 1, 1)
-                context = torch.cat([negative_text_embeddings, text_embeddings], dim=0).to(dtype)
-                model_output = transformer(
-                    latent_model_input,
-                    sigma_tensor,
-                    context=context,
-                )
-                # Our Z-Image core returns the negated velocity (noise_pred) already.
-                noise_pred = model_output.float()
-                neg, pos = noise_pred.chunk(2, dim=0)
-                noise_pred = pos + float(guidance_scale) * (pos - neg)
+                if fused_cfg_enabled_for_run:
+                    try:
+                        sigma_tensor = torch.full((batch_size * 2,), sigma, device=device_name, dtype=dtype)
+                        fused_latent_model_input = latent_model_input.repeat(2, 1, 1, 1)
+                        fused_context = torch.cat([negative_text_embeddings, text_embeddings], dim=0).to(dtype)
+                        model_output = transformer(
+                            fused_latent_model_input,
+                            sigma_tensor,
+                            context=fused_context,
+                        )
+                        # Our Z-Image core returns the negated velocity (noise_pred) already.
+                        noise_pred = model_output.float()
+                        neg, pos = noise_pred.chunk(2, dim=0)
+                        noise_pred = pos + float(guidance_scale) * (pos - neg)
+                    except Exception as exc:
+                        if not _is_cuda_oom(exc):
+                            raise
+                        fused_cfg_enabled_for_run = False
+                        effective_cfg_batch_mode = "split"
+                        emit_backend_message(
+                            "[zimage.standalone] fused CFG OOM; falling back to split",
+                            logger=logger.name,
+                            level=logging.WARNING,
+                            step=int(i + 1),
+                            steps=int(len(timesteps)),
+                            requested_cfg_batch_mode=requested_cfg_batch_mode,
+                            effective_cfg_batch_mode=effective_cfg_batch_mode,
+                            reason=str(exc),
+                        )
+                        memory_management.manager.soft_empty_cache()
+                        sigma_tensor = torch.full((batch_size,), sigma, device=device_name, dtype=dtype)
+                        neg = transformer(
+                            latent_model_input,
+                            sigma_tensor,
+                            context=negative_text_embeddings.to(dtype),
+                        ).float()
+                        pos = transformer(
+                            latent_model_input,
+                            sigma_tensor,
+                            context=text_embeddings.to(dtype),
+                        ).float()
+                        noise_pred = pos + float(guidance_scale) * (pos - neg)
+                else:
+                    sigma_tensor = torch.full((batch_size,), sigma, device=device_name, dtype=dtype)
+                    neg = transformer(
+                        latent_model_input,
+                        sigma_tensor,
+                        context=negative_text_embeddings.to(dtype),
+                    ).float()
+                    pos = transformer(
+                        latent_model_input,
+                        sigma_tensor,
+                        context=text_embeddings.to(dtype),
+                    ).float()
+                    noise_pred = pos + float(guidance_scale) * (pos - neg)
             else:
-                sigma_tensor = torch.full((batch_size,), sigma, device=device, dtype=dtype)
+                sigma_tensor = torch.full((batch_size,), sigma, device=device_name, dtype=dtype)
                 model_output = transformer(
                     latent_model_input,
                     sigma_tensor,

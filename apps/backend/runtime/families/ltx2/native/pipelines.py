@@ -10,13 +10,15 @@ Purpose: Native LTX2 txt2vid/img2vid execution helpers.
 Owns direct native execution against loaded LTX2 components (text encoder, connectors, transformer, VAEs, vocoder,
 and native FlowMatch-Euler scheduler), including deterministic generation-boundary cleanup for streamed transformers,
 truthful request-owned seed/guidance handling, explicit latent-stage sampling/decode primitives for the `two_stage`
-runtime path, request-owned generator propagation through scheduler steps, keeps public stage sampling pinned to the locked `native.transformer` owner, returns raw `(video, audio)`
+runtime path, shared fused/split CFG batch-mode routing, request-owned generator propagation through scheduler steps, keeps public stage sampling pinned to the locked `native.transformer` owner, returns raw `(video, audio)`
 tuples that runtime.py can normalize into the family-local result contract,
 and threads the explicit zero-timestep decode input required by timestep-conditioned LTX video VAEs.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `Ltx2NativeLatentStageResult` (dataclass): Native latent-stage bridge contract for two-stage orchestration.
 - `_resolve_guidance_scale` (function): Preserve explicit `cfg_scale=0` while defaulting only missing guidance values.
+- `_is_cuda_oom` (function): Classifies CUDA OOM failures for fused-CFG fallback.
+- `_run_ltx2_transformer_forward` (function): Executes one native transformer forward with matched latent/coord/mask batches.
 - `sample_ltx2_txt2vid_native` (function): Execute the native txt2vid sampler and return the latent-stage result.
 - `sample_ltx2_img2vid_native` (function): Execute the native img2vid sampler and return the latent-stage result.
 - `decode_ltx2_native_stage_result` (function): Decode a native latent-stage result into raw `(video, audio)` outputs.
@@ -36,7 +38,10 @@ from PIL import Image
 import torch
 import torch.nn.functional as F
 
+from apps.backend.runtime.logging import emit_backend_message
+from apps.backend.runtime.memory import memory_management
 from apps.backend.runtime.model_registry.ltx2_execution import LTX2_PROFILE_DISTILLED
+from apps.backend.runtime.sampling.cfg_batch import resolve_cfg_batch_mode
 from .scheduler import Ltx2FlowMatchEulerScheduler
 from .text import encode_ltx2_prompt_pair
 
@@ -136,6 +141,91 @@ def _transformer_cache_context(transformer: Any):
     if callable(cache_context):
         return cache_context("cond_uncond")
     return nullcontext()
+
+
+def _is_cuda_oom(exc: BaseException) -> bool:
+    oom_types = []
+    for owner, name in ((torch, "OutOfMemoryError"), (torch, "CUDAOutOfMemoryError"), (torch.cuda, "OutOfMemoryError")):
+        candidate = getattr(owner, name, None)
+        if isinstance(candidate, type):
+            oom_types.append(candidate)
+    if oom_types and isinstance(exc, tuple(oom_types)):  # type: ignore[arg-type]
+        return True
+    message = str(exc).lower()
+    return (
+        "cuda out of memory" in message
+        or "cublas_status_alloc_failed" in message
+        or "cudnn_status_alloc_failed" in message
+    )
+
+
+def _run_ltx2_transformer_forward(
+    *,
+    transformer: Any,
+    video_latent_model_input: torch.Tensor,
+    audio_latent_model_input: torch.Tensor,
+    video_prompt_embeds: torch.Tensor,
+    audio_prompt_embeds: torch.Tensor,
+    attention_mask: torch.Tensor,
+    latent_num_frames: int,
+    latent_height: int,
+    latent_width: int,
+    frame_rate: float,
+    audio_num_frames: int,
+    video_coords: torch.Tensor,
+    audio_coords: torch.Tensor,
+    attention_kwargs: Mapping[str, Any] | None,
+    conditioning_mask: torch.Tensor | None,
+    timestep: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    model_batch = int(video_latent_model_input.shape[0])
+    if int(audio_latent_model_input.shape[0]) != model_batch:
+        raise RuntimeError(
+            "LTX2 transformer forward batch mismatch between video/audio latents: "
+            f"video={tuple(video_latent_model_input.shape)} audio={tuple(audio_latent_model_input.shape)}."
+        )
+    timestep_batch = timestep.expand(model_batch)
+    transformer_kwargs: dict[str, Any] = {
+        "hidden_states": video_latent_model_input,
+        "audio_hidden_states": audio_latent_model_input,
+        "encoder_hidden_states": video_prompt_embeds,
+        "audio_encoder_hidden_states": audio_prompt_embeds,
+        "encoder_attention_mask": attention_mask,
+        "audio_encoder_attention_mask": attention_mask,
+        "num_frames": int(latent_num_frames),
+        "height": int(latent_height),
+        "width": int(latent_width),
+        "fps": float(frame_rate),
+        "audio_num_frames": int(audio_num_frames),
+        "video_coords": video_coords,
+        "audio_coords": audio_coords,
+        "attention_kwargs": None if attention_kwargs is None else dict(attention_kwargs),
+        "return_dict": False,
+    }
+    if conditioning_mask is None:
+        transformer_kwargs["timestep"] = timestep_batch
+    else:
+        if int(conditioning_mask.shape[0]) != model_batch:
+            raise RuntimeError(
+                "LTX2 conditioning mask batch mismatch: "
+                f"latents_batch={model_batch} mask_shape={tuple(conditioning_mask.shape)}."
+            )
+        transformer_kwargs["timestep"] = timestep_batch.unsqueeze(-1) * (1.0 - conditioning_mask)
+        transformer_kwargs["audio_timestep"] = timestep_batch
+
+    with _transformer_cache_context(transformer):
+        video_prediction, audio_prediction = transformer(**transformer_kwargs)
+    if int(video_prediction.shape[0]) != model_batch:
+        raise RuntimeError(
+            "LTX2 transformer video output batch mismatch: "
+            f"expected={model_batch} got={tuple(video_prediction.shape)}."
+        )
+    if int(audio_prediction.shape[0]) != model_batch:
+        raise RuntimeError(
+            "LTX2 transformer audio output batch mismatch: "
+            f"expected={model_batch} got={tuple(audio_prediction.shape)}."
+        )
+    return video_prediction.float(), audio_prediction.float()
 
 
 @contextmanager
@@ -662,6 +752,30 @@ def _sample_ltx2_native_latents(
         device=device,
         dtype=execution_dtype,
     )
+    expected_prompt_batch = int(batch_size) * (2 if do_classifier_free_guidance else 1)
+    if int(encoded_prompt.video_prompt_embeds.shape[0]) != expected_prompt_batch:
+        raise RuntimeError(
+            "LTX2 video prompt batch does not match CFG state: "
+            f"expected={expected_prompt_batch} got={tuple(encoded_prompt.video_prompt_embeds.shape)}."
+        )
+    if int(encoded_prompt.audio_prompt_embeds.shape[0]) != expected_prompt_batch:
+        raise RuntimeError(
+            "LTX2 audio prompt batch does not match CFG state: "
+            f"expected={expected_prompt_batch} got={tuple(encoded_prompt.audio_prompt_embeds.shape)}."
+        )
+    if int(encoded_prompt.attention_mask.shape[0]) != expected_prompt_batch:
+        raise RuntimeError(
+            "LTX2 attention mask batch does not match CFG state: "
+            f"expected={expected_prompt_batch} got={tuple(encoded_prompt.attention_mask.shape)}."
+        )
+    requested_cfg_batch_mode = resolve_cfg_batch_mode()
+    effective_cfg_batch_mode = (
+        "none"
+        if not do_classifier_free_guidance
+        else "fused"
+        if requested_cfg_batch_mode == "fused"
+        else "split"
+    )
 
     spatial_ratio = int(getattr(native.vae, "spatial_compression_ratio", 32) or 32)
     temporal_ratio = int(getattr(native.vae, "temporal_compression_ratio", 8) or 8)
@@ -760,72 +874,220 @@ def _sample_ltx2_native_latents(
         int(audio_num_frames),
         audio_latents_tensor.device,
     )
-
-    conditioning_mask_for_model = None
-    if conditioning_mask is not None:
-        conditioning_mask_for_model = conditioning_mask
-        if do_classifier_free_guidance:
-            conditioning_mask_for_model = torch.cat([conditioning_mask_for_model, conditioning_mask_for_model], dim=0)
-
-    for timestep in scheduler.timesteps:
-        latent_model_input = torch.cat([video_latents, video_latents], dim=0) if do_classifier_free_guidance else video_latents
-        latent_model_input = latent_model_input.to(dtype=encoded_prompt.video_prompt_embeds.dtype)
-        audio_model_input = (
-            torch.cat([audio_latents_tensor, audio_latents_tensor], dim=0)
-            if do_classifier_free_guidance
-            else audio_latents_tensor
+    fused_video_coords = None
+    fused_audio_coords = None
+    if effective_cfg_batch_mode == "fused":
+        fused_video_coords = effective_transformer.rope.prepare_video_coords(
+            int(video_latents.shape[0]) * 2,
+            int(latent_num_frames),
+            int(latent_height),
+            int(latent_width),
+            video_latents.device,
+            fps=float(frame_rate),
         )
-        audio_model_input = audio_model_input.to(dtype=encoded_prompt.audio_prompt_embeds.dtype)
+        fused_audio_coords = effective_transformer.audio_rope.prepare_audio_coords(
+            int(audio_latents_tensor.shape[0]) * 2,
+            int(audio_num_frames),
+            audio_latents_tensor.device,
+        )
 
-        timestep_batch = timestep.expand(int(latent_model_input.shape[0]))
-        transformer_kwargs: dict[str, Any] = {
-            "hidden_states": latent_model_input,
-            "audio_hidden_states": audio_model_input,
-            "encoder_hidden_states": encoded_prompt.video_prompt_embeds,
-            "audio_encoder_hidden_states": encoded_prompt.audio_prompt_embeds,
-            "encoder_attention_mask": encoded_prompt.attention_mask,
-            "audio_encoder_attention_mask": encoded_prompt.attention_mask,
-            "num_frames": int(latent_num_frames),
-            "height": int(latent_height),
-            "width": int(latent_width),
-            "fps": float(frame_rate),
-            "audio_num_frames": int(audio_num_frames),
-            "video_coords": video_coords,
-            "audio_coords": audio_coords,
-            "attention_kwargs": None if attention_kwargs is None else dict(attention_kwargs),
-            "return_dict": False,
-        }
-        if conditioning_mask_for_model is None:
-            transformer_kwargs["timestep"] = timestep_batch
+    fused_conditioning_mask = None
+    if conditioning_mask is not None and effective_cfg_batch_mode == "fused":
+        fused_conditioning_mask = torch.cat([conditioning_mask, conditioning_mask], dim=0)
+
+    emit_backend_message(
+        "[ltx2.native] sampling CFG config",
+        logger=__name__,
+        requested_cfg_batch_mode=requested_cfg_batch_mode,
+        effective_cfg_batch_mode=effective_cfg_batch_mode,
+        guidance_scale=float(guidance_scale),
+        guidance_rescale=float(guidance_rescale),
+        steps=int(effective_num_inference_steps),
+        video_latent_shape=tuple(video_latents.shape),
+        audio_latent_shape=tuple(audio_latents_tensor.shape),
+        video_prompt_shape=tuple(encoded_prompt.video_prompt_embeds.shape),
+        audio_prompt_shape=tuple(encoded_prompt.audio_prompt_embeds.shape),
+        attention_mask_shape=tuple(encoded_prompt.attention_mask.shape),
+        conditioning_mask_shape=None if conditioning_mask is None else tuple(conditioning_mask.shape),
+        dtype=str(execution_dtype),
+        device=str(device),
+    )
+
+    fused_cfg_enabled_for_run = effective_cfg_batch_mode == "fused"
+    negative_prompt_slice = slice(0, int(batch_size))
+    positive_prompt_slice = slice(int(batch_size), int(batch_size) * 2)
+    for timestep in scheduler.timesteps:
+        if not do_classifier_free_guidance:
+            latent_model_input = video_latents.to(dtype=encoded_prompt.video_prompt_embeds.dtype)
+            audio_model_input = audio_latents_tensor.to(dtype=encoded_prompt.audio_prompt_embeds.dtype)
+            noise_pred_video, noise_pred_audio = _run_ltx2_transformer_forward(
+                transformer=effective_transformer,
+                video_latent_model_input=latent_model_input,
+                audio_latent_model_input=audio_model_input,
+                video_prompt_embeds=encoded_prompt.video_prompt_embeds,
+                audio_prompt_embeds=encoded_prompt.audio_prompt_embeds,
+                attention_mask=encoded_prompt.attention_mask,
+                latent_num_frames=int(latent_num_frames),
+                latent_height=int(latent_height),
+                latent_width=int(latent_width),
+                frame_rate=float(frame_rate),
+                audio_num_frames=int(audio_num_frames),
+                video_coords=video_coords,
+                audio_coords=audio_coords,
+                attention_kwargs=attention_kwargs,
+                conditioning_mask=conditioning_mask,
+                timestep=timestep,
+            )
+        elif fused_cfg_enabled_for_run:
+            try:
+                if fused_video_coords is None or fused_audio_coords is None:
+                    raise RuntimeError("LTX2 fused CFG coordinates were not prepared.")
+                latent_model_input = torch.cat([video_latents, video_latents], dim=0).to(
+                    dtype=encoded_prompt.video_prompt_embeds.dtype
+                )
+                audio_model_input = torch.cat([audio_latents_tensor, audio_latents_tensor], dim=0).to(
+                    dtype=encoded_prompt.audio_prompt_embeds.dtype
+                )
+                noise_pred_video, noise_pred_audio = _run_ltx2_transformer_forward(
+                    transformer=effective_transformer,
+                    video_latent_model_input=latent_model_input,
+                    audio_latent_model_input=audio_model_input,
+                    video_prompt_embeds=encoded_prompt.video_prompt_embeds,
+                    audio_prompt_embeds=encoded_prompt.audio_prompt_embeds,
+                    attention_mask=encoded_prompt.attention_mask,
+                    latent_num_frames=int(latent_num_frames),
+                    latent_height=int(latent_height),
+                    latent_width=int(latent_width),
+                    frame_rate=float(frame_rate),
+                    audio_num_frames=int(audio_num_frames),
+                    video_coords=fused_video_coords,
+                    audio_coords=fused_audio_coords,
+                    attention_kwargs=attention_kwargs,
+                    conditioning_mask=fused_conditioning_mask,
+                    timestep=timestep,
+                )
+                noise_pred_video_uncond, noise_pred_video_text = noise_pred_video.chunk(2)
+                noise_pred_video = noise_pred_video_uncond + float(guidance_scale) * (
+                    noise_pred_video_text - noise_pred_video_uncond
+                )
+                noise_pred_audio_uncond, noise_pred_audio_text = noise_pred_audio.chunk(2)
+                noise_pred_audio = noise_pred_audio_uncond + float(guidance_scale) * (
+                    noise_pred_audio_text - noise_pred_audio_uncond
+                )
+            except Exception as exc:
+                if not _is_cuda_oom(exc):
+                    raise
+                fused_cfg_enabled_for_run = False
+                effective_cfg_batch_mode = "split"
+                emit_backend_message(
+                    "[ltx2.native] fused CFG OOM; falling back to split",
+                    logger=__name__,
+                    level="WARNING",
+                    requested_cfg_batch_mode=requested_cfg_batch_mode,
+                    effective_cfg_batch_mode=effective_cfg_batch_mode,
+                    reason=str(exc),
+                )
+                memory_management.manager.soft_empty_cache()
+                latent_model_input = video_latents.to(dtype=encoded_prompt.video_prompt_embeds.dtype)
+                audio_model_input = audio_latents_tensor.to(dtype=encoded_prompt.audio_prompt_embeds.dtype)
+                noise_pred_video_uncond, noise_pred_audio_uncond = _run_ltx2_transformer_forward(
+                    transformer=effective_transformer,
+                    video_latent_model_input=latent_model_input,
+                    audio_latent_model_input=audio_model_input,
+                    video_prompt_embeds=encoded_prompt.video_prompt_embeds[negative_prompt_slice],
+                    audio_prompt_embeds=encoded_prompt.audio_prompt_embeds[negative_prompt_slice],
+                    attention_mask=encoded_prompt.attention_mask[negative_prompt_slice],
+                    latent_num_frames=int(latent_num_frames),
+                    latent_height=int(latent_height),
+                    latent_width=int(latent_width),
+                    frame_rate=float(frame_rate),
+                    audio_num_frames=int(audio_num_frames),
+                    video_coords=video_coords,
+                    audio_coords=audio_coords,
+                    attention_kwargs=attention_kwargs,
+                    conditioning_mask=conditioning_mask,
+                    timestep=timestep,
+                )
+                noise_pred_video_text, noise_pred_audio_text = _run_ltx2_transformer_forward(
+                    transformer=effective_transformer,
+                    video_latent_model_input=latent_model_input,
+                    audio_latent_model_input=audio_model_input,
+                    video_prompt_embeds=encoded_prompt.video_prompt_embeds[positive_prompt_slice],
+                    audio_prompt_embeds=encoded_prompt.audio_prompt_embeds[positive_prompt_slice],
+                    attention_mask=encoded_prompt.attention_mask[positive_prompt_slice],
+                    latent_num_frames=int(latent_num_frames),
+                    latent_height=int(latent_height),
+                    latent_width=int(latent_width),
+                    frame_rate=float(frame_rate),
+                    audio_num_frames=int(audio_num_frames),
+                    video_coords=video_coords,
+                    audio_coords=audio_coords,
+                    attention_kwargs=attention_kwargs,
+                    conditioning_mask=conditioning_mask,
+                    timestep=timestep,
+                )
+                noise_pred_video = noise_pred_video_uncond + float(guidance_scale) * (
+                    noise_pred_video_text - noise_pred_video_uncond
+                )
+                noise_pred_audio = noise_pred_audio_uncond + float(guidance_scale) * (
+                    noise_pred_audio_text - noise_pred_audio_uncond
+                )
         else:
-            transformer_kwargs["timestep"] = timestep_batch.unsqueeze(-1) * (1.0 - conditioning_mask_for_model)
-            transformer_kwargs["audio_timestep"] = timestep_batch
-
-        with _transformer_cache_context(effective_transformer):
-            noise_pred_video, noise_pred_audio = effective_transformer(**transformer_kwargs)
-        noise_pred_video = noise_pred_video.float()
-        noise_pred_audio = noise_pred_audio.float()
-
-        if do_classifier_free_guidance:
-            noise_pred_video_uncond, noise_pred_video_text = noise_pred_video.chunk(2)
+            latent_model_input = video_latents.to(dtype=encoded_prompt.video_prompt_embeds.dtype)
+            audio_model_input = audio_latents_tensor.to(dtype=encoded_prompt.audio_prompt_embeds.dtype)
+            noise_pred_video_uncond, noise_pred_audio_uncond = _run_ltx2_transformer_forward(
+                transformer=effective_transformer,
+                video_latent_model_input=latent_model_input,
+                audio_latent_model_input=audio_model_input,
+                video_prompt_embeds=encoded_prompt.video_prompt_embeds[negative_prompt_slice],
+                audio_prompt_embeds=encoded_prompt.audio_prompt_embeds[negative_prompt_slice],
+                attention_mask=encoded_prompt.attention_mask[negative_prompt_slice],
+                latent_num_frames=int(latent_num_frames),
+                latent_height=int(latent_height),
+                latent_width=int(latent_width),
+                frame_rate=float(frame_rate),
+                audio_num_frames=int(audio_num_frames),
+                video_coords=video_coords,
+                audio_coords=audio_coords,
+                attention_kwargs=attention_kwargs,
+                conditioning_mask=conditioning_mask,
+                timestep=timestep,
+            )
+            noise_pred_video_text, noise_pred_audio_text = _run_ltx2_transformer_forward(
+                transformer=effective_transformer,
+                video_latent_model_input=latent_model_input,
+                audio_latent_model_input=audio_model_input,
+                video_prompt_embeds=encoded_prompt.video_prompt_embeds[positive_prompt_slice],
+                audio_prompt_embeds=encoded_prompt.audio_prompt_embeds[positive_prompt_slice],
+                attention_mask=encoded_prompt.attention_mask[positive_prompt_slice],
+                latent_num_frames=int(latent_num_frames),
+                latent_height=int(latent_height),
+                latent_width=int(latent_width),
+                frame_rate=float(frame_rate),
+                audio_num_frames=int(audio_num_frames),
+                video_coords=video_coords,
+                audio_coords=audio_coords,
+                attention_kwargs=attention_kwargs,
+                conditioning_mask=conditioning_mask,
+                timestep=timestep,
+            )
             noise_pred_video = noise_pred_video_uncond + float(guidance_scale) * (
                 noise_pred_video_text - noise_pred_video_uncond
             )
-            noise_pred_audio_uncond, noise_pred_audio_text = noise_pred_audio.chunk(2)
             noise_pred_audio = noise_pred_audio_uncond + float(guidance_scale) * (
                 noise_pred_audio_text - noise_pred_audio_uncond
             )
-            if float(guidance_rescale) > 0.0:
-                noise_pred_video = _rescale_noise_cfg(
-                    noise_pred_video,
-                    noise_pred_video_text,
-                    guidance_rescale=float(guidance_rescale),
-                )
-                noise_pred_audio = _rescale_noise_cfg(
-                    noise_pred_audio,
-                    noise_pred_audio_text,
-                    guidance_rescale=float(guidance_rescale),
-                )
+        if do_classifier_free_guidance and float(guidance_rescale) > 0.0:
+            noise_pred_video = _rescale_noise_cfg(
+                noise_pred_video,
+                noise_pred_video_text,
+                guidance_rescale=float(guidance_rescale),
+            )
+            noise_pred_audio = _rescale_noise_cfg(
+                noise_pred_audio,
+                noise_pred_audio_text,
+                guidance_rescale=float(guidance_rescale),
+            )
 
         if conditioning_mask is None:
             video_latents = scheduler.step(

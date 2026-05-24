@@ -1,7 +1,7 @@
 <!-- tags: backend, runtime, families, ltx2, native, transformer, vae, audio -->
 # apps/backend/runtime/families/ltx2/native Overview
 Date: 2026-03-12
-Last Review: 2026-05-17
+Last Review: 2026-05-24
 Status: Active
 
 ## Purpose
@@ -32,6 +32,7 @@ Status: Active
 - `video_vae.py::decode(...)` now owns the explicit decode-timestep contract: when `config.timestep_conditioning=True`, callers must provide a batch-matched `timestep` tensor instead of relying on positional mismatch or hidden fallback glue. `native/pipelines.py` owns the current zero-timestep default for generation.
 - `pipelines.py` may rely on the local scheduler/text/native module contracts, but canonical API/result/export ownership stays outside this directory in the canonical use-cases.
 - `pipelines.py` directly touches `native.transformer.config`, `native.transformer.rope`, `native.transformer.audio_rope`, and `cache_context(...)`; any streamed wrapper must proxy those surfaces honestly and cleanup must live here, not in public metadata.
+- `pipelines.py` must honor `CODEX_CFG_BATCH_MODE=fused|split`: fused uses 2B latents, prompt embeds, attention masks, RoPE coords, and img2vid conditioning masks; split uses B-sized latents/coords/masks for each serial branch.
 - `pipelines.py` is now the only native owner for the LTX two-stage latent bridge contract: stage sampling returns unpacked/unnormalized video latents plus packed/normalized audio latents, decode stays explicit, and one-stage wrappers must continue to route through the same refactored primitives instead of forking behavior.
 - `pipelines.py` must pass the request-owned generator into every native scheduler step. `scheduler.py` may consume one generator for stochastic FlowMatchEuler noise, but per-batch generator sequences are not implemented at this seam and must fail loud.
 - Public native stage samplers must execute against `native.transformer` only; do not reintroduce optional transformer override plumbing that competes with the runtime-local lock / temporary LoRA owner model.

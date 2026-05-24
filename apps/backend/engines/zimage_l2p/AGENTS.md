@@ -20,4 +20,4 @@ Status: Active
 - Engine id is exactly `zimage_l2p`; no aliases.
 - First tranche is exact 1024x1024 txt2img, batch size/count 1, no hires, no img2img, no VAE, no LoRA.
 - SafeTensors and GGUF are both first-class for the denoiser core and Qwen3-4B TEnc.
-- `standalone_sampler.py` is the pixel-space FlowMatch owner and must honor `CODEX_CFG_BATCH_MODE=fused|split`: fused batches compatible uncond+cond CFG in one denoiser forward, split keeps serial forwards, and fused CUDA OOM falls back to split with an explicit warning.
+- `standalone_sampler.py` is the pixel-space FlowMatch owner and must honor `CODEX_CFG_BATCH_MODE=fused|split`: fused batches uncond+cond CFG in one denoiser forward even when prompt token lengths differ, split keeps serial forwards, and fused CUDA OOM falls back to split with an explicit warning.
