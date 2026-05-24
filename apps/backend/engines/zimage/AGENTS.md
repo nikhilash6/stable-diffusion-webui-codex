@@ -1,6 +1,6 @@
 # apps/backend/engines/zimage
 Date: 2025-12-12
-Last Review: 2026-03-22
+Last Review: 2026-05-24
 Status: Active
 
 ## Purpose
@@ -19,6 +19,7 @@ Status: Active
 
 ## Notes / Decisions
 - 2026-03-22: `ZImageEngine.encode_first_stage(...)` still uses the shared Flow16 first-stage lane, but now forwards optional `encode_seed` so img2img init-latent posterior sampling stays deterministic without a ZImage-only encode fork.
+- 2026-05-24: External Qwen3 text-encoder runtime assembly must keep storage/compute dtype ownership on the pre-load role dtype or `ZImageTextEncoder.dtype`; do not infer text-encoder storage from a post-load first parameter, because GGUF packed parameters expose integer storage.
 - 2026-03-20: `ZImageEngine` now treats `extras.zimage_variant` as the authoritative selector for Base vs Turbo; GGUF metadata is only a fallback when the request omitted the variant, and Z Image img2img must not inherit SD-family inpaint heuristics from checkpoint metadata.
 - **Variant contract:** UI sends `extras.zimage_variant="turbo"|"base"` for the base request, and generic swap seams may also carry the same selector on `extras.swap_model` / `extras.hires.swap_model`; the backend forwards it to `engine_options["zimage_variant"]` so the orchestrator reloads the engine when the variant changes.
   - For Codex-produced GGUFs, the engine may also trust `codex.zimage.variant` metadata when it matches Codex provenance.

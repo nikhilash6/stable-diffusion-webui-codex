@@ -7,7 +7,8 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Tools API routes (GGUF conversion + SafeTensors merge + file browser + PNG metadata inspection).
-Provides long-running conversion/merge job tracking, filesystem browsing for file picker dialogs, and small utility endpoints used by the UI.
+Provides long-running conversion/merge job tracking, the source/native GGUF converter recipe/policy descriptor contract,
+preflighted conversion job creation, filesystem browsing for file picker dialogs, and small utility endpoints used by the UI.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `build_router` (function): Build the APIRouter for tools endpoints.
@@ -193,24 +194,37 @@ def build_router(*, codex_root: Path) -> APIRouter:
 
     @router.get("/api/tools/gguf-converter/presets")
     async def list_gguf_converter_presets() -> Dict[str, Any]:
-        from apps.backend.runtime.tools.gguf_converter_float_groups import float_groups_for_profile_id
         from apps.backend.runtime.tools.gguf_converter_model_metadata import list_vendored_gguf_converter_model_metadata
+        from apps.backend.runtime.tools.gguf_converter_profiles import profile_by_id
+        from apps.backend.runtime.tools.gguf_converter_quantization import (
+            all_quantization_recipe_specs,
+            all_tensor_quantization_type_specs,
+        )
 
         models = list_vendored_gguf_converter_model_metadata(codex_root=codex_root)
-        profile_ids: set[str] = set()
-        for model in models:
-            for comp in model.components:
-                if comp.profile_id:
-                    profile_ids.add(comp.profile_id)
 
-        float_groups: dict[str, Any] = {}
-        for pid in sorted(profile_ids):
-            float_groups[pid] = [
-                {"id": g.id, "label": g.label, "patterns": list(g.patterns)}
-                for g in float_groups_for_profile_id(pid)
-            ]
+        def component_quantization_payload(config_dir: str, profile_id: str | None) -> dict[str, Any] | None:
+            if profile_id is None:
+                return None
+            profile = profile_by_id(profile_id)
+            cfg = json.loads((Path(config_dir) / "config.json").read_text(encoding="utf-8"))
+            return profile.quant_policy.surface_descriptor(profile_id=profile.id, model_config=cfg).to_payload()
 
         return {
+            "quantization_recipes": [
+                {
+                    "id": spec.recipe.value,
+                    "label": spec.label,
+                    "group": spec.group,
+                    "description": spec.description,
+                    "default_tensor_type": spec.default_tensor_type.value,
+                    "file_type": spec.llama_file_type.name,
+                    "family": spec.family,
+                    "tier": spec.tier,
+                }
+                for spec in all_quantization_recipe_specs()
+            ],
+            "tensor_quantization_types": list(all_tensor_quantization_type_specs()),
             "models": [
                 {
                     "id": m.id,
@@ -224,13 +238,13 @@ def build_router(*, codex_root: Path) -> APIRouter:
                             "config_dir": c.config_dir,
                             "kind": c.kind,
                             "profile_id": c.profile_id,
+                            "quantization": component_quantization_payload(c.config_dir, c.profile_id),
                         }
                         for c in m.components
                     ],
                 }
                 for m in models
             ],
-            "float_groups": float_groups,
         }
 
     @router.post("/api/tools/convert-gguf")
@@ -239,12 +253,12 @@ def build_router(*, codex_root: Path) -> APIRouter:
         from apps.backend.runtime.tools.gguf_converter import (
             ConversionConfig,
             GGUFConversionCancelled,
-            QuantizationType,
             convert_safetensors_to_gguf,
+            preflight_conversion_contract,
         )
         from apps.backend.runtime.tools.gguf_converter_types import (
-            normalize_mixed_float_override,
-            normalize_precision_mode,
+            normalize_quant_policy_preset,
+            normalize_quantization_recipe,
         )
 
         job_id = str(uuid.uuid4())[:8]
@@ -255,10 +269,9 @@ def build_router(*, codex_root: Path) -> APIRouter:
             "output_path",
             "overwrite",
             "quantization",
+            "quant_policy_preset",
             "tensor_type_overrides",
             "profile_id",
-            "float_group_overrides",
-            "precision_mode",
         }
         unknown_keys = sorted({str(key) for key in payload.keys() if str(key) not in allowed_payload_keys})
         if unknown_keys:
@@ -278,10 +291,9 @@ def build_router(*, codex_root: Path) -> APIRouter:
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         quant_str = payload.get("quantization", "F16")
+        quant_policy_preset_raw = payload.get("quant_policy_preset", None)
         overrides_raw = payload.get("tensor_type_overrides", [])
         profile_id_raw = payload.get("profile_id", None)
-        float_group_overrides_raw = payload.get("float_group_overrides", {})
-        precision_mode_raw = payload.get("precision_mode", None)
 
         if not config_path or not safetensors_path or not output_path:
             raise HTTPException(status_code=400, detail="Missing required paths")
@@ -308,13 +320,13 @@ def build_router(*, codex_root: Path) -> APIRouter:
             raise HTTPException(status_code=400, detail=f"Output path is a directory: {final_path}")
 
         try:
-            quant = QuantizationType(quant_str)
+            quant = normalize_quantization_recipe(quant_str)
+            if "quant_policy_preset" in payload:
+                quant_policy_preset = normalize_quant_policy_preset(quant_policy_preset_raw)
+            else:
+                quant_policy_preset = None
         except ValueError as exc:
-            allowed = ", ".join(q.value for q in QuantizationType)
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid quantization: {quant_str!r} (allowed: {allowed})",
-            ) from exc
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         profile_id: str | None = None
         if profile_id_raw is not None:
@@ -327,57 +339,28 @@ def build_router(*, codex_root: Path) -> APIRouter:
                 except ValueError as exc:
                     raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        try:
-            precision_mode = normalize_precision_mode(precision_mode_raw)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        float_group_overrides: dict[str, str] = {}
-        if float_group_overrides_raw is None:
-            float_group_overrides = {}
-        elif isinstance(float_group_overrides_raw, dict):
-            for k, v in float_group_overrides_raw.items():
-                group_id = str(k or "").strip()
-                if not group_id:
-                    raise HTTPException(status_code=400, detail="float_group_overrides contains an empty group id")
-                try:
-                    float_group_overrides[group_id] = normalize_mixed_float_override(v)
-                except ValueError as exc:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=str(exc),
-                    ) from exc
-        else:
-            raise HTTPException(status_code=400, detail="float_group_overrides must be an object/dict when provided")
-
-        if precision_mode is not None and float_group_overrides:
-            raise HTTPException(
-                status_code=400,
-                detail="precision_mode cannot be combined with float_group_overrides.",
-            )
-
-        if any(v != "auto" for v in float_group_overrides.values()):
-            if profile_id is None:
-                raise HTTPException(status_code=400, detail="float_group_overrides requires profile_id")
-
-            from apps.backend.runtime.tools.gguf_converter_float_groups import float_groups_for_profile_id
-
-            allowed = {g.id for g in float_groups_for_profile_id(profile_id)}
-            for gid, choice in float_group_overrides.items():
-                if choice == "auto":
-                    continue
-                if gid not in allowed:
-                    allowed_msg = ", ".join(sorted(allowed)) if allowed else "(none)"
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Unknown float dtype group for profile {profile_id!r}: {gid!r} (allowed: {allowed_msg})",
-                    )
-
         tensor_type_overrides: list[str] = []
         if isinstance(overrides_raw, str):
             tensor_type_overrides = [ln.strip() for ln in overrides_raw.splitlines() if ln.strip()]
         elif isinstance(overrides_raw, list):
             tensor_type_overrides = [str(x).strip() for x in overrides_raw if str(x).strip()]
+
+        preflight_config = ConversionConfig(
+            config_path=config_path,
+            safetensors_path=safetensors_path,
+            output_path=str(final_path),
+            profile_id=profile_id,
+            quantization=quant,
+            quant_policy_preset=quant_policy_preset,
+            tensor_type_overrides=tensor_type_overrides,
+        )
+        try:
+            preflight = preflight_conversion_contract(
+                preflight_config,
+                quant_policy_preset_explicit="quant_policy_preset" in payload,
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         final_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_handle = tempfile.NamedTemporaryFile(
@@ -416,9 +399,8 @@ def build_router(*, codex_root: Path) -> APIRouter:
                     output_path=str(ctrl.tmp_path),
                     profile_id=profile_id,
                     quantization=quant,
+                    quant_policy_preset=preflight.quant_policy_preset,
                     tensor_type_overrides=tensor_type_overrides,
-                    float_group_overrides=float_group_overrides,
-                    precision_mode=precision_mode,
                 )
 
                 def progress_cb(prog):

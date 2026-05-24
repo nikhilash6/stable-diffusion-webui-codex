@@ -11,6 +11,7 @@ Defines `CodexObjects` and the shared engine load/unload path, including fail-fa
 `vae_source`/`tenc_source` selection. Also provides default first-stage VAE encode/decode for image engines and canonical task wrappers that
 delegate to mode use-cases (Option A) so engines stay adapters.
 External-asset-first families (e.g., Z-Image and Anima) treat `vae_path` as selection rather than a state-dict override.
+No-VAE pixel engines opt out through `requires_vae=False`; they must still provide real denoiser/text-encoder components and decoded output.
 State-dict VAE overrides are normalized once before lane resolution so known SDXL/Flow metadata is stripped without reintroducing model-class heuristics.
 Engine lifecycle logs (`load.start` / `load.complete` / `unload.start`) are emitted through the global runtime event emitter.
 Patcher-backed component memory lifecycle (for example denoiser/VAE/CLIP-vision wrappers) uses canonical patcher-first targets so smart-offload bookkeeping does not fork records across wrapper and patcher identities.
@@ -244,7 +245,13 @@ class CodexObjects:
             clipvision=self.clipvision,
         )
 
-    def validate(self, context: str, *, required_text_encoders: tuple[str, ...] = ("clip",)) -> None:
+    def validate(
+        self,
+        context: str,
+        *,
+        required_text_encoders: tuple[str, ...] = ("clip",),
+        requires_vae: bool = True,
+    ) -> None:
         """Ensure all mandatory components are present.
         
         Args:
@@ -253,7 +260,7 @@ class CodexObjects:
         """
         if self.denoiser is None:
             raise ValueError(f"{context}: denoiser component is required.")
-        if self.vae is None:
+        if requires_vae and self.vae is None:
             raise ValueError(f"{context}: VAE component is required.")
         if not isinstance(self.text_encoders, dict):
             raise TypeError(f"{context}: text_encoders must be a dict[str, TextEncoderHandle].")
@@ -299,9 +306,16 @@ class _ComponentTracker:
             raise TypeError(f"{context}: expected CodexObjects, received {type(value).__name__}.")
         return value
 
-    def initialize(self, components: CodexObjects, *, context: str, required_text_encoders: tuple[str, ...] = ("clip",)) -> None:
+    def initialize(
+        self,
+        components: CodexObjects,
+        *,
+        context: str,
+        required_text_encoders: tuple[str, ...] = ("clip",),
+        requires_vae: bool = True,
+    ) -> None:
         components = self._ensure_codex_objects(components, context)
-        components.validate(context, required_text_encoders=required_text_encoders)
+        components.validate(context, required_text_encoders=required_text_encoders, requires_vae=requires_vae)
         self._active = components
         self._original = components.shallow_copy()
         self._after_lora = components.shallow_copy()
@@ -315,9 +329,16 @@ class _ComponentTracker:
             list(components.text_encoders.keys()),
         )
 
-    def replace_active(self, components: CodexObjects, *, context: str, required_text_encoders: tuple[str, ...] = ("clip",)) -> None:
+    def replace_active(
+        self,
+        components: CodexObjects,
+        *,
+        context: str,
+        required_text_encoders: tuple[str, ...] = ("clip",),
+        requires_vae: bool = True,
+    ) -> None:
         components = self._ensure_codex_objects(components, context)
-        components.validate(context, required_text_encoders=required_text_encoders)
+        components.validate(context, required_text_encoders=required_text_encoders, requires_vae=requires_vae)
         self._active = components
         self._logger.debug(
             "Engine components replaced (%s): %s", context, components.describe()
@@ -335,9 +356,16 @@ class _ComponentTracker:
             list(active.text_encoders.keys()),
         )
 
-    def set_after_lora(self, components: CodexObjects, *, context: str, required_text_encoders: tuple[str, ...] = ("clip",)) -> None:
+    def set_after_lora(
+        self,
+        components: CodexObjects,
+        *,
+        context: str,
+        required_text_encoders: tuple[str, ...] = ("clip",),
+        requires_vae: bool = True,
+    ) -> None:
         components = self._ensure_codex_objects(components, context)
-        components.validate(context, required_text_encoders=required_text_encoders)
+        components.validate(context, required_text_encoders=required_text_encoders, requires_vae=requires_vae)
         self._after_lora = components
         self._logger.debug(
             "External post-LoRA snapshot registered (%s): %s",
@@ -345,9 +373,16 @@ class _ComponentTracker:
             components.describe(),
         )
 
-    def set_original(self, components: CodexObjects, *, context: str, required_text_encoders: tuple[str, ...] = ("clip",)) -> None:
+    def set_original(
+        self,
+        components: CodexObjects,
+        *,
+        context: str,
+        required_text_encoders: tuple[str, ...] = ("clip",),
+        requires_vae: bool = True,
+    ) -> None:
         components = self._ensure_codex_objects(components, context)
-        components.validate(context, required_text_encoders=required_text_encoders)
+        components.validate(context, required_text_encoders=required_text_encoders, requires_vae=requires_vae)
         self._original = components
         self._logger.debug(
             "Original component snapshot replaced (%s): %s",
@@ -387,6 +422,7 @@ class CodexDiffusionEngine(BaseInferenceEngine, ABC):
         "sd3": "is_sd3",
         "sdxl": "is_sdxl",
     }
+    requires_vae = True
 
     def __init__(self, *, logger: BackendLoggerProxy | None = None) -> None:  # noqa: D401
         super().__init__()
@@ -420,7 +456,10 @@ class CodexDiffusionEngine(BaseInferenceEngine, ABC):
         """Bind engine components and seed original/LoRA snapshots."""
         context = label or self.__class__.__name__
         self._component_tracker.initialize(
-            components, context=context, required_text_encoders=self.required_text_encoders
+            components,
+            context=context,
+            required_text_encoders=self.required_text_encoders,
+            requires_vae=self.requires_vae,
         )
 
     @property
@@ -430,7 +469,10 @@ class CodexDiffusionEngine(BaseInferenceEngine, ABC):
     @codex_objects.setter
     def codex_objects(self, value: CodexObjects) -> None:
         self._component_tracker.replace_active(
-            value, context="codex_objects setter", required_text_encoders=self.required_text_encoders
+            value,
+            context="codex_objects setter",
+            required_text_encoders=self.required_text_encoders,
+            requires_vae=self.requires_vae,
         )
 
     @property
@@ -440,7 +482,10 @@ class CodexDiffusionEngine(BaseInferenceEngine, ABC):
     @codex_objects_original.setter
     def codex_objects_original(self, value: CodexObjects) -> None:
         self._component_tracker.set_original(
-            value, context="codex_objects_original", required_text_encoders=self.required_text_encoders
+            value,
+            context="codex_objects_original",
+            required_text_encoders=self.required_text_encoders,
+            requires_vae=self.requires_vae,
         )
 
     @property
@@ -450,7 +495,10 @@ class CodexDiffusionEngine(BaseInferenceEngine, ABC):
     @codex_objects_after_applying_lora.setter
     def codex_objects_after_applying_lora(self, value: CodexObjects) -> None:
         self._component_tracker.set_after_lora(
-            value, context="codex_objects_after_applying_lora", required_text_encoders=self.required_text_encoders
+            value,
+            context="codex_objects_after_applying_lora",
+            required_text_encoders=self.required_text_encoders,
+            requires_vae=self.requires_vae,
         )
 
     @property
@@ -622,8 +670,8 @@ class CodexDiffusionEngine(BaseInferenceEngine, ABC):
             raise TypeError("_bundle must be a DiffusionModelBundle when provided.")
 
         # Per-family invariants for text encoder override payloads.
-        if bundle.family is ModelFamily.ZIMAGE and isinstance(tenc_path, list):
-            raise RuntimeError("Z Image supports exactly 1 text encoder; tenc_path must be a string.")
+        if bundle.family in {ModelFamily.ZIMAGE, ModelFamily.ZIMAGE_L2P} and isinstance(tenc_path, list):
+            raise RuntimeError(f"{bundle.family.value} supports exactly 1 text encoder; tenc_path must be a string.")
         if bundle.family is ModelFamily.ANIMA and isinstance(tenc_path, list):
             raise RuntimeError("Anima supports exactly 1 text encoder; tenc_path must be a string.")
 
@@ -705,29 +753,43 @@ class CodexDiffusionEngine(BaseInferenceEngine, ABC):
         vae_path = raw_vae_path.strip() if isinstance(raw_vae_path, str) and raw_vae_path.strip() else None
 
         vae_source = self._load_options.vae_source
-        if vae_source is None:
-            raise RuntimeError(
-                "Image load requires explicit vae_source in load options; "
-                "router/task must forward the request-authoritative selector."
-            )
-        if vae_source not in {"built_in", "external"}:
-            raise RuntimeError("vae_source must be 'built_in' or 'external' when provided.")
-        if vae_source == "built_in":
-            if vae_path is not None:
-                raise RuntimeError("vae_source='built_in' does not allow vae_path; remove vae_path or set vae_source='external'.")
+        if self.requires_vae:
+            if vae_source is None:
+                raise RuntimeError(
+                    "Image load requires explicit vae_source in load options; "
+                    "router/task must forward the request-authoritative selector."
+                )
+            if vae_source not in {"built_in", "external"}:
+                raise RuntimeError("vae_source must be 'built_in' or 'external' when provided.")
+            if vae_source == "built_in":
+                if vae_path is not None:
+                    raise RuntimeError("vae_source='built_in' does not allow vae_path; remove vae_path or set vae_source='external'.")
+            else:
+                if vae_path is None:
+                    raise RuntimeError("vae_source='external' requires vae_path.")
         else:
-            if vae_path is None:
-                raise RuntimeError("vae_source='external' requires vae_path.")
+            if vae_source is not None:
+                raise RuntimeError(
+                    f"Engine '{self.engine_id}' does not use a VAE; remove vae_source from load options."
+                )
+            if vae_path is not None:
+                raise RuntimeError(f"Engine '{self.engine_id}' does not use a VAE; remove vae_path from load options.")
 
         # For core-only checkpoints, VAE is never embedded; fail fast if the assembly stage didn't supply one.
-        if checkpoint_is_core_only and getattr(components, "vae", None) is None:
+        if self.requires_vae and checkpoint_is_core_only and getattr(components, "vae", None) is None:
             raise RuntimeError(
                 "Core-only checkpoint requires an external VAE. "
                 "Provide one via engine option 'vae_path' (or via the API 'extras.vae_sha' selector)."
             )
 
         # ZImage and Anima treat `vae_path` as external selection; do not apply a state-dict override here.
-        if vae_source == "external" and vae_path and (bundle.family not in (ModelFamily.ZIMAGE, ModelFamily.ANIMA)) and (not checkpoint_is_core_only):
+        if (
+            self.requires_vae
+            and vae_source == "external"
+            and vae_path
+            and (bundle.family not in (ModelFamily.ZIMAGE, ModelFamily.ANIMA))
+            and (not checkpoint_is_core_only)
+        ):
             if not os.path.isfile(vae_path):
                 raise FileNotFoundError(f"vae_path '{vae_path}' does not exist.")
             if getattr(components, "vae", None) is None:

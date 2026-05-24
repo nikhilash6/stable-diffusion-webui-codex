@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Main Tk application for the Codex launcher GUI.
-Builds the window + tabs (including `Manual Env Vars`), seeds launcher service handles from persisted launcher meta, wires background tasks,
+Builds the window + tab registry (including `Manual Env Vars`), seeds launcher service handles from persisted launcher meta, wires background tasks,
 and provides a stable `main()` entrypoint used by `apps/codex_launcher.py`.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -31,12 +31,13 @@ from typing import Callable
 from apps.backend.infra.config.repo_root import get_repo_root
 from apps.launcher.checks import CodexLaunchCheck, run_launch_checks
 from apps.launcher.log_buffer import CodexLogBuffer
-from apps.launcher.profiles import LauncherProfileStore
-from apps.launcher.services import default_services
+from apps.launcher.profile_store import LauncherProfileStore
+from apps.launcher.service_specs import default_services
 
 from .controller import LauncherController
 from .styles import Palette, apply_style
-from .tabs import DiagnosticsTab, LogsTab, ManualEnvVarsTab, RuntimeTab, ServicesTab
+from .tab_registry import LauncherTabEntry, LauncherTabRegistry
+from .tabs import BootstrapTab, DiagnosticsTab, EngineTab, LogsTab, ManualEnvVarsTab, SafetyTab, ServicesTab
 
 
 _GEOMETRY_RE = re.compile(r"^\d+x\d+(?:[+-]\d+[+-]\d+)?$")
@@ -92,23 +93,20 @@ class CodexLauncherApp(tk.Tk):
             set_status=self._set_status,
             mark_changed=self._mark_changed,
         )
-        self._runtime_bootstrap_tab = RuntimeTab(
+        self._runtime_bootstrap_tab = BootstrapTab(
             self._controller,
             canvas_bg=self._palette.bg1,
             mark_changed=self._mark_changed,
-            section="bootstrap",
         )
-        self._runtime_engine_tab = RuntimeTab(
+        self._runtime_engine_tab = EngineTab(
             self._controller,
             canvas_bg=self._palette.bg1,
             mark_changed=self._mark_changed,
-            section="engine",
         )
-        self._runtime_safety_tab = RuntimeTab(
+        self._runtime_safety_tab = SafetyTab(
             self._controller,
             canvas_bg=self._palette.bg1,
             mark_changed=self._mark_changed,
-            section="safety",
         )
         self._manual_env_vars_tab = ManualEnvVarsTab(
             self._controller,
@@ -128,17 +126,18 @@ class CodexLauncherApp(tk.Tk):
             set_status=self._set_status,
         )
 
-        tabs = [
-            ("Services", self._services_tab.build(self._notebook), 0),
-            ("Bootstrap", self._runtime_bootstrap_tab.build(self._notebook), 0),
-            ("Engine", self._runtime_engine_tab.build(self._notebook), 0),
-            ("Safety", self._runtime_safety_tab.build(self._notebook), 2),
-            ("Manual Env Vars", self._manual_env_vars_tab.build(self._notebook), 0),
-            ("Diagnostics", self._diagnostics_tab.build(self._notebook), 0),
-            ("Logs", self._logs_tab.build(self._notebook), 0),
-        ]
-        for name, frame, underline in tabs:
-            self._notebook.add(frame, text=name, underline=underline)
+        self._tab_registry = LauncherTabRegistry(
+            (
+                LauncherTabEntry("services", "Services", 0, self._services_tab, refresh_participant=True, dispose_participant=True),
+                LauncherTabEntry("bootstrap", "Bootstrap", 0, self._runtime_bootstrap_tab, advanced_participant=True),
+                LauncherTabEntry("engine", "Engine", 0, self._runtime_engine_tab, advanced_participant=True),
+                LauncherTabEntry("safety", "Safety", 2, self._runtime_safety_tab, advanced_participant=True),
+                LauncherTabEntry("manual_env_vars", "Manual Env Vars", 0, self._manual_env_vars_tab),
+                LauncherTabEntry("diagnostics", "Diagnostics", 0, self._diagnostics_tab, advanced_participant=True),
+                LauncherTabEntry("logs", "Logs", 0, self._logs_tab, refresh_participant=True),
+            )
+        )
+        self._tab_registry.add_to_notebook(self._notebook)
         self._notebook.enable_traversal()
 
         self._tab_change_guard = True
@@ -221,10 +220,7 @@ class CodexLauncherApp(tk.Tk):
 
     def _apply_advanced_controls_visibility(self) -> None:
         visible = bool(self._show_advanced_controls.get())
-        self._runtime_bootstrap_tab.set_advanced_visible(visible)
-        self._runtime_engine_tab.set_advanced_visible(visible)
-        self._runtime_safety_tab.set_advanced_visible(visible)
-        self._diagnostics_tab.set_advanced_visible(visible)
+        self._tab_registry.apply_advanced_visible(visible)
 
     def _on_show_advanced_controls_changed(self) -> None:
         self._apply_advanced_controls_visibility()
@@ -303,8 +299,7 @@ class CodexLauncherApp(tk.Tk):
 
     def _poll(self) -> None:
         try:
-            self._services_tab.refresh()
-            self._logs_tab.refresh()
+            self._tab_registry.refresh_all()
         except Exception as exc:
             self._log_exception("poll", exc)
         finally:
@@ -332,20 +327,14 @@ class CodexLauncherApp(tk.Tk):
         if self._unsaved_changes and not messagebox.askyesno("Revert changes", "Discard unsaved changes?"):
             return
         self._controller.reload_store()
-        self._services_tab.reload()
-        self._runtime_bootstrap_tab.reload()
-        self._runtime_engine_tab.reload()
-        self._runtime_safety_tab.reload()
-        self._manual_env_vars_tab.reload()
-        self._diagnostics_tab.reload()
-        self._logs_tab.reload()
+        self._tab_registry.reload_all()
         self._show_advanced_controls.set(bool(getattr(self._controller.store.meta, "show_advanced_controls", False)))
         self._apply_advanced_controls_visibility()
         self._unsaved_changes = False
         self._set_status("Reverted to saved settings")
 
     def _exit_no_save(self) -> None:
-        self._services_tab.dispose()
+        self._tab_registry.dispose_all()
         self.destroy()
 
     def _on_close(self) -> None:
@@ -354,7 +343,7 @@ class CodexLauncherApp(tk.Tk):
             if messagebox.askyesno("Unsaved changes", "Save settings before exiting?"):
                 if not self._save():
                     return
-        self._services_tab.dispose()
+        self._tab_registry.dispose_all()
         self.destroy()
 
     # ------------------------------------------------------------------ UI state (tab index)

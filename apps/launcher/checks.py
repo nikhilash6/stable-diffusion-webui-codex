@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import List
 
 from apps.backend.infra.config.repo_root import get_repo_root
-from apps.launcher.profiles import (
+from apps.launcher.profile_meta import (
     CODEX_APP_MODE_PROFILE_ENV_KEY,
     DEFAULT_LAUNCHER_MODE_PROFILE,
     LAUNCHER_MODE_PROFILE_DEV_SERVICE,

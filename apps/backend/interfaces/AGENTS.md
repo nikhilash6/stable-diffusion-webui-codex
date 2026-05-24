@@ -32,7 +32,7 @@ Status: Active
 - 2025-12-14: `/api/txt2vid` e `/api/img2vid` populam `steps` em `Txt2VidRequest/Img2VidRequest` e o plano de vídeo (`build_video_plan`) lê `guidance_scale` (alinhamento de contrato com o runtime).
 - 2025-12-16: Added `/api/vid2vid` (multipart: `video` upload + JSON `payload`) and `/api/output/{rel_path}` for root-scoped serving of exported videos.
 - 2026-02-28: `/api/vid2vid` is intentionally parked in `generation.py` (HTTP 400 + explicit placeholder detail) until capability-driven router/runtime contract finalization; historical wan_animate notes remain implementation history only.
-- 2025-12-19: `/api/tools/convert-gguf` expanded quantization menu and now accepts `tensor_type_overrides` (regex → quant per tensor) for mixed schemes and advanced tuning.
+- 2025-12-19: `/api/tools/convert-gguf` accepts canonical GGUF file recipes through `quantization` and physical per-tensor `tensor_type_overrides` (`regex=Q4_K`, `regex=Q8_0`, etc.) for advanced tuning.
 - 2025-12-29: `/api/paths` now resolves `apps/paths.json` via `CODEX_ROOT` (required), keeping QuickSettings path-based filtering stable across launchers and CWD changes.
 - 2025-12-29: `run_api.py` no longer uses `os.getcwd()` for repo files (settings/blocks/tabs/workflows/presets/tmp); it uses the resolved project root so the backend behaves the same no matter where it’s launched from.
 - 2025-12-29: `/api/models/inventory` now returns repo-relative `path` values (when under `CODEX_ROOT`) to avoid leaking absolute host paths to the UI; WAN video APIs resolve repo-relative `wan_*` paths back to absolute under `CODEX_ROOT` so runtime never depends on CWD.

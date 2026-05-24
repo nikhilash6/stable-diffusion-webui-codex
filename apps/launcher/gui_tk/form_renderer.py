@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Shared declarative form renderer for launcher Tk tabs.
-Renders section/field descriptors into ttk widgets, tracks advanced rows for progressive disclosure, and exposes widget references for post-render state tweaks.
+Renders section/field descriptors into ttk widgets, tracks advanced rows for progressive disclosure, exposes widget references for post-render state tweaks, and renders visible VRAM impact badges.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `FormRenderer` (class): Renders `FormSectionDescriptor` + `FormFieldDescriptor` models into a grid-based ttk form.
@@ -18,6 +18,8 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Dict, Iterable, List
+
+from apps.launcher.setting_registry import VramImpactLevel
 
 from .form_schema import FieldKind, FormFieldDescriptor, FormSectionDescriptor, HelpMode
 
@@ -33,6 +35,8 @@ class FormRenderer:
 
         self._advanced_widgets: List[tk.Widget] = []
         self._field_widgets: Dict[str, tk.Widget] = {}
+        self._vram_badge_widgets: Dict[str, ttk.Label] = {}
+        self._vram_trace_ids: List[tuple[tk.Variable, str]] = []
 
     def render_sections(self, row: int, sections: Iterable[FormSectionDescriptor]) -> int:
         current_row = int(row)
@@ -51,12 +55,18 @@ class FormRenderer:
     def widget_for(self, field_id: str) -> tk.Widget | None:
         return self._field_widgets.get(str(field_id))
 
+    def vram_badge_text_for(self, field_id: str) -> str | None:
+        badge = self._vram_badge_widgets.get(str(field_id))
+        if badge is None:
+            return None
+        return str(badge.cget("text") or "")
+
     def _render_section(self, row: int, section: FormSectionDescriptor) -> int:
         section_frame = ttk.LabelFrame(self._parent, text=f"  {section.title}  ", padding=14)
         section_frame.grid(
             row=row,
             column=self._label_column,
-            columnspan=3,
+            columnspan=4,
             sticky="ew",
             padx=self._padx,
             pady=(18 if row > 0 else 0, 10),
@@ -64,6 +74,7 @@ class FormRenderer:
         section_frame.columnconfigure(0, weight=0)
         section_frame.columnconfigure(1, weight=1)
         section_frame.columnconfigure(2, weight=0)
+        section_frame.columnconfigure(3, weight=0)
         self._mark_advanced(section.advanced, section_frame)
 
         inner_row = 0
@@ -75,7 +86,7 @@ class FormRenderer:
             help_label.grid(
                 row=inner_row,
                 column=0,
-                columnspan=3,
+                columnspan=4,
                 sticky="w",
                 pady=(0, 8),
             )
@@ -160,9 +171,25 @@ class FormRenderer:
                 pady=8,
             )
 
+        vram_badge: ttk.Label | None = None
+        if descriptor.vram is not None:
+            vram_badge = ttk.Label(parent, style=VramImpactLevel.LOW.style_name)
+            vram_badge.grid(row=row, column=3, sticky="w", padx=(8, 0), pady=8)
+            self._vram_badge_widgets[descriptor.field_id] = vram_badge
+            self._update_vram_badge(descriptor.field_id, descriptor.variable, descriptor.vram)
+            trace_id = descriptor.variable.trace_add(
+                "write",
+                lambda *_args, field_id=descriptor.field_id, variable=descriptor.variable, metadata=descriptor.vram: (
+                    self._update_vram_badge(field_id, variable, metadata)
+                ),
+            )
+            self._vram_trace_ids.append((descriptor.variable, trace_id))
+
         marked_widgets: list[tk.Widget] = [label_widget, widget]
         if help_button is not None:
             marked_widgets.append(help_button)
+        if vram_badge is not None:
+            marked_widgets.append(vram_badge)
         self._mark_advanced(is_advanced, *marked_widgets)
         row += 1
 
@@ -171,7 +198,7 @@ class FormRenderer:
             help_label.grid(
                 row=row,
                 column=0,
-                columnspan=3,
+                columnspan=4,
                 sticky="w",
                 pady=(0, 8),
             )
@@ -179,6 +206,19 @@ class FormRenderer:
             row += 1
 
         return row
+
+    def _update_vram_badge(self, field_id: str, variable: tk.Variable, metadata: object) -> None:
+        badge = self._vram_badge_widgets.get(str(field_id))
+        if badge is None:
+            return
+        resolver = getattr(metadata, "resolve", None)
+        if not callable(resolver):
+            return
+        impact = resolver(variable.get())
+        if impact is None:
+            badge.configure(text="", style=VramImpactLevel.LOW.style_name)
+            return
+        badge.configure(text=impact.badge_text, style=impact.style_name)
 
     def _mark_advanced(self, advanced: bool, *widgets: tk.Widget) -> None:
         if not advanced:

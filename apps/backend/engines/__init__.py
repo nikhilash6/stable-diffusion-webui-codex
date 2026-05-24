@@ -8,7 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: Engine package facade and default registration entry points.
 Exposes `register_default_engines(...)` and lazily resolves optional/large engine classes to avoid heavy imports during startup.
-Includes the Anima, FLUX.2, LTX2, and Qwen Image engine facades; parked placeholder families such as `netflix_void`
+Includes the Anima, FLUX.2, LTX2, Qwen Image, and Z-Image L2P engine facades; parked placeholder families such as `netflix_void`
 remain importable by name but are not part of default runtime registration.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from typing import Any as Wan225BEngine
     from typing import Any as Wan22Animate14BEngine
     from typing import Any as ZImageEngine
+    from typing import Any as ZImageL2PEngine
     from typing import Any as AnimaEngine
     from typing import Any as QwenImageEngine
 
@@ -107,6 +108,7 @@ def register_default_engines(*, registry: EngineRegistry | None = None, replace:
     _maybe_register("flux1_chroma", registration.register_chroma)
     _maybe_register("sd20", registration.register_sd20)
     _maybe_register("zimage", registration.register_zimage)
+    _maybe_register("zimage_l2p", registration.register_zimage_l2p)
     _maybe_register("anima", registration.register_anima)
     _maybe_register("qwen_image", registration.register_qwen_image)
     # WAN22 GGUF lanes are explicit and variant-specific.
@@ -132,6 +134,7 @@ __all__ = [
     "Kontext",
     "Chroma",
     "ZImageEngine",
+    "ZImageL2PEngine",
     "AnimaEngine",
     "QwenImageEngine",
     "Wan22Animate14BEngine",
@@ -152,6 +155,7 @@ _ENGINE_EXPORTS = {
     "Kontext": ("apps.backend.engines.flux.kontext", "Kontext"),
     "Chroma": ("apps.backend.engines.flux.chroma", "Chroma"),
     "ZImageEngine": ("apps.backend.engines.zimage.zimage", "ZImageEngine"),
+    "ZImageL2PEngine": ("apps.backend.engines.zimage_l2p.zimage_l2p", "ZImageL2PEngine"),
     "AnimaEngine": ("apps.backend.engines.anima.anima", "AnimaEngine"),
     "QwenImageEngine": ("apps.backend.engines.qwen_image.qwen_image", "QwenImageEngine"),
     "Wan22Animate14BEngine": ("apps.backend.engines.wan22.wan22_14b_animate", "Wan22Animate14BEngine"),

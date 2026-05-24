@@ -9,9 +9,9 @@ Required Notice: see NOTICE
 Purpose: Checkpoint/VAE discovery with sha256 and layout-metadata caching.
 Scans configured model roots (via `apps/paths.json` accessors) for checkpoint and VAE weight files, including file-level checkpoint entries,
 computes sha256 hashes, and maintains a persistent cache in `models/.hashes.json` (schema v2) for fast UI inventory, backend SHA-based
-resolution, CLIP layout metadata reuse, and checkpoint-scoped metadata forwarding such as the current LTX2 execution-profile/default hints
-and Netflix VOID overlay pairing readiness. Paths config resolution is fail-loud (no silent fallback to defaults on invalid config payloads).
-Family hints and root selection cover SD/Flux/Qwen Image/Anima/WAN/ZImage/LTX2/Netflix VOID keyspaces while generic VAE inventory excludes audio-bundle files.
+resolution, CLIP layout metadata reuse, and checkpoint-scoped metadata forwarding such as current LTX2 execution-profile/default hints,
+Netflix VOID overlay pairing readiness, and Z-Image L2P GGUF admission metadata. Paths config resolution is fail-loud (no silent fallback to defaults on invalid config payloads).
+Family hints and root selection cover SD/Flux/Qwen Image/Anima/WAN/ZImage/ZImage L2P/LTX2/Netflix VOID keyspaces while generic VAE inventory excludes audio-bundle files.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_default_models_root` (function): Returns the default `models/` directory under `CODEX_ROOT`.
@@ -19,6 +19,8 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_sha256` (function): Computes sha256 digest for a file path.
 - `detect_safetensors_primary_dtype` (function): Best-effort safetensors dtype hint reader (header-only parse; used for defaults/telemetry).
 - `_detect_sdxl_core_only_checkpoint` (function): Header-only SDXL checkpoint classifier for UNet-only `.safetensors` assets discovered under SDXL roots.
+- `_inspect_zimage_l2p_core_checkpoint` (function): Header-only Z-Image L2P checkpoint inspector for no-VAE pixel DiT SafeTensors/GGUF assets.
+- `_detect_zimage_l2p_core_checkpoint` (function): Boolean wrapper around the L2P checkpoint inspector.
 - `_HashCacheEntry` (dataclass): Cache entry for one file (sha + mtime + size) used to avoid re-hashing unchanged files.
 - `LayoutMetadata` (dataclass): Typed CLIP layout metadata entry (`qkv_layout`, `projection_orientation`, optional `source_style`).
 - `_load_hash_cache` (function): Loads `.hashes.json` cache from disk (v1/v2 migration aware).
@@ -81,6 +83,7 @@ _CHECKPOINT_ROOT_FAMILY_HINTS: dict[str, str] = {
     "anima_ckpt": "anima",
     "wan22_ckpt": "wan22",
     "zimage_ckpt": "zimage",
+    "zimage_l2p_ckpt": "zimage_l2p",
 }
 _DEFAULT_CHECKPOINT_ROOTS: tuple[tuple[str, str], ...] = (
     ("sd15", "sd15"),
@@ -94,6 +97,7 @@ _DEFAULT_CHECKPOINT_ROOTS: tuple[tuple[str, str], ...] = (
     ("anima", "anima"),
     ("wan22", "wan22"),
     ("zimage", "zimage"),
+    ("zimage-l2p", "zimage_l2p"),
 )
 
 def _default_models_root() -> Path:
@@ -125,6 +129,71 @@ def _detect_sdxl_core_only_checkpoint(path: Path) -> bool:
     has_vae = any(key.startswith("first_stage_model.") or key.startswith("vae.") for key in keys)
     has_text_encoders = any(key.startswith("conditioner.embedders.") for key in keys)
     return has_unet and not has_vae and not has_text_encoders
+
+
+def _inspect_zimage_l2p_core_checkpoint(path: Path) -> dict[str, object] | None:
+    suffix = path.suffix.lower()
+    if suffix not in {".safetensor", ".safetensors", ".gguf"}:
+        return None
+    metadata: dict[str, object] = {}
+    if suffix == ".gguf":
+        try:
+            from apps.backend.quantization.gguf_loader import get_gguf_metadata
+            from apps.backend.quantization.gguf import GGUFReader
+            from apps.backend.runtime.model_registry.detectors.zimage_l2p import (
+                validate_zimage_l2p_gguf_component_metadata,
+            )
+
+            metadata = dict(get_gguf_metadata(str(path)))
+            validate_zimage_l2p_gguf_component_metadata(metadata, component="denoiser")
+            reader = GGUFReader(str(path))
+            keys = [str(tensor.name) for tensor in reader.tensors]
+        except Exception:
+            return None
+    else:
+        try:
+            header = read_safetensors_header(path)
+        except Exception:
+            return None
+        keys = [key for key in header.keys() if isinstance(key, str) and key != "__metadata__"]
+    required = (
+        "all_x_embedder.16-1.weight",
+        "local_decoder.out_conv.weight",
+        "layers.0.adaLN_modulation.0.weight",
+        "noise_refiner.0.adaLN_modulation.0.weight",
+        "cap_embedder.1.weight",
+    )
+    has_core = all(key in keys for key in required)
+    has_vae = any(key.startswith("vae.") or key.startswith("first_stage_model.") for key in keys)
+    has_text_encoder = any(key.startswith("text_encoder.") or key.startswith("model.embed_tokens.") for key in keys)
+    has_latent_zimage_final = "final_layer.linear.weight" in keys
+    if not has_core or has_vae or has_text_encoder or has_latent_zimage_final:
+        return None
+    return {
+        "requires_vae": False,
+        "text_encoder_slots": ["qwen3_4b"],
+        "signature_source": "zimage_l2p_gguf_profile" if suffix == ".gguf" else "zimage_l2p_safetensors_header",
+        **(
+            {
+                "codex.zimage_l2p.profile_id": str(metadata.get("codex.zimage_l2p.profile_id") or ""),
+                "codex.zimage_l2p.component": str(metadata.get("codex.zimage_l2p.component") or ""),
+                "codex.zimage_l2p.family": str(metadata.get("codex.zimage_l2p.family") or ""),
+                "codex.zimage_l2p.pixel_space": bool(metadata.get("codex.zimage_l2p.pixel_space") is True),
+                "codex.zimage_l2p.requires_vae": bool(metadata.get("codex.zimage_l2p.requires_vae") is True),
+                "model.architecture": str(metadata.get("model.architecture") or ""),
+                "codex.zimage_l2p.local_decoder": bool(
+                    metadata.get("codex.zimage_l2p.local_decoder") is True
+                ),
+                "codex.zimage_l2p.context_dim": metadata.get("codex.zimage_l2p.context_dim"),
+            }
+            if suffix == ".gguf"
+            else {}
+        ),
+    }
+
+
+def _detect_zimage_l2p_core_checkpoint(path: Path) -> bool:
+    return _inspect_zimage_l2p_core_checkpoint(path) is not None
 
 
 @dataclass
@@ -540,12 +609,22 @@ class ModelRegistry:
                         "netflix-void": "netflix_void",
                         "netflix_void": "netflix_void",
                         "zimage": "zimage",
+                        "zimage-l2p": "zimage_l2p",
+                        "zimage_l2p": "zimage_l2p",
                         "anima": "anima",
                         "wan22": "wan22",
                     }.get(top)
             if not core_only and family_hint == "sdxl" and _detect_sdxl_core_only_checkpoint(file):
                 core_only = True
                 core_only_reason = "sdxl_header_unet_only"
+            zimage_l2p_metadata: dict[str, object] = {}
+            if family_hint == "zimage_l2p":
+                inspected_l2p_metadata = _inspect_zimage_l2p_core_checkpoint(file)
+                if inspected_l2p_metadata is None:
+                    continue
+                zimage_l2p_metadata = inspected_l2p_metadata
+                core_only = True
+                core_only_reason = f"{str(zimage_l2p_metadata['signature_source'])}_core_only"
             sha256, short_hash = self._hash_for(file)
             stat = file.stat()
             metadata: dict[str, object] = {}
@@ -590,7 +669,10 @@ class ModelRegistry:
                 sha256=sha256,
                 short_hash=short_hash,
                 file_size=stat.st_size,
-                metadata=metadata,
+                metadata={
+                    **metadata,
+                    **zimage_l2p_metadata,
+                },
                 updated_at=stat.st_mtime,
             )
             yield record

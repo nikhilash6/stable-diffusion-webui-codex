@@ -2,7 +2,7 @@
 
 # apps/backend/huggingface Overview
 Date: 2025-10-28
-Last Review: 2026-05-15
+Last Review: 2026-05-23
 Status: Active
 
 ## Purpose
@@ -21,3 +21,4 @@ Status: Active
 - 2026-03-05: Added metadata-only mirror for `Lightricks/LTX-2` under `apps/backend/huggingface/Lightricks/LTX-2/**` via `hf download` include/exclude rules (configs/tokenizer/index/docs only; no model weights).
 - 2026-03-24: Vendored mirrors under `apps/backend/huggingface/**` must not carry upstream `.gitattributes` that activate Git LFS in this repository unless Codex intentionally adopts LFS for that mirror; keep config/tokenizer-only mirrors as plain Git assets.
 - 2026-05-15: Added metadata-only Qwen mirrors under `apps/backend/huggingface/Qwen/Qwen-Image-2512/**` and `apps/backend/huggingface/Qwen/Qwen-Image-Edit-2511/**` (configs/tokenizer/processor/index/docs only; no weights). `processor/` sidecars and `*.jinja` chat templates are lightweight metadata, not model-weight or tokenizer-presence proof.
+- 2026-05-23: Tools/GGUF converter metadata now keeps `zhen-nan/L2P` as the L2P denoiser preset only, while the shared Qwen3-4B text encoder lives under `apps/backend/huggingface/Qwen/Qwen3-4B/`; operators select real SafeTensors sources separately in the conversion form.

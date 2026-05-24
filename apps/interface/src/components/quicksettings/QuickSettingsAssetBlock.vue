@@ -8,7 +8,7 @@ Required Notice: see NOTICE
 
 Purpose: Shared non-WAN quicksettings asset selectors.
 Renders the common checkpoint/VAE/text-encoder selector block for non-WAN families, with explicit props for family-owned labels,
-formatting, dual-text-encoder rows, disabled states, and additive inline controls such as the Z-Image Turbo slot.
+formatting, dual-text-encoder rows, disabled states, optional no-VAE families, and additive inline controls such as the Z-Image Turbo slot.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `QuickSettingsAssetBlock` (component): Shared non-WAN checkpoint/VAE/text-encoder selector block used by `QuickSettingsBar.vue`.
@@ -55,7 +55,7 @@ Symbols (top-level; keep in sync; no ghosts):
 
   <slot name="after-checkpoint" />
 
-  <div class="quicksettings-group qs-group-vae">
+  <div v-if="showVae" class="quicksettings-group qs-group-vae">
     <label class="label-muted">VAE</label>
     <div class="qs-row">
       <div class="qs-pair">
@@ -171,8 +171,9 @@ withDefaults(defineProps<{
   vae: string
   vaeChoices: string[]
   vaeChoiceMode?: ChoiceLabelMode
-  vaePlaceholderLabel?: string
-  textEncoder: string
+	  vaePlaceholderLabel?: string
+	  showVae?: boolean
+	  textEncoder: string
   textEncoderChoices: string[]
   textEncoderGroupLabel?: string
   textEncoderGroupClass?: string
@@ -190,8 +191,9 @@ withDefaults(defineProps<{
 }>(), {
   checkpointLabel: 'Checkpoint',
   checkpointChoiceMode: 'raw',
-  vaeChoiceMode: 'sentinel',
-  vaePlaceholderLabel: undefined,
+	  vaeChoiceMode: 'sentinel',
+	  vaePlaceholderLabel: undefined,
+	  showVae: true,
   textEncoderGroupLabel: 'Text Encoder',
   textEncoderGroupClass: 'qs-group-text-encoder',
   textEncoderAutomaticLabel: 'Built-in',

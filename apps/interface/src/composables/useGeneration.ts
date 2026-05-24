@@ -6,7 +6,7 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Unified generation composable for image tabs (SD/Flux/Qwen Image/Chroma/ZImage; txt2img/img2img/inpaint + automation).
+Purpose: Unified generation composable for image tabs (SD/Flux/Qwen Image/Chroma/ZImage/Z-Image L2P; txt2img/img2img/inpaint + automation).
 Owns per-tab generation state (progress/live preview/gallery/history), builds request payloads using Model Tabs + QuickSettings,
 starts `/api/txt2img`, `/api/img2img`, and `/api/image-automation` (when run action or source contracts require backend-owned looping),
 includes `settings_revision` in payloads, handles stale-revision conflicts (`409` + `current_revision`), and consumes task SSE events to update UI state.
@@ -21,10 +21,12 @@ the nested `img2img_extras.hires` owner while remaining blocked for masked runs.
 `params.supir` and is emitted only through `img2img_extras.supir` for truthful SDXL img2img/inpaint runs, with diagnostics-backed sampler metadata
 owning the effective runtime sampler/scheduler pair and fail-loud rejection of stale APG/advanced-guidance overlap.
 Qwen Image uses dedicated txt2img/img2img request-state guards and an edit payload allowlist so hidden unsupported state fails loud before `/api/*` submission.
+Z-Image L2P uses the shared image shell but is exact 1024x1024 txt2img only, no-VAE, no LoRA/IP/hires/refiner/advanced-guidance, and emits only
+denoiser + Qwen3-4B TEnc asset selectors.
 Non-SUPIR image runs resolve the executable sampler/scheduler pair from strictly validated current params or backend capability defaults before any task start.
 Masked img2img runtime selection now flows through strict `inpaintMode` / `img2img_inpaint_mode`, with exact-engine mode discoverability coming from
-`/api/engines/capabilities.exact_engine_inpaint_modes` and invalid stale values failing loud before submit. Image run-history snapshots now also carry the
-active family-scoped VAE selection so history replay can restore the same asset owner instead of leaking whichever global VAE happens to be selected later.
+`/api/engines/capabilities.exact_engine_inpaint_modes` and invalid stale values failing loud before submit. Image run-history snapshots for VAE-owning
+families carry the active family-scoped VAE selection so history replay can restore the same asset owner instead of leaking whichever global VAE happens to be selected later.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `ImageRunHistoryItem` (interface): Persisted per-tab run history entry (task id, status, summary, params snapshot, error message).
@@ -94,6 +96,7 @@ import { resolveSupirSelectionState } from './useSupirDiagnostics'
 
 export type ImageRunStatus = 'running' | 'completed' | 'error' | 'cancelled'
 const QWEN_IMAGE_ENGINE_ID = 'qwen_image'
+const ZIMAGE_L2P_ENGINE_ID = 'zimage_l2p'
 const QWEN_IMAGE_ASSET_EXTRA_KEYS = new Set([
   'checkpoint_core_only',
   'model_format',
@@ -488,6 +491,10 @@ function isQwenImageEngine(engineId: string): boolean {
   return String(engineId || '').trim().toLowerCase() === QWEN_IMAGE_ENGINE_ID
 }
 
+function isZImageL2PEngine(engineId: string): boolean {
+  return String(engineId || '').trim().toLowerCase() === ZIMAGE_L2P_ENGINE_ID
+}
+
 function assertAllowedRecordKeys(record: Record<string, unknown>, allowed: ReadonlySet<string>, context: string): void {
   for (const key of Object.keys(record)) {
     if (!allowed.has(key)) {
@@ -561,6 +568,50 @@ function assertQwenImageRequestState(args: {
   }
   if (args.useInitImage && params.initSource.mode !== 'img') {
     throw new Error('Qwen Image Edit requires a single init image. Switch the initial image source to IMG.')
+  }
+}
+
+function assertZImageL2PRequestState(args: {
+  params: ImageBaseParams
+  useInitImage: boolean
+  batchCount: number
+  batchSize: number
+  loraNames: readonly string[]
+}): void {
+  const params = args.params
+  if (args.useInitImage) {
+    throw new Error('Z-Image L2P supports txt2img only. Disable IMG2IMG.')
+  }
+  if (params.runAction === 'infinite') {
+    throw new Error('Z-Image L2P does not support Infinite generate. Use Generate.')
+  }
+  if (args.batchCount !== 1 || args.batchSize !== 1) {
+    throw new Error('Z-Image L2P requests require batch count = 1 and batch size = 1.')
+  }
+  if (Math.trunc(Number(params.width)) !== 1024 || Math.trunc(Number(params.height)) !== 1024) {
+    throw new Error('Z-Image L2P requires 1024x1024 output.')
+  }
+  const clipSkip = Number(params.clipSkip)
+  if (Number.isFinite(clipSkip) && Math.trunc(clipSkip) !== 0) {
+    throw new Error('Z-Image L2P does not support CLIP Skip. Reset CLIP Skip to 0.')
+  }
+  if (normalizeBooleanParam(params.hires?.enabled, false)) {
+    throw new Error('Z-Image L2P does not support Hires Fix. Disable Hires before generating.')
+  }
+  if (normalizeBooleanParam(params.swapModel?.enabled, false)) {
+    throw new Error('Z-Image L2P does not support first-pass model swap. Disable model swap before generating.')
+  }
+  if (normalizeBooleanParam(params.refiner?.enabled, false)) {
+    throw new Error('Z-Image L2P does not support refiner. Disable refiner before generating.')
+  }
+  if (normalizeBooleanParam(params.ipAdapter?.enabled, false)) {
+    throw new Error('Z-Image L2P does not support IP-Adapter. Disable IP-Adapter before generating.')
+  }
+  if (normalizeBooleanParam(params.guidanceAdvanced?.enabled, false)) {
+    throw new Error('Z-Image L2P does not support Advanced Guidance/APG. Disable Advanced Guidance before generating.')
+  }
+  if (args.loraNames.length > 0) {
+    throw new Error('Z-Image L2P does not support LoRA prompt tags.')
   }
 }
 
@@ -879,6 +930,7 @@ export function useGeneration(tabId: string) {
     p: ImageBaseParams,
     guidanceMode: 'cfg' | 'distilled_cfg',
     effectiveSampling?: { sampler: string; scheduler: string; supirLabel?: string } | null,
+    engineId?: string,
   ): string {
     const sampler = p.supir.enabled
       ? String(effectiveSampling?.supirLabel || effectiveSampling?.sampler || p.supir.sampler || p.sampler || '').trim()
@@ -887,10 +939,12 @@ export function useGeneration(tabId: string) {
     const seedLabel = p.seed === -1 ? 'seed random' : `seed ${p.seed}`
     const clipSkipLabel = Number.isFinite(p.clipSkip) && p.clipSkip > 0 && p.clipSkip !== 1 ? ` · clip-skip ${p.clipSkip}` : ''
     const guidanceLabel = guidanceMode === 'distilled_cfg' ? 'distilled cfg' : 'cfg'
-    return `${p.width}×${p.height} px · ${p.steps} steps · ${guidanceLabel} ${p.cfgScale} · ${sampler} / ${scheduler} · ${seedLabel}${clipSkipLabel} · batch ${p.batchCount}×${p.batchSize}`
+    const batchLabel = isZImageL2PEngine(engineId || '') ? '' : ` · batch ${p.batchCount}×${p.batchSize}`
+    return `${p.width}×${p.height} px · ${p.steps} steps · ${guidanceLabel} ${p.cfgScale} · ${sampler} / ${scheduler} · ${seedLabel}${clipSkipLabel}${batchLabel}`
   }
 
-  function usesImageAutomation(p: ImageBaseParams): boolean {
+  function usesImageAutomation(p: ImageBaseParams, engineId: string): boolean {
+    if (isZImageL2PEngine(engineId)) return false
     return (
       p.runAction === 'infinite'
       || (normalizeBooleanParam(p.useInitImage, false) && p.initSource.mode === 'dir')
@@ -1024,11 +1078,11 @@ export function useGeneration(tabId: string) {
     p: ImageBaseParams,
     tabType: string,
     effectiveSampling?: { sampler: string; scheduler: string } | null,
+    engineId?: string,
   ): Record<string, unknown> {
-    const familyOwnedVae = String(quicksettings.getVaeForFamily(tabType) || '').trim()
+    const familyOwnedVae = isZImageL2PEngine(engineId || '') ? '' : String(quicksettings.getVaeForFamily(tabType) || '').trim()
     const snapshot: Record<string, unknown> = {
       checkpoint: p.checkpoint,
-      vae: familyOwnedVae,
       textEncoders: p.textEncoders,
 
       prompt: p.prompt,
@@ -1071,6 +1125,9 @@ export function useGeneration(tabId: string) {
       maskRegionSplit: p.maskRegionSplit,
       supir: p.supir,
       ipAdapter: p.ipAdapter,
+    }
+    if (!isZImageL2PEngine(engineId || '')) {
+      snapshot.vae = familyOwnedVae
     }
     return snapshot
   }
@@ -1234,7 +1291,7 @@ export function useGeneration(tabId: string) {
     const textEncoders = Array.isArray((p as any).textEncoders)
       ? (p as any).textEncoders.map((it: unknown) => String(it || '').trim()).filter((it: string) => it.length > 0)
       : []
-    const familyOwnedVae = String(quicksettings.getVaeForFamily(tabType) || '').trim()
+    const familyOwnedVae = isZImageL2PEngine(engineOverrideForRequest) ? '' : String(quicksettings.getVaeForFamily(tabType) || '').trim()
     const requestContractResolvers = {
       requireModelInfo: quicksettings.requireModelInfo,
       resolveFlux2CheckpointVariant: quicksettings.resolveFlux2CheckpointVariant,
@@ -1346,7 +1403,7 @@ export function useGeneration(tabId: string) {
     const usesDistilledCfgModel = guidanceMode === 'distilled_cfg'
     const createdAtMs = state.value.startedAtMs ?? Date.now()
     const promptPreview = String(p.prompt || '').trim().slice(0, 120)
-    const automationRun = usesImageAutomation(p)
+    const automationRun = usesImageAutomation(p, engineOverrideForRequest)
     const batchSize = Math.max(1, Math.trunc(Number(p.batchSize)))
     const batchCount = Math.max(1, Math.trunc(Number(p.batchCount)))
     const requestBatchSize = automationRun ? 1 : batchSize
@@ -1361,6 +1418,21 @@ export function useGeneration(tabId: string) {
     if (isQwenImageEngine(engineOverrideForRequest)) {
       try {
         assertQwenImageRequestState({
+          params: p,
+          useInitImage,
+          batchCount: requestBatchCount,
+          batchSize: requestBatchSize,
+          loraNames,
+        })
+      } catch (error) {
+        state.value.status = 'error'
+        state.value.errorMessage = error instanceof Error ? error.message : String(error)
+        return
+      }
+    }
+    if (isZImageL2PEngine(engineOverrideForRequest)) {
+      try {
+        assertZImageL2PRequestState({
           params: p,
           useInitImage,
           batchCount: requestBatchCount,
@@ -1429,8 +1501,8 @@ export function useGeneration(tabId: string) {
       state.value.errorMessage = error instanceof Error ? error.message : String(error)
       return
     }
-    const summary = buildRunSummary(p, guidanceMode, effectiveSampling)
-    const paramsSnapshot = buildParamsSnapshot(p, tabType, effectiveSampling)
+    const summary = buildRunSummary(p, guidanceMode, effectiveSampling, engineOverrideForRequest)
+    const paramsSnapshot = buildParamsSnapshot(p, tabType, effectiveSampling, engineOverrideForRequest)
 
     if (loraNames.length > 0) {
       const loraShas: string[] = []

@@ -13,7 +13,8 @@ owns the global runtime-device override plus component storage/compute dtype ove
 API-client monotonic cache for generation payload contracts (`settings_revision`) plus bounded conditional option writes that must fail loud instead of overwriting newer owner state.
 Text-encoder choices are sourced from inventory files constrained by `*_tenc` roots (not folder roots), and stale root-label overrides are
 sanitized so `tenc_sha` resolution remains deterministic across families (including Qwen Image, Anima, and LTX2). Qwen Image text-encoder labels
-resolve only through `qwen_image_tenc` root-scoped inventory rows, never through global basename or prefix fanout. Inventory slot metadata is cached alongside
+resolve only through `qwen_image_tenc` root-scoped inventory rows, while Z-Image and Z-Image L2P text-encoder labels share `zimage_tenc`
+root-scoped inventory rows under the `zimage/<path>` label prefix. Inventory slot metadata is cached alongside
 SHA mappings so SDXL core-only requests can emit explicit `tenc1_sha` / `tenc2_sha` selectors without guessing label order. VAE state defaults to canonical `built-in`
 when no persisted value exists, request preflight can enforce fail-loud non-empty selection via `requireVaeSelection`, and LoRA SHA mappings
 are refreshed through the store-owned inventory flow (`fetchInventoryWithLoraHydration` + `hydrateLoraShaMap`). Workflow/history restore can also

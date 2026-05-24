@@ -108,6 +108,9 @@
   "zimage_ckpt": [
     "models/zimage"
   ],
+  "zimage_l2p_ckpt": [
+    "models/zimage-l2p"
+  ],
   "zimage_tenc": [
     "models/zimage-tenc"
   ],

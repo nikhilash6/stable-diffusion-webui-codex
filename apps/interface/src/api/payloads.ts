@@ -11,9 +11,10 @@ Defines the canonical `Txt2ImgRequestSchema`, UI form-state types, and helpers t
 apply engine-agnostic request normalization/validation (including required `settings_revision`). FLUX.2 guidance mode is checkpoint-resolved
 by callers (`cfg` for base-4B, `distilled_cfg` for distilled 4B) instead of being hard-coded by engine id, and hires normalization feeds the
 nested hires owners used by txt2img and img2img payload builders. The canonical txt2img schema now requires the explicit
-image selectors carried in `extras` (`model_sha`, `checkpoint_core_only`, `model_format`, `vae_source`) so local validation matches the
+image selectors carried in `extras` (`model_sha`, `checkpoint_core_only`, `model_format`, and VAE selectors only for VAE-owning engines) so local validation matches the
 backend image contract. Qwen Image txt2img uses the dedicated backend preflight contract: 16px dimension multiples, no top-level clip-skip, no generic batch/hires/refiner/swap extras,
-and only root-resolved Qwen asset selectors in `extras`.
+and only root-resolved Qwen asset selectors in `extras`. Z-Image L2P txt2img uses its exact no-VAE backend preflight contract: fixed 1024px dimensions,
+Euler/simple sampling, no top-level clip-skip, no generic batch/hires/refiner/swap extras, and only denoiser + Qwen3-4B TEnc selectors in `extras`.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `DISTILLED_CFG_ENGINES` (const): Engine ids treated as distilled-guidance engines (use `distilled_cfg`; CFG/negative prompt omitted).
@@ -73,6 +74,32 @@ const QWEN_IMAGE_UNSUPPORTED_EXTRA_KEYS = new Set([
   'refiner',
   'swap_model',
   'text_encoder_override',
+  'zimage_variant',
+])
+const ZIMAGE_L2P_ENGINE_ID = 'zimage_l2p'
+const ZIMAGE_L2P_DIMENSION = 1024
+const ZIMAGE_L2P_ASSET_EXTRA_KEYS = new Set([
+  'checkpoint_core_only',
+  'model_format',
+  'model_sha',
+  'tenc_sha',
+])
+const ZIMAGE_L2P_UNSUPPORTED_EXTRA_KEYS = new Set([
+  'batch_count',
+  'batch_size',
+  'er_sde',
+  'guidance',
+  'hires',
+  'ip_adapter',
+  'lora_sha',
+  'qwen_image_variant',
+  'refiner',
+  'swap_model',
+  'text_encoder_override',
+  'tenc1_sha',
+  'tenc2_sha',
+  'vae_sha',
+  'vae_source',
   'zimage_variant',
 ])
 
@@ -239,7 +266,7 @@ export const Txt2ImgRequestSchema = z
         tenc1_sha: z.string().optional(),
         tenc2_sha: z.string().optional(),
         vae_sha: z.string().optional(),
-        vae_source: z.enum(['built_in', 'external']),
+        vae_source: z.enum(['built_in', 'external']).optional(),
         lora_sha: z.union([z.string(), z.array(z.string())]).optional(),
         model_sha: z.string().min(1),
         checkpoint_core_only: z.boolean(),
@@ -446,6 +473,10 @@ function isQwenImageTxt2ImgState(state: Txt2ImgFormState): boolean {
   return String(state.engine || '').trim().toLowerCase() === QWEN_IMAGE_ENGINE_ID
 }
 
+function isZImageL2PTxt2ImgState(state: Txt2ImgFormState): boolean {
+  return String(state.engine || '').trim().toLowerCase() === ZIMAGE_L2P_ENGINE_ID
+}
+
 function hasEnabledHires(state: Txt2ImgFormState): boolean {
   return Boolean(state.hires?.enabled)
 }
@@ -549,6 +580,106 @@ function buildQwenImageTxt2ImgPayload(
   return Txt2ImgRequestSchema.parse(payload)
 }
 
+function assertZImageL2PTxt2ImgState(state: Txt2ImgFormState, opts: BuildImagePayloadOptions): void {
+  const width = Math.trunc(Number(state.width))
+  const height = Math.trunc(Number(state.height))
+  if (width !== ZIMAGE_L2P_DIMENSION || height !== ZIMAGE_L2P_DIMENSION) {
+    throw new Error(`Z-Image L2P txt2img requires ${ZIMAGE_L2P_DIMENSION}x${ZIMAGE_L2P_DIMENSION} output.`)
+  }
+  if (String(state.sampler || '').trim().toLowerCase() !== 'euler') {
+    throw new Error("Z-Image L2P txt2img requires sampler 'euler'.")
+  }
+  if (String(state.scheduler || '').trim().toLowerCase() !== 'simple') {
+    throw new Error("Z-Image L2P txt2img requires scheduler 'simple'.")
+  }
+  const clipSkip = Number(state.clipSkip)
+  if (Number.isFinite(clipSkip) && Math.trunc(clipSkip) !== 0) {
+    throw new Error('Z-Image L2P txt2img does not support CLIP Skip. Reset CLIP Skip to 0.')
+  }
+  if (Math.trunc(Number(state.batchSize)) !== 1 || Math.trunc(Number(state.batchCount)) !== 1) {
+    throw new Error('Z-Image L2P txt2img requires batch size = 1 and batch count = 1.')
+  }
+  if (hasEnabledHires(state)) {
+    throw new Error('Z-Image L2P txt2img does not support Hires Fix. Disable Hires before generating.')
+  }
+  if (state.swapModel?.enabled) {
+    throw new Error('Z-Image L2P txt2img does not support first-pass model swap. Disable model swap before generating.')
+  }
+  if (state.refiner?.enabled) {
+    throw new Error('Z-Image L2P txt2img does not support refiner. Disable refiner before generating.')
+  }
+  if (
+    opts.nestedSelectorPayloads?.swapModel
+    || opts.nestedSelectorPayloads?.refiner
+    || opts.nestedSelectorPayloads?.hiresSwapModel
+    || opts.nestedSelectorPayloads?.hiresRefiner
+  ) {
+    throw new Error('Z-Image L2P txt2img does not support nested swap/refiner selector payloads.')
+  }
+}
+
+function buildZImageL2PAssetExtras(rawExtras: Record<string, unknown> | undefined): Record<string, unknown> {
+  if (!rawExtras || typeof rawExtras !== 'object') {
+    throw new Error('Z-Image L2P txt2img requires resolved asset selectors in extras.')
+  }
+  const extras: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(rawExtras)) {
+    if (value === undefined) continue
+    if (ZIMAGE_L2P_UNSUPPORTED_EXTRA_KEYS.has(key) || !ZIMAGE_L2P_ASSET_EXTRA_KEYS.has(key)) {
+      throw new Error(`Z-Image L2P txt2img does not support extras.${key}.`)
+    }
+    extras[key] = value
+  }
+
+  const missing: string[] = []
+  for (const key of ZIMAGE_L2P_ASSET_EXTRA_KEYS) {
+    if (extras[key] === undefined || extras[key] === null || extras[key] === '') {
+      missing.push(key)
+    }
+  }
+  if (missing.length > 0) {
+    throw new Error(`Z-Image L2P txt2img requires extras.${missing.join(', extras.')}.`)
+  }
+  if (extras.checkpoint_core_only !== true) {
+    throw new Error('Z-Image L2P txt2img requires extras.checkpoint_core_only=true.')
+  }
+  if (extras.model_format !== 'checkpoint' && extras.model_format !== 'gguf') {
+    throw new Error("Z-Image L2P txt2img requires extras.model_format='checkpoint' or 'gguf'.")
+  }
+  if (typeof extras.tenc_sha !== 'string' || !extras.tenc_sha.trim()) {
+    throw new Error('Z-Image L2P txt2img requires exactly one extras.tenc_sha.')
+  }
+  return extras
+}
+
+function buildZImageL2PTxt2ImgPayload(
+  state: Txt2ImgFormState,
+  opts: BuildImagePayloadOptions,
+): Txt2ImgRequest {
+  assertZImageL2PTxt2ImgState(state, opts)
+  const extras = buildZImageL2PAssetExtras(state.extras)
+  const payload: Record<string, unknown> = {
+    device: normalizeDevice(state.device),
+    settings_revision: normalizeSettingsRevision(state.settingsRevision),
+    prompt: state.prompt.trim(),
+    negative_prompt: state.negativePrompt ?? '',
+    width: ZIMAGE_L2P_DIMENSION,
+    height: ZIMAGE_L2P_DIMENSION,
+    steps: state.steps,
+    cfg: state.guidanceScale,
+    sampler: 'euler',
+    scheduler: 'simple',
+    seed: state.seed,
+    engine: ZIMAGE_L2P_ENGINE_ID,
+    model: state.model,
+    extras,
+  }
+  if (!String(state.model || '').trim()) {
+    delete payload.model
+  }
+  return Txt2ImgRequestSchema.parse(payload)
+}
+
 export function buildNormalizedHiresOptions(
   state: Pick<Txt2ImgFormState, 'prompt' | 'negativePrompt' | 'hires'> & Partial<Pick<Txt2ImgFormState, 'steps'>>,
   guidanceMode: Txt2ImgGuidanceMode,
@@ -622,6 +753,9 @@ export function buildTxt2ImgPayload(
   state: Txt2ImgFormState,
   opts: BuildImagePayloadOptions = {},
 ): Txt2ImgRequest {
+  if (isZImageL2PTxt2ImgState(state)) {
+    return buildZImageL2PTxt2ImgPayload(state, opts)
+  }
   if (isQwenImageTxt2ImgState(state)) {
     return buildQwenImageTxt2ImgPayload(state, opts)
   }

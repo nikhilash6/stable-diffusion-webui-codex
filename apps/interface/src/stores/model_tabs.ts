@@ -23,7 +23,8 @@ persists explicit `executionProfile` state, and leaves stale/blank profile value
 them truthfully without silently rewriting stored raw profile ids.
 Image-tab sampler/scheduler defaults are consumed only from backend capabilities; when those defaults are unavailable the store leaves fields blank for request-boundary validation instead of inventing frontend fallback values.
 Qwen Image tabs are capability-derived like Anima/LTX2, use the single canonical `qwen_image` image-tab type, and reject persisted text-encoder labels
-that are not `qwen_image/<path>` selections.
+that are not `qwen_image/<path>` selections. Z-Image L2P tabs are capability-derived exact txt2img tabs, keep fixed 1024 defaults, and reject persisted text-encoder labels
+that are not shared `zimage/<path>` selections.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `BaseTabType` (type): API tab type discriminator (from backend `ApiTab['type']`).
@@ -40,7 +41,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `LtxGenerationMode` (type): LTX video mode discriminator (`txt2vid|img2vid`).
 - `LtxTabParams` (interface): UI LTX video params, including checkpoint-owned `executionProfile` state plus prompt/init-image/video controls.
 - `BaseTab` (interface): Generic tab record persisted in the store (id/type/label + params + meta).
-- `ImageBaseParams` (interface): Common image-tab params (prompt, seed, steps, CFG, dims, etc.) shared across SD/Flux.1/Flux.2/Chroma/Qwen Image/ZImage
+- `ImageBaseParams` (interface): Common image-tab params (prompt, seed, steps, CFG, dims, etc.) shared across SD/Flux.1/Flux.2/Chroma/Qwen Image/ZImage/L2P
   (includes optional family-specific fields like `zimageTurbo`, img2img layout state `img2imgResizeMode`/`img2imgUpscaler`,
   inpaint mask controls (`maskRegionSplit` and related toggles), image automation owners (`runAction`, `initSource`, `supir`, `ipAdapter`), and advanced guidance policy controls).
 - `ImageRunAction` (type): Run CTA mode discriminator (`generate|infinite`) persisted per image tab.
@@ -65,7 +66,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `defaultImageParamsForType` (function): Returns canonical image-tab defaults for a specific image tab type.
 - `normalizeTabType` (function): Validates/coerces raw type values into `BaseTabType`.
 - `BASE_REQUIRED_TYPES` (const): Baseline tab types always auto-created by the UI store.
-- `requiredTypesFromCapabilities` (function): Derives required tab types from backend capability map (adds capability-exposed `qwen_image`/`ltx2`/`anima` tabs).
+- `requiredTypesFromCapabilities` (function): Derives required tab types from backend capability map (adds capability-exposed `qwen_image`/`zimage_l2p`/`ltx2`/`anima` tabs).
 - `asRecordObject` (function): Narrowing helper that normalizes unknown values into plain records for merge-safe processing.
 - `isPlainRecord` (function): Validates object values as plain record payloads (no arrays/class instances) for patch serialization safety.
 - `PersistSerializationPhase` (type): Serialization boundary phases used by params persistence snapshots and rollback.
@@ -79,6 +80,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `shouldPersistWan14bStageSamplingBackfill` (function): Detects persisted WAN 14B params requiring High/Low stage sampler/scheduler migration (`sampler='uni-pc bh2'`, `scheduler='simple'`).
 - `buildImageTopLevelBackfillPatch` (function): Builds a missing-top-level-only image-tab backfill patch from the normalized owner shape so hydration can persist absent canonical keys without widening into unrelated nested drift.
 - `normalizeQwenImageTextEncoders` (function): Validates Qwen Image persisted text-encoder labels as one `qwen_image/<path>` selector.
+- `normalizeZImageL2PTextEncoders` (function): Validates Z-Image L2P persisted text-encoder labels as one shared `zimage/<path>` selector.
 - `normalizeImageParams` (function): Applies image-tab nested merge normalization (`hires/refiner`) with sampler/scheduler and strict inpaint-mode reset.
 - `normalizeParamsForType` (function): Normalizes raw params payload based on tab type (shape checking; discards invalid fields).
 - `normalizeTab` (function): Normalizes a raw tab record (id/type/params/meta) into the store shape.
@@ -427,6 +429,7 @@ export type TabParamsByType = {
   flux2: ImageBaseParams
   qwen_image: ImageBaseParams
   zimage: ImageBaseParams
+  zimage_l2p: ImageBaseParams
   chroma: ImageBaseParams
   anima: ImageBaseParams
   ltx2: LtxTabParams
@@ -1519,6 +1522,24 @@ function normalizeQwenImageTextEncoders(labels: string[]): string[] {
   return [normalized]
 }
 
+function normalizeZImageL2PTextEncoders(labels: string[]): string[] {
+  if (labels.length === 0) return []
+  if (labels.length !== 1) {
+    throw new ModelTabsStoreError(
+      'invalid_response',
+      'Z-Image L2P requires exactly one zimage/<path> text encoder selection.',
+    )
+  }
+  const normalized = labels[0].replace(/\\+/g, '/').trim()
+  if (!normalized.startsWith('zimage/') || normalized.length <= 'zimage/'.length) {
+    throw new ModelTabsStoreError(
+      'invalid_response',
+      'Z-Image L2P text encoder selections must use zimage/<path> labels from zimage_tenc roots.',
+    )
+  }
+  return [normalized]
+}
+
 function normalizeGuidanceAdvancedParams(raw: unknown, defaults: GuidanceAdvancedParams): GuidanceAdvancedParams {
   const patch = asRecordObject(raw)
   const toFiniteNumber = (value: unknown, fallback: number): number => {
@@ -1728,6 +1749,47 @@ function normalizeParamsForType<T extends BaseTabType>(
   if (type === 'qwen_image') {
     normalized.textEncoders = normalizeQwenImageTextEncoders(normalized.textEncoders)
   }
+  if (type === 'zimage_l2p') {
+    normalized.textEncoders = normalizeZImageL2PTextEncoders(normalized.textEncoders)
+    normalized.useInitImage = false
+    normalized.useMask = false
+    normalized.maskImageData = ''
+    normalized.maskImageName = ''
+    normalized.clipSkip = 0
+    normalized.batchCount = 1
+    normalized.batchSize = 1
+    normalized.runAction = 'generate'
+    normalized.width = 1024
+    normalized.height = 1024
+    normalized.hires = {
+      ...normalized.hires,
+      enabled: false,
+      swapModel: undefined,
+      refiner: normalized.hires.refiner
+        ? { ...normalized.hires.refiner, enabled: false }
+        : normalized.hires.refiner,
+    }
+    normalized.swapModel = { ...normalized.swapModel, enabled: false }
+    normalized.refiner = { ...normalized.refiner, enabled: false }
+    normalized.supir = { ...normalized.supir, enabled: false }
+    normalized.ipAdapter = {
+      ...normalized.ipAdapter,
+      enabled: false,
+      source: {
+        ...normalized.ipAdapter.source,
+        mode: 'img',
+        sameAsInit: false,
+        count: 1,
+      },
+    }
+    normalized.guidanceAdvanced = {
+      ...normalized.guidanceAdvanced,
+      enabled: false,
+      apgEnabled: false,
+      cfgTruncEnabled: false,
+    }
+    delete (normalized as unknown as Record<string, unknown>).zimageTurbo
+  }
   return normalized as TabParamsByType[T]
 }
 
@@ -1758,6 +1820,9 @@ export function requiredTypesFromCapabilities(engines: Record<string, unknown>):
   }
   if (Object.prototype.hasOwnProperty.call(engines, 'qwen_image')) {
     types.push('qwen_image')
+  }
+  if (Object.prototype.hasOwnProperty.call(engines, 'zimage_l2p')) {
+    types.push('zimage_l2p')
   }
   if (Object.prototype.hasOwnProperty.call(engines, 'anima')) {
     types.push('anima')

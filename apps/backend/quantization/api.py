@@ -211,6 +211,8 @@ def quantize_numpy(data: np.ndarray, qtype: QuantType) -> np.ndarray:
 
     flat = data.astype(np.float32, copy=False).reshape((rows, elems_per_row))
     blocks = flat.reshape((rows * blocks_per_row, spec.block_size))
+    if not np.all(np.isfinite(blocks)):
+        raise ValueError(f"{qtype.name} quantize_numpy received non-finite values")
     packed = spec.quantize_numpy(blocks)
     if packed.dtype != np.uint8:
         raise TypeError(f"{qtype.name} quantize_numpy returned {packed.dtype}, expected uint8")

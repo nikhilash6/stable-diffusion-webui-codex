@@ -23,8 +23,8 @@ from tkinter import messagebox, ttk
 from typing import Callable, Dict
 import webbrowser
 
-from apps.launcher.profiles import LAUNCHER_MODE_PROFILE_DEV_SERVICE
-from apps.launcher.services import ServiceStatus
+from apps.launcher.profile_meta import LAUNCHER_MODE_PROFILE_DEV_SERVICE
+from apps.launcher.service_process import ServiceStatus
 
 from ..controller import LauncherController
 

@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Z Image engine specification and runtime assembly (analogous to Flux `spec.py`).
-Builds a `ZImageEngineRuntime` from parsed components, loading external VAE/text-encoder assets when required (core-only checkpoints).
+Builds a `ZImageEngineRuntime` from parsed components, loading external VAE/text-encoder assets when required (core-only checkpoints) while preserving role-owned storage/compute dtype selection.
 Uses vendored diffusers scheduler metadata under `apps/backend/huggingface/Tongyi-MAI/**` for flow-shift parity when not overridden.
 
 Symbols (top-level; keep in sync; no ghosts):
@@ -21,7 +21,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `_predictor` (function): Builds the flow-match predictor used by the denoiser patcher for Z Image sampling (effective shift / alpha).
 - `_load_external_vae` (function): Loads an external Flow16 VAE from a path (required for core-only; optional override for full checkpoints).
 - `_load_external_text_encoder` (function): Loads an external Qwen3 text encoder from a path (required for core-only; optional override for full checkpoints).
-- `assemble_zimage_runtime` (function): Assembles the runtime (including external assets when required) and returns a `ZImageEngineRuntime`.
+- `assemble_zimage_runtime` (function): Assembles the runtime (including external assets and role-owned dtype selection when required) and returns a `ZImageEngineRuntime`.
 - `ZIMAGE_SPEC` (constant): Default Z Image engine spec instance.
 - `__all__` (constant): Public export list for this module.
 """
@@ -300,6 +300,14 @@ def assemble_zimage_runtime(
             free, total = torch.cuda.mem_get_info()
             alloc = torch.cuda.memory_allocated()
             logger.debug("[zimage-assemble] %s: free=%.2f GB, alloc=%.2f GB", label, free / 1e9, alloc / 1e9)
+
+    def _is_floating_dtype(dtype: object) -> bool:
+        if not isinstance(dtype, torch.dtype):
+            return False
+        try:
+            return bool(torch.empty((), dtype=dtype).is_floating_point())
+        except (TypeError, RuntimeError):
+            return False
     
     logger.debug("Assembling Z Image runtime")
     _log_vram("START")
@@ -336,6 +344,7 @@ def assemble_zimage_runtime(
 
     external_vae = str(vae_path or "").strip() or None
     external_tenc = str(tenc_path or "").strip() or None
+    external_tenc_storage_dtype: torch.dtype | None = None
 
     # External assets are opt-in for full checkpoints, and required for core-only
     # checkpoints (GGUF / transformer-only exports).
@@ -357,6 +366,7 @@ def assemble_zimage_runtime(
             DeviceRole.TEXT_ENCODER,
             native_dtype=tenc_native_dtype,
         ) if tenc_native_dtype is not None else memory_management.manager.dtype_for_role(DeviceRole.TEXT_ENCODER)
+        external_tenc_storage_dtype = tenc_storage_dtype
         text_encoder = _load_external_text_encoder(external_tenc, torch_dtype=tenc_storage_dtype)
         _log_vram("AFTER load external TEnc")
     if text_encoder is None:
@@ -387,11 +397,15 @@ def assemble_zimage_runtime(
     text_engine = ZImageTextProcessingEngine(text_encoder)
 
     _log_vram("FINAL")
-    te_storage = torch.float32
-    try:
-        te_storage = next(text_encoder.model.parameters()).dtype
-    except Exception:  # noqa: BLE001
-        te_storage = torch.float32
+    if external_tenc_storage_dtype is not None:
+        te_storage = external_tenc_storage_dtype
+    else:
+        te_storage = getattr(text_encoder, "dtype", None)
+        if not _is_floating_dtype(te_storage):
+            raise RuntimeError(
+                "Z Image text encoder storage dtype must resolve to a floating dtype before runtime assembly; "
+                f"got {te_storage!r}."
+            )
     te_storage = memory_management.manager.dtype_for_role(DeviceRole.TEXT_ENCODER, native_dtype=te_storage)
     te_compute = memory_management.manager.compute_dtype_for_role(DeviceRole.TEXT_ENCODER, storage_dtype=te_storage)
     setattr(text_encoder.model, "compute_dtype", te_compute)

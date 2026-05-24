@@ -11,7 +11,7 @@ Defines TypeScript interfaces/types for backend responses (models/options/sample
 Inventory DTOs now include first-class IP-Adapter model/image-encoder collections from `/api/models/inventory`, SUPIR diagnostics DTOs from `/api/supir/models`, add-path contracts expose explicit nullable `size_bytes`
 metadata (`number | null`) for byte-progress UX and fail-loud validation in sequential library adds. SUPIR diagnostics now include structured
 stable sampler rows (`SupirSamplerInfo`) with backend-owned native sampler/scheduler metadata, and engine capabilities include explicit masked-img2img
-support, vid2vid discoverability, SUPIR-mode discoverability, exact-engine img2img inpaint-mode maps, parked exact-engine statuses, plus the optional nested LTX execution-profile surface used by the current checkpoint-aware LTX defaults lane.
+  support, vid2vid discoverability, SUPIR-mode discoverability, exact-engine img2img inpaint-mode maps, parked exact-engine statuses, plus the optional nested LTX execution-profile surface used by the current checkpoint-aware LTX defaults lane.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `ModelInfo` (interface): Model list entry returned by `/api/models`, including explicit `format` and `core_only` checkpoint selectors.
@@ -90,7 +90,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `UiPresetsResponse` (interface): `/api/ui/presets` response shape.
 - `UiPresetApplyResponse` (interface): `/api/ui/presets/apply` response shape returning only the resolved checkpoint owner.
 - `ApiTabMeta` (interface): Per-tab metadata timestamps.
-- `ApiTab` (interface): Persisted model tab definition (`sd15|sdxl|flux1|flux2|qwen_image|zimage|chroma|wan22_14b|wan22_5b|ltx2|anima`).
+- `ApiTab` (interface): Persisted model tab definition (`sd15|sdxl|flux1|flux2|qwen_image|zimage|zimage_l2p|chroma|wan22_14b|wan22_5b|ltx2|anima`).
 - `TabsResponse` (interface): `/api/ui/tabs` response shape.
 - `WorkflowsResponse` (interface): `/api/ui/workflows` response shape.
 - `InventoryResponse` (interface): `/api/models/inventory` response shape.
@@ -715,7 +715,7 @@ export interface UiPresetApplyResponse { applied: boolean; model: string; checkp
 
 // Tabs/workflows persistence
 export interface ApiTabMeta { createdAt: string; updatedAt: string }
-export interface ApiTab { id: string; type: 'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'qwen_image' | 'zimage' | 'chroma' | 'wan22_14b' | 'wan22_5b' | 'anima' | 'ltx2'; title: string; order: number; enabled: boolean; params: Record<string, unknown>; meta: ApiTabMeta }
+export interface ApiTab { id: string; type: 'sd15' | 'sdxl' | 'flux1' | 'flux2' | 'qwen_image' | 'zimage' | 'zimage_l2p' | 'chroma' | 'wan22_14b' | 'wan22_5b' | 'anima' | 'ltx2'; title: string; order: number; enabled: boolean; params: Record<string, unknown>; meta: ApiTabMeta }
 export interface TabsResponse { version: number; tabs: ApiTab[] }
 export interface WorkflowItem { id: string; name: string; source_tab_id: string; type: ApiTab['type']; created_at: string; params_snapshot: Record<string, unknown> }
 export interface WorkflowsResponse { version: number; workflows: WorkflowItem[] }

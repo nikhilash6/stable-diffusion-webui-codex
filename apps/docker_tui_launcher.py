@@ -8,10 +8,11 @@ Required Notice: see NOTICE
 
 Purpose: Docker-friendly terminal launcher (TUI) for Codex WebUI.
 Provides an interactive terminal configuration flow for launcher runtime env keys (device/allocator/attention/runtime
-knobs), persists them via `LauncherProfileStore`, and starts `run-webui.sh` with profile values injected.
+knobs), consumes shared option metadata from the launcher setting registry, persists them via `LauncherProfileStore`, and starts `run-webui.sh` with profile values injected.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `DockerTuiOption` (dataclass): Declarative description of one TUI-configurable runtime option.
+- `_registry_option` (function): Builds a TUI option from a shared launcher setting descriptor.
 - `main` (function): CLI entrypoint; optionally runs interactive configuration and then executes `run-webui.sh`.
 """
 
@@ -41,14 +42,10 @@ if str(_codex_root) not in sys.path:
 from apps.backend.infra.config.repo_root import get_repo_root
 from apps.backend.infra.config.lora_merge_mode import LoraMergeMode
 from apps.backend.infra.config.lora_refresh_signature import LoraRefreshSignatureMode
-from apps.launcher.profiles import CODEX_CUDA_MALLOC_KEY, ENABLE_DEFAULT_PYTORCH_CUDA_ALLOC_CONF_KEY, LauncherProfileStore
+from apps.launcher.profile_meta import CODEX_CUDA_MALLOC_KEY, ENABLE_DEFAULT_PYTORCH_CUDA_ALLOC_CONF_KEY
+from apps.launcher.profile_store import LauncherProfileStore
+from apps.launcher.setting_registry import SETTING_DESCRIPTORS_BY_KEY
 from apps.launcher.settings import (
-    ATTENTION_BACKEND_CHOICES,
-    ATTENTION_SDPA_POLICY_CHOICES,
-    DEVICE_CHOICES,
-    LORA_APPLY_CHOICES,
-    LORA_ONLINE_MATH_CHOICES,
-    WAN22_IMG2VID_CHUNK_BUFFER_MODE_CHOICES,
     normalize_attention_env,
     normalize_gguf_lora_env,
     normalize_task_runtime_env,
@@ -73,27 +70,33 @@ class DockerTuiOption:
     default: str = ""
 
 
+def _registry_option(
+    key: str,
+    label: str,
+    kind: str,
+    *,
+    allow_blank: bool = False,
+) -> DockerTuiOption:
+    descriptor = SETTING_DESCRIPTORS_BY_KEY[key]
+    return DockerTuiOption(
+        key,
+        label,
+        kind,
+        choices=tuple(descriptor.choices),
+        allow_blank=allow_blank,
+        default=descriptor.default,
+    )
+
+
 _OPTIONS: tuple[DockerTuiOption, ...] = (
-    DockerTuiOption("CODEX_MAIN_DEVICE", "Main device", "choice", choices=DEVICE_CHOICES, default="cuda"),
-    DockerTuiOption("CODEX_MOUNT_DEVICE", "Mount device", "choice", choices=DEVICE_CHOICES, default="cuda"),
-    DockerTuiOption("CODEX_OFFLOAD_DEVICE", "Offload device", "choice", choices=DEVICE_CHOICES, default="cpu"),
-    DockerTuiOption("CODEX_ATTENTION_BACKEND", "Attention backend", "choice", choices=ATTENTION_BACKEND_CHOICES, default="pytorch"),
-    DockerTuiOption("CODEX_ATTENTION_SDPA_POLICY", "Attention SDPA policy", "choice", choices=ATTENTION_SDPA_POLICY_CHOICES, default="flash"),
-    DockerTuiOption("CODEX_LORA_APPLY_MODE", "LoRA apply mode", "choice", choices=LORA_APPLY_CHOICES, default="online"),
-    DockerTuiOption(
-        "CODEX_LORA_ONLINE_MATH",
-        "LoRA online math",
-        "choice",
-        choices=LORA_ONLINE_MATH_CHOICES,
-        default="weight_merge",
-    ),
-    DockerTuiOption(
-        "CODEX_WAN22_IMG2VID_CHUNK_BUFFER_MODE",
-        "WAN22 img2vid chunk buffer mode",
-        "choice",
-        choices=WAN22_IMG2VID_CHUNK_BUFFER_MODE_CHOICES,
-        default="ram+hd",
-    ),
+    _registry_option("CODEX_MAIN_DEVICE", "Main device", "choice"),
+    _registry_option("CODEX_MOUNT_DEVICE", "Mount device", "choice"),
+    _registry_option("CODEX_OFFLOAD_DEVICE", "Offload device", "choice"),
+    _registry_option("CODEX_ATTENTION_BACKEND", "Attention backend", "choice"),
+    _registry_option("CODEX_ATTENTION_SDPA_POLICY", "Attention SDPA policy", "choice"),
+    _registry_option("CODEX_LORA_APPLY_MODE", "LoRA apply mode", "choice"),
+    _registry_option("CODEX_LORA_ONLINE_MATH", "LoRA online math", "choice"),
+    _registry_option("CODEX_WAN22_IMG2VID_CHUNK_BUFFER_MODE", "WAN22 img2vid chunk buffer mode", "choice"),
     DockerTuiOption(
         "CODEX_LORA_MERGE_MODE",
         "LoRA merge mode",
@@ -108,20 +111,9 @@ _OPTIONS: tuple[DockerTuiOption, ...] = (
         choices=_LORA_REFRESH_SIGNATURE_CHOICES,
         default="content_sha256",
     ),
-    DockerTuiOption(
-        ENABLE_DEFAULT_PYTORCH_CUDA_ALLOC_CONF_KEY,
-        "Enable default PYTORCH_CUDA_ALLOC_CONF",
-        "bool",
-        default="1",
-    ),
-    DockerTuiOption(
-        "PYTORCH_CUDA_ALLOC_CONF",
-        "PYTORCH_CUDA_ALLOC_CONF",
-        "text",
-        allow_blank=True,
-        default="backend:cudaMallocAsync",
-    ),
-    DockerTuiOption(CODEX_CUDA_MALLOC_KEY, "Enable --cuda-malloc", "bool", default="0"),
+    _registry_option(ENABLE_DEFAULT_PYTORCH_CUDA_ALLOC_CONF_KEY, "Enable default PYTORCH_CUDA_ALLOC_CONF", "bool"),
+    _registry_option("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF", "text", allow_blank=True),
+    _registry_option(CODEX_CUDA_MALLOC_KEY, "Enable --cuda-malloc", "bool"),
     DockerTuiOption("API_PORT_OVERRIDE", "API port override", "port", allow_blank=True),
     DockerTuiOption("WEB_PORT", "Web port", "port", allow_blank=True),
 )
@@ -184,10 +176,15 @@ def _parse_pytorch_cuda_alloc_conf(raw_conf: str) -> list[tuple[str, str]]:
 
 
 def _normalize_allocator_env(core_env: dict[str, str]) -> None:
-    toggle = _normalize_bool_token(core_env.get(ENABLE_DEFAULT_PYTORCH_CUDA_ALLOC_CONF_KEY, "1"), key=ENABLE_DEFAULT_PYTORCH_CUDA_ALLOC_CONF_KEY)
+    toggle_default = SETTING_DESCRIPTORS_BY_KEY[ENABLE_DEFAULT_PYTORCH_CUDA_ALLOC_CONF_KEY].default
+    toggle = _normalize_bool_token(
+        core_env.get(ENABLE_DEFAULT_PYTORCH_CUDA_ALLOC_CONF_KEY, toggle_default),
+        key=ENABLE_DEFAULT_PYTORCH_CUDA_ALLOC_CONF_KEY,
+    )
     core_env[ENABLE_DEFAULT_PYTORCH_CUDA_ALLOC_CONF_KEY] = toggle
 
-    cuda_malloc = _normalize_bool_token(core_env.get(CODEX_CUDA_MALLOC_KEY, "0"), key=CODEX_CUDA_MALLOC_KEY)
+    cuda_malloc_default = SETTING_DESCRIPTORS_BY_KEY[CODEX_CUDA_MALLOC_KEY].default
+    cuda_malloc = _normalize_bool_token(core_env.get(CODEX_CUDA_MALLOC_KEY, cuda_malloc_default), key=CODEX_CUDA_MALLOC_KEY)
     core_env[CODEX_CUDA_MALLOC_KEY] = cuda_malloc
 
     raw_conf = str(core_env.get("PYTORCH_CUDA_ALLOC_CONF", "") or "").strip()

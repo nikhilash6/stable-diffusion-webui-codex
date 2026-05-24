@@ -13,7 +13,8 @@ recommendation hints for the live surface (for example SD15 `ddim`/`ddim`, WAN22
 beyond the live runtime lane).
 Includes Qwen Image (`SemanticEngine.QWEN_IMAGE`) as a Qwen2.5-VL-conditioned flow-image engine with txt2img plus single-image edit img2img,
 and Anima (`SemanticEngine.ANIMA`) as a flow-based image engine (txt2img/img2img) requiring sha-selected external assets and exposing
-`er sde` in the recommended sampler surface. FLUX.2 exposes the truthful Klein 4B/base-4B slice here: txt2img plus dedicated
+`er sde` in the recommended sampler surface. Z-Image L2P is exposed as a separate no-VAE pixel-space txt2img-only exact engine.
+FLUX.2 exposes the truthful Klein 4B/base-4B slice here: txt2img plus dedicated
 image-conditioned img2img with hires enabled only after the real backend continuation path landed; LoRA remains off.
 WAN semantic capabilities are bound to explicit WAN22 variant families via primary-family mapping.
 
@@ -70,6 +71,7 @@ class SemanticEngine(str, Enum):
     FLUX2 = "flux2"
     QWEN_IMAGE = "qwen_image"
     ZIMAGE = "zimage"
+    ZIMAGE_L2P = "zimage_l2p"
     ANIMA = "anima"
     CHROMA = "chroma"
     WAN22 = "wan22"
@@ -280,6 +282,24 @@ ENGINE_SURFACES: Dict[SemanticEngine, EngineParamSurface] = {
         default_scheduler="simple",
         guidance_advanced=_GUIDANCE_ADVANCED_CLASSIC_CFG,
     ),
+    # Z-Image L2P (pixel-space no-VAE 1K checkpoint).
+    SemanticEngine.ZIMAGE_L2P: EngineParamSurface(
+        supports_txt2img=True,
+        supports_img2img=False,
+        supports_img2img_masking=False,
+        supports_txt2vid=False,
+        supports_img2vid=False,
+        supports_hires=False,
+        supports_refiner=False,
+        supports_lora=False,
+        supports_controlnet=False,
+        supports_ip_adapter=False,
+        supports_supir_mode=False,
+        recommended_samplers=("euler",),
+        recommended_schedulers=("simple",),
+        default_sampler="euler",
+        default_scheduler="simple",
+    ),
     # Anima (Cosmos Predict2; flow-based; Qwen3-0.6B conditioning; classic CFG).
     SemanticEngine.ANIMA: EngineParamSurface(
         supports_txt2img=True,
@@ -351,6 +371,7 @@ ENGINE_ID_TO_SEMANTIC_ENGINE: Dict[str, SemanticEngine] = {
     "qwen_image": SemanticEngine.QWEN_IMAGE,
     "flux1_chroma": SemanticEngine.CHROMA,
     "zimage": SemanticEngine.ZIMAGE,
+    "zimage_l2p": SemanticEngine.ZIMAGE_L2P,
     "anima": SemanticEngine.ANIMA,
     "wan22_5b": SemanticEngine.WAN22,
     "wan22_14b": SemanticEngine.WAN22,
@@ -393,6 +414,7 @@ EXACT_ENGINE_INPAINT_MODES: Dict[str, tuple[str, ...]] = {
     "qwen_image": (),
     "flux1_chroma": (),
     "zimage": _GENERIC_INPAINT_MODES,
+    "zimage_l2p": (),
     "anima": (),
     "wan22_5b": (),
     "wan22_14b": (),
@@ -429,6 +451,7 @@ _ENGINE_ID_PRIMARY_FAMILY: Dict[str, ModelFamily] = {
     "qwen_image": ModelFamily.QWEN_IMAGE,
     "flux1_chroma": ModelFamily.CHROMA,
     "zimage": ModelFamily.ZIMAGE,
+    "zimage_l2p": ModelFamily.ZIMAGE_L2P,
     "anima": ModelFamily.ANIMA,
     "wan22_5b": ModelFamily.WAN22_5B,
     "wan22_14b": ModelFamily.WAN22_14B,

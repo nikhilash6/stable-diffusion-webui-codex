@@ -1,14 +1,14 @@
 # apps/interface/src/components/quicksettings Overview
 <!-- tags: frontend, quicksettings, engines -->
 Date: 2025-12-06
-Last Review: 2026-04-08
+Last Review: 2026-05-23
 Status: Active
 
 ## Purpose
 - Compact engine/paths/performance controls rendered in the main header (`QuickSettingsBar.vue`), backed by the global `quicksettings` store.
 
 ## Key Files
-- `QuickSettingsAssetBlock.vue` — Shared non-WAN quicksettings asset owner for checkpoint/VAE/text-encoder selectors, including the dedicated LTX branch in `QuickSettingsBar.vue`; mode toggles and family-only extras remain header-owned.
+- `QuickSettingsAssetBlock.vue` — Shared non-WAN quicksettings asset owner for checkpoint/VAE/text-encoder selectors, including dedicated no-VAE L2P and LTX branches in `QuickSettingsBar.vue`; mode toggles and family-only extras remain header-owned.
 - `QuickSettingsPerf.vue` — Performance toggles shared across engines (Smart Offload/Fallback/Cache/Core Streaming) rendered in the Advanced nested area.
 - `QuickSettingsWan.vue` — exact WAN 2.2 14B quicksettings (shared `TXT2VID/IMG2VID` input-mode toggle, `LightX2V`, high/low model dirs, text encoder/VAE selectors, plus a Refresh button).
 - `QuickSettingsWan22_5b.vue` — exact WAN 2.2 5B quicksettings (shared `TXT2VID/IMG2VID` input-mode toggle, single-stage model dir, text encoder/VAE selectors, plus a Refresh button).
@@ -21,6 +21,7 @@ Status: Active
 - 2026-04-08: `QuickSettingsAssetBlock.vue` now accepts the shared disabled/family-label/dual-text-encoder contract for every non-WAN selector row, so `QuickSettingsBar.vue` can stop mirroring `Base`/`Flux`/`Flux2`/`Chroma`/`ZImage` wrappers while preserving the same add-path/metadata actions.
 - The shared read-only wrapper in `QuickSettingsBar.vue` is structural, not cosmetic: if a family branch is nested under `fieldset.qs-readonly-fieldset`, that wrapper must preserve the main-row flex contract for all sibling `quicksettings-group` roots.
 - 2026-04-08: `QuickSettingsAssetBlock.vue` now owns the shared optional text-encoder metadata/add-path controls used by LTX, Flux, Chroma, and Z-Image.
+- 2026-05-23: `QuickSettingsBar.vue` renders `zimage_l2p` through `QuickSettingsAssetBlock.vue` with `showVae=false`, checkpoint roots from `zimage_l2p_ckpt`, and exactly one shared `zimage/<path>` Qwen3-4B selector sourced from `zimage_tenc`. L2P has no IMG2IMG/INPAINT/Turbo/VAE controls in the header.
 - `QuickSettingsPerf` uses toggle buttons (`.qs-toggle-btn`) for Smart Offload/Fallback/Cache/Core Streaming (no legacy switches).
 - 2026-02-22: `QuickSettingsPerf.vue` adds an `Obliterate VRAM` action button (disabled while running), emitted to `QuickSettingsBar.vue` for backend-triggered VRAM cleanup (`POST /api/obliterate-vram`) with safe default external mode (`disabled`).
 - Text encoder dropdowns display a compact label (`family/basename`) even when `/api/paths` or the inventory return long absolute paths; the full value is still posted back in the `<option value>`.

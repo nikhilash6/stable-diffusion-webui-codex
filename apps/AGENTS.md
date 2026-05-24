@@ -11,14 +11,14 @@ Status: Active
 - `interface/` — Vue 3 + Vite application that replaces the legacy Gradio UI. Includes build tooling, public assets, and source modules.
 
 ## Key Files
-- `launcher/` — Package exposing launcher infrastructure (`checks`, `services`, `profiles`, `paths`).
+- `launcher/` — Package containing launcher infrastructure (`checks`, focused profile/service modules, shared setting registry, `paths`).
 - `codex_launcher.py` — Tk-based GUI launcher entrypoint for managing API/UI services (Windows). Implementation lives in `launcher/gui_tk.py`.
 - `docker_tui_launcher.py` — Docker-oriented terminal launcher entrypoint (interactive TUI + profile persistence + `run-webui.sh` delegation).
 - `__init__.py` — Marks `apps` as a Python package so relative imports resolve cleanly across backend modules.
 
 ## Notes
 - New code must target `apps/backend` and `apps/interface`. The launcher infrastructure lives under `apps/launcher/`; the GUI launcher entrypoint is `apps/codex_launcher.py` (Windows).
-- Docker terminal launches should use `apps/docker_tui_launcher.py` (called by `run-webui-docker.sh`) so runtime env/profile configuration remains centralized in `LauncherProfileStore`.
+- Docker terminal launches should use `apps/docker_tui_launcher.py` (called by `run-webui-docker.sh`) so runtime env/profile configuration remains centralized in `apps.launcher.profile_store.LauncherProfileStore`.
 - The GUI code should live under `apps/launcher/` so the entrypoint stays stable while the implementation evolves.
 - 2026-01-20: Deprecated the curses TUI launcher (`apps/tui_launcher.py` + `run-tui.bat`) by moving it to repo-local `/.deprecated/` (ignored by Git).
 - When adding new subpackages, create an `AGENTS.md` describing responsibilities to keep this overview accurate.

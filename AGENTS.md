@@ -26,6 +26,18 @@ You do **not** materialize eager `dict(...)` copies of checkpoint mappings as co
 
 ---
 
+### ABSOLUTE LAW — USE THE LOCAL TEST TOOLCHAIN
+
+Repository tests and validation commands use this checkout's toolchains.
+
+- Python commands must run through local `uv`: `./.uv/bin/uv run --python .venv/bin/python --no-sync ...`.
+- Backend CPU checks must keep the explicit CPU env pattern: `CODEX_ROOT="$PWD" PYTHONPATH="$PWD" CODEX_TORCH_MODE=cpu CODEX_TORCH_BACKEND=cpu`.
+- Node/npm/frontend commands must use the local nodeenv by prepending `"$PWD/.nodeenv/bin"` to `PATH` from the repository root.
+- Do **not** use system/global `python`, `uv`, `node`, `npm`, or `npx` for repository tests or validation.
+- If `./.uv/bin/uv`, `.venv/bin/python`, or `.nodeenv/bin/{node,npm,npx}` is missing, stop and report the missing local toolchain path unless the user explicitly requests non-local execution for that command.
+
+---
+
 ### ACT II – WHERE THE TRUTH LIVES: `.sangoi`, REUSE, AND THE WEBUI ATLAS
 
 Before broad grep, use the WebUI Atlas below as the prompt-resident owner map for this repository.
@@ -60,7 +72,7 @@ If you touch an `apps/**` source file, you keep its **file header block** honest
 
 ## WebUI Atlas
 
-Last reviewed on 2026-04-29 during the root Atlas consolidation.
+Last reviewed on 2026-05-23 during the Z-Image L2P exact txt2img integration.
 
 <!-- Merge-safety anchor: this prompt-resident WebUI Atlas replaces the former split-file discovery front door; update it whenever a hot path, owner file, public route, or shipped entrypoint moves. -->
 
@@ -132,6 +144,7 @@ Last reviewed on 2026-04-29 during the root Atlas consolidation.
   - Owns progress/result emission, decode, and cleanup inside the worker-thread envelope.
 - Stage runner: `apps/backend/use_cases/txt2img_pipeline/runner.py`
   - Executes the staged txt2img pipeline and returns the `GenerationResult`.
+  - Exact `zimage_l2p` remains inside this canonical runner: it guards unsupported state before conditioning, calls the engine pixel sampler hook, and returns the pixel tensor in `GenerationResult.decoded` so no VAE decode fallback runs.
 - Terminal surfaces: `apps/backend/interfaces/api/tasks/generation_tasks.py` and `apps/backend/interfaces/api/routers/tasks.py`
   - Encode/save images, store the result payload, and expose terminal result/end through `GET /api/tasks/{id}` and `/api/tasks/{id}/events`.
 
@@ -231,7 +244,7 @@ Last reviewed on 2026-04-29 during the root Atlas consolidation.
 ### Owner seam map
 
 - Generation Router seam: `apps/backend/interfaces/api/routers/generation.py`
-  - Owns public generation routes, payload parsing, route-level capability guards, exact-engine SUPIR-mode preflight for canonical img2img/inpaint, task creation, and worker thread hand-off.
+  - Owns public generation routes, payload parsing, route-level capability guards, exact-engine SUPIR-mode preflight for canonical img2img/inpaint, exact `zimage_l2p` no-VAE txt2img admission, task creation, and worker thread hand-off.
   - Do not move mode execution into this file; it stays validate + dispatch + stream.
 - Image Task Worker: `apps/backend/interfaces/api/tasks/generation_tasks.py`
   - Owns shared image task lifecycle, inference-gate integration, encoded image result packaging/save/provenance hooks, and automation task wrapper around canonical image modes.

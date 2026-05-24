@@ -30,6 +30,9 @@ Resolves WAN `wan_vae_sha` through VAE inventory ownership and validates VAE con
 Validates `extras.vae_sha` against VAE inventory ownership (rejects non-VAE asset SHAs before runtime load) to keep Flux core-only causality fail-loud at request time.
 Image request selectors are explicit: the router validates `model_sha`, `checkpoint_core_only`, `model_format`, and `vae_source`
 against inventory metadata instead of probing checkpoint families or inferring core-only status from checkpoint names.
+Z-Image L2P requests are exact txt2img-only, pixel-space, no-VAE 1024x1024 requests; the router rejects stale VAE, variant, hires, refiner,
+swap-model, IP-Adapter, LoRA, clip-skip, unsupported sampler/scheduler, unsupported model-format state, wrong-family denoisers, denoiser GGUFs
+without the dedicated L2P profile metadata, wrong-root Qwen3-4B text encoders, and TEnc GGUFs without the dedicated L2P profile metadata before task creation.
 Qwen Image requests keep `qwen_image_variant` internal-only: txt2img derives `2512`, img2img derives `edit_2511`, and stale public variant,
 foreign-family selectors, top-level txt2img clip-skip, classic denoise/resize/mask/hires/IP-Adapter/LoRA/SUPIR surfaces fail before task creation.
 Qwen Image VAE and text-encoder SHA selection is scoped to `qwen_image_vae` / `qwen_image_tenc` roots before task creation;
@@ -201,6 +204,23 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
     _QWEN_IMAGE_VARIANT_KEY = QWEN_IMAGE_VARIANT_KEY
     _QWEN_IMAGE_SAMPLER = QWEN_IMAGE_PUBLIC_SAMPLER
     _QWEN_IMAGE_SCHEDULER = QWEN_IMAGE_PUBLIC_SCHEDULER
+    _ZIMAGE_L2P_ENGINE_ID = "zimage_l2p"
+    _ZIMAGE_L2P_MODEL_FORMATS = {"checkpoint", "gguf"}
+    _ZIMAGE_L2P_TXT2IMG_REJECTED_EXTRAS_KEYS = {
+        "er_sde",
+        "guidance",
+        "hires",
+        "ip_adapter",
+        "lora_sha",
+        "refiner",
+        "swap_model",
+        "tenc1_sha",
+        "tenc2_sha",
+        "text_encoder_override",
+        "vae_sha",
+        "vae_source",
+        "zimage_variant",
+    }
     _QWEN_IMAGE_ASSET_EXTRAS_KEYS = {
         "checkpoint_core_only",
         "model_format",
@@ -2937,6 +2957,19 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                 detail="'img2img_extras.supir' cannot be combined with LoRA prompt tags in tranche 1.",
             )
 
+    def _reject_zimage_l2p_prompt_loras(*, prompt: str, negative_prompt: str) -> None:
+        from apps.backend.runtime.text_processing.extra_nets import ExtraNetsParseError, parse_prompts
+
+        try:
+            _cleaned_prompts, parsed_loras = parse_prompts([prompt, negative_prompt])
+        except ExtraNetsParseError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        if parsed_loras:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Engine '{_ZIMAGE_L2P_ENGINE_ID}' does not support LoRA prompt tags.",
+            )
+
     def _enforce_txt2img_ip_adapter_stage_support(
         *,
         engine_key: str,
@@ -3041,6 +3074,9 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
 
     def _is_qwen_image_engine(engine_key: object) -> bool:
         return str(engine_key or "").strip().lower() == _QWEN_IMAGE_ENGINE_ID
+
+    def _is_zimage_l2p_engine(engine_key: object) -> bool:
+        return str(engine_key or "").strip().lower() == _ZIMAGE_L2P_ENGINE_ID
 
     def _reject_public_qwen_image_variant(payload: Mapping[str, Any], *, context: str) -> None:
         if _QWEN_IMAGE_VARIANT_KEY in payload:
@@ -3269,6 +3305,113 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
             return field_name
         return f"{prefix}.{field_name}"
 
+    def _reject_zimage_l2p_txt2img_payload(payload: Mapping[str, Any]) -> None:
+        engine_key = _canonical_engine_key(payload.get("engine"))
+        if not _is_zimage_l2p_engine(engine_key):
+            return
+
+        payload_dict = dict(payload)
+        _reject_unknown_keys(payload_dict, _TXT2IMG_ALLOWED_KEYS, "txt2img")
+
+        width = _require_int_field(payload_dict, "width", minimum=1024, maximum=1024)
+        height = _require_int_field(payload_dict, "height", minimum=1024, maximum=1024)
+        if width != 1024 or height != 1024:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Engine '{_ZIMAGE_L2P_ENGINE_ID}' requires width=1024 and height=1024.",
+            )
+
+        sampler = _require_str_field(payload_dict, "sampler", allow_empty=False).strip().lower()
+        if sampler != "euler":
+            raise HTTPException(
+                status_code=400,
+                detail=f"'sampler' must be 'euler' for engine '{_ZIMAGE_L2P_ENGINE_ID}'.",
+            )
+        scheduler = _require_str_field(payload_dict, "scheduler", allow_empty=False).strip().lower()
+        if scheduler != "simple":
+            raise HTTPException(
+                status_code=400,
+                detail=f"'scheduler' must be 'simple' for engine '{_ZIMAGE_L2P_ENGINE_ID}'.",
+            )
+
+        if "clip_skip" in payload_dict:
+            raise HTTPException(
+                status_code=400,
+                detail=f"'clip_skip' is unsupported for engine '{_ZIMAGE_L2P_ENGINE_ID}'.",
+            )
+
+        prompt = _require_str_field(payload_dict, "prompt", allow_empty=True)
+        negative_raw = payload_dict.get("negative_prompt", "")
+        if negative_raw is None:
+            negative_prompt = ""
+        elif isinstance(negative_raw, str):
+            negative_prompt = negative_raw
+        else:
+            raise HTTPException(status_code=400, detail="'negative_prompt' must be a string")
+        _reject_zimage_l2p_prompt_loras(prompt=prompt, negative_prompt=negative_prompt)
+
+        raw_extras = payload_dict.get("extras")
+        if not isinstance(raw_extras, Mapping):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Engine '{_ZIMAGE_L2P_ENGINE_ID}' requires an 'extras' object with explicit asset selectors.",
+            )
+        _reject_unknown_keys(raw_extras, _TXT2IMG_EXTRAS_KEYS, "extras")
+
+        model_field = _asset_field_label(field_prefix="extras", field_name="model_sha")
+        if not _normalize_sha_field(raw_extras.get("model_sha"), field_label=model_field):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Engine '{_ZIMAGE_L2P_ENGINE_ID}' requires '{model_field}' (sha256).",
+            )
+
+        core_field = _asset_field_label(field_prefix="extras", field_name="checkpoint_core_only")
+        core_only = _normalize_checkpoint_core_only_field(raw_extras.get("checkpoint_core_only"), field_label=core_field)
+        if core_only is not True:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Engine '{_ZIMAGE_L2P_ENGINE_ID}' requires '{core_field}' = true.",
+            )
+
+        format_field = _asset_field_label(field_prefix="extras", field_name="model_format")
+        model_format = _normalize_model_format_field(raw_extras.get("model_format"), field_label=format_field)
+        if model_format is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Engine '{_ZIMAGE_L2P_ENGINE_ID}' requires '{format_field}'.",
+            )
+        if model_format not in _ZIMAGE_L2P_MODEL_FORMATS:
+            allowed = ", ".join(sorted(_ZIMAGE_L2P_MODEL_FORMATS))
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{format_field}' must be one of: {allowed} for engine '{_ZIMAGE_L2P_ENGINE_ID}'.",
+            )
+
+        tenc_field = _asset_field_label(field_prefix="extras", field_name="tenc_sha")
+        tenc_shas = _normalize_sha_list_field(raw_extras.get("tenc_sha"), field_label=tenc_field)
+        if len(tenc_shas) != 1:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Engine '{_ZIMAGE_L2P_ENGINE_ID}' requires exactly 1 Qwen3-4B text encoder via '{tenc_field}'.",
+            )
+
+        for key in sorted(_ZIMAGE_L2P_TXT2IMG_REJECTED_EXTRAS_KEYS):
+            if key in raw_extras:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'extras.{key}' is unsupported for engine '{_ZIMAGE_L2P_ENGINE_ID}'.",
+                )
+
+        for batch_key in ("batch_size", "batch_count"):
+            if batch_key not in raw_extras:
+                continue
+            batch_value = _require_int_field(dict(raw_extras), batch_key, minimum=1, maximum=1)
+            if batch_value != 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'extras.{batch_key}' must be 1 for engine '{_ZIMAGE_L2P_ENGINE_ID}'.",
+                )
+
     def _resolve_qwen_image_vae_sha_to_path(
         *,
         vae_sha: str,
@@ -3321,31 +3464,137 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                 continue
         return False
 
+    def _format_configured_roots(roots: Sequence[object]) -> str:
+        return ", ".join(str(root) for root in roots if isinstance(root, str) and root.strip()) or "<none>"
+
+    def _require_path_under_configured_roots(
+        *,
+        path: str,
+        roots_key: str,
+        field_label: str,
+        engine_id: str,
+        asset_label: str,
+    ) -> str:
+        roots = tuple(get_paths_for(roots_key))
+        if not roots:
+            raise HTTPException(status_code=409, detail=f"No {roots_key} roots are configured.")
+        path_text = str(path or "").strip()
+        if not path_text:
+            raise HTTPException(
+                status_code=409,
+                detail=f"'{field_label}' for engine '{engine_id}' resolved to an empty {asset_label} path.",
+            )
+        if not _path_is_under_configured_roots(path_text, roots):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"'{field_label}' for engine '{engine_id}' must resolve under {roots_key} roots; "
+                    f"got {path_text}. Roots: {_format_configured_roots(roots)}."
+                ),
+            )
+        return path_text
+
+    def _require_zimage_l2p_checkpoint_record(
+        *,
+        checkpoint_record: Any,
+        field_prefix: str,
+    ) -> None:
+        model_field = _asset_field_label(field_prefix=field_prefix, field_name="model_sha")
+        family_hint = str(getattr(checkpoint_record, "family_hint", "") or "").strip().lower()
+        metadata_raw = getattr(checkpoint_record, "metadata", None)
+        metadata = metadata_raw if isinstance(metadata_raw, Mapping) else {}
+        signature_source = str(metadata.get("signature_source") or "").strip()
+        format_raw = getattr(checkpoint_record, "format", None)
+        format_value = str(getattr(format_raw, "value", format_raw) or "").strip().lower()
+        expected_signature_source = (
+            "zimage_l2p_gguf_profile" if format_value == "gguf" else "zimage_l2p_safetensors_header"
+        )
+        if family_hint != _ZIMAGE_L2P_ENGINE_ID or signature_source != expected_signature_source:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"'{model_field}' for engine '{_ZIMAGE_L2P_ENGINE_ID}' must resolve to a Z-Image L2P denoiser "
+                    f"record discovered from zimage_l2p_ckpt roots; got family_hint={family_hint or '<missing>'!r} "
+                    f"signature_source={signature_source or '<missing>'!r} expected={expected_signature_source!r}."
+                ),
+            )
+        if format_value == "gguf":
+            try:
+                from apps.backend.runtime.model_registry.detectors.zimage_l2p import (
+                    validate_zimage_l2p_gguf_component_metadata,
+                )
+
+                validate_zimage_l2p_gguf_component_metadata(metadata, component="denoiser")
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"'{model_field}' for engine '{_ZIMAGE_L2P_ENGINE_ID}' must resolve to a GGUF generated "
+                        f"with profile_id='zimage_l2p_denoiser': {exc}"
+                    ),
+                ) from exc
+        filename = str(getattr(checkpoint_record, "filename", "") or "").strip()
+        _require_path_under_configured_roots(
+            path=filename,
+            roots_key="zimage_l2p_ckpt",
+            field_label=model_field,
+            engine_id=_ZIMAGE_L2P_ENGINE_ID,
+            asset_label="denoiser",
+        )
+
     def _resolve_qwen_image_text_encoder_sha_to_path(
         *,
         tenc_sha: str,
         tenc_field: str,
         resolve_asset_by_sha,  # type: ignore[no-untyped-def]
     ) -> str:
-        from apps.backend.infra.config.paths import get_paths_for as _get_paths_for
-
         tenc_path = resolve_asset_by_sha(tenc_sha)
         if not tenc_path:
             raise HTTPException(status_code=409, detail=f"Asset not found for sha: {tenc_sha}")
-        qwen_image_tenc_roots = tuple(_get_paths_for("qwen_image_tenc"))
-        if not qwen_image_tenc_roots:
-            raise HTTPException(status_code=409, detail="No qwen_image_tenc roots are configured.")
-        path_text = str(tenc_path)
-        if not _path_is_under_configured_roots(path_text, qwen_image_tenc_roots):
-            roots_text = ", ".join(str(root) for root in qwen_image_tenc_roots if isinstance(root, str) and root.strip())
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"'{tenc_field}' for engine '{_QWEN_IMAGE_ENGINE_ID}' must resolve under qwen_image_tenc roots; "
-                    f"got {path_text}. Roots: {roots_text or '<none>'}."
-                ),
-            )
-        return path_text
+        return _require_path_under_configured_roots(
+            path=str(tenc_path),
+            roots_key="qwen_image_tenc",
+            field_label=tenc_field,
+            engine_id=_QWEN_IMAGE_ENGINE_ID,
+            asset_label="text encoder",
+        )
+
+    def _resolve_zimage_l2p_text_encoder_sha_to_path(
+        *,
+        tenc_sha: str,
+        tenc_field: str,
+        resolve_asset_by_sha,  # type: ignore[no-untyped-def]
+    ) -> str:
+        tenc_path = resolve_asset_by_sha(tenc_sha)
+        if not tenc_path:
+            raise HTTPException(status_code=409, detail=f"Asset not found for sha: {tenc_sha}")
+        resolved_tenc_path = _require_path_under_configured_roots(
+            path=str(tenc_path),
+            roots_key="zimage_tenc",
+            field_label=tenc_field,
+            engine_id=_ZIMAGE_L2P_ENGINE_ID,
+            asset_label="Qwen3-4B text encoder",
+        )
+        if Path(resolved_tenc_path).suffix.lower() == ".gguf":
+            try:
+                from apps.backend.runtime.checkpoint.io import read_gguf_metadata
+                from apps.backend.runtime.model_registry.detectors.zimage_l2p import (
+                    validate_zimage_l2p_gguf_component_metadata,
+                )
+
+                validate_zimage_l2p_gguf_component_metadata(
+                    read_gguf_metadata(resolved_tenc_path),
+                    component="tenc",
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"'{tenc_field}' for engine '{_ZIMAGE_L2P_ENGINE_ID}' must resolve to a GGUF generated "
+                        f"with profile_id='zimage_l2p_tenc': {exc}"
+                    ),
+                ) from exc
+        return resolved_tenc_path
 
     def _preflight_qwen_image_asset_selector_payload(raw_extras: Mapping[str, Any], *, field_prefix: str) -> None:
         from apps.backend.inventory.cache import resolve_asset_by_sha, resolve_vae_path_by_sha
@@ -3439,6 +3688,11 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
             field_prefix=field_prefix,
             require_explicit_contract=require_explicit_checkpoint_contract,
         )
+        if engine_id == _ZIMAGE_L2P_ENGINE_ID:
+            _require_zimage_l2p_checkpoint_record(
+                checkpoint_record=checkpoint_record,
+                field_prefix=field_prefix,
+            )
         try:
             contract = contract_for_request(engine_id=engine_id, checkpoint_core_only=checkpoint_core_only)
         except Exception as exc:
@@ -3454,21 +3708,33 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         vae_sha = _normalize_sha_field(extras.get("vae_sha"), field_label=vae_field)
         vae_source_raw = extras.get("vae_source")
         vae_source: str | None = None
-        if vae_source_raw is not None:
-            if not isinstance(vae_source_raw, str) or not vae_source_raw.strip():
+        if not contract.requires_vae:
+            if vae_source_raw is not None:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"'{vae_source_field}' must be 'built_in' or 'external'",
+                    detail=f"Engine '{engine_id}' does not use '{vae_source_field}'.",
                 )
-            vae_source = vae_source_raw.strip().lower()
-            if vae_source not in {"built_in", "external"}:
+            if vae_sha:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"'{vae_source_field}' must be 'built_in' or 'external'",
+                    detail=f"Engine '{engine_id}' does not use '{vae_field}'.",
                 )
-            extras["vae_source"] = vae_source
-        elif require_explicit_checkpoint_contract:
-            raise HTTPException(status_code=400, detail=f"Missing '{vae_source_field}'")
+        else:
+            if vae_source_raw is not None:
+                if not isinstance(vae_source_raw, str) or not vae_source_raw.strip():
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"'{vae_source_field}' must be 'built_in' or 'external'",
+                    )
+                vae_source = vae_source_raw.strip().lower()
+                if vae_source not in {"built_in", "external"}:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"'{vae_source_field}' must be 'built_in' or 'external'",
+                    )
+                extras["vae_source"] = vae_source
+            elif require_explicit_checkpoint_contract:
+                raise HTTPException(status_code=400, detail=f"Missing '{vae_source_field}'")
         tenc_shas = _normalize_sha_list_field(extras.get("tenc_sha"), field_label=tenc_field)
         lora_shas = _normalize_sha_list_field(extras.get("lora_sha"), field_label=lora_field)
         explicit_tenc1_sha = _normalize_sha_field(extras.get("tenc1_sha"), field_label=tenc1_field)
@@ -3517,26 +3783,27 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
                 detail=f"'{tenc1_field}' and '{tenc2_field}' are only allowed for SDXL core-only checkpoints.",
             )
 
-        if vae_source == "external" and not vae_sha:
-            raise HTTPException(
-                status_code=400,
-                detail=f"'{vae_source_field}' set to 'external' requires '{vae_field}' (sha256)",
-            )
-        if vae_source == "built_in" and vae_sha:
-            raise HTTPException(
-                status_code=400,
-                detail=f"'{vae_source_field}' set to 'built_in' does not allow '{vae_field}'",
-            )
-        if contract.requires_vae and not vae_sha:
-            raise HTTPException(status_code=400, detail=f"Engine '{engine_id}' requires '{vae_field}' (sha256)")
-        if contract.requires_vae and vae_source == "built_in":
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Engine '{engine_id}' requires an external VAE via '{vae_field}' "
-                    f"and does not allow '{vae_source_field}=built_in'."
-                ),
-            )
+        if contract.requires_vae:
+            if vae_source == "external" and not vae_sha:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'{vae_source_field}' set to 'external' requires '{vae_field}' (sha256)",
+                )
+            if vae_source == "built_in" and vae_sha:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'{vae_source_field}' set to 'built_in' does not allow '{vae_field}'",
+                )
+            if not vae_sha:
+                raise HTTPException(status_code=400, detail=f"Engine '{engine_id}' requires '{vae_field}' (sha256)")
+            if vae_source == "built_in":
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Engine '{engine_id}' requires an external VAE via '{vae_field}' "
+                        f"and does not allow '{vae_source_field}=built_in'."
+                    ),
+                )
 
         if contract.requires_text_encoders:
             if len(tenc_shas) == 0:
@@ -3575,6 +3842,12 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
             for sha in tenc_shas:
                 if engine_id == _QWEN_IMAGE_ENGINE_ID:
                     path = _resolve_qwen_image_text_encoder_sha_to_path(
+                        tenc_sha=sha,
+                        tenc_field=tenc_field,
+                        resolve_asset_by_sha=resolve_asset_by_sha,
+                    )
+                elif engine_id == _ZIMAGE_L2P_ENGINE_ID:
+                    path = _resolve_zimage_l2p_text_encoder_sha_to_path(
                         tenc_sha=sha,
                         tenc_field=tenc_field,
                         resolve_asset_by_sha=resolve_asset_by_sha,
@@ -4629,6 +4902,7 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         model_override = payload.get('model')
         parsed = _parse_txt2img_payload_dto(payload)
         engine_key = parsed.engine_key
+        _reject_zimage_l2p_txt2img_payload(payload)
         family_name, family_capability = _resolve_image_family_capability_contract(engine_key)
         engine_id = engine_key
         prompt = parsed.prompt
@@ -4917,6 +5191,11 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         if not isinstance(template_raw, dict):
             raise HTTPException(status_code=400, detail="'template' must be an object")
         template = dict(template_raw)
+        if _is_zimage_l2p_engine(template.get("engine")):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Engine '{_ZIMAGE_L2P_ENGINE_ID}' does not support image automation.",
+            )
         if mode == "txt2img":
             _validate_txt2img_hires_request_payload(template)
             _validate_pre_task_txt2img_payload(template)
@@ -4925,6 +5204,8 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
             template,
             route_mode=GenerationRouteMode.TXT2IMG if mode == "txt2img" else GenerationRouteMode.IMG2IMG,
         )
+        if mode == "txt2img":
+            _reject_zimage_l2p_txt2img_payload(template)
         if mode == "img2img":
             _validate_pre_task_img2img_payload(template)
 
@@ -7049,6 +7330,7 @@ def build_router(*, codex_root: Path, media, live_preview, opts_get, opts_snapsh
         _validate_pre_task_txt2img_payload(payload)
         _enforce_generation_settings_contract(payload)
         _validate_route_engine_capability(payload, route_mode=GenerationRouteMode.TXT2IMG)
+        _reject_zimage_l2p_txt2img_payload(payload)
 
         device = _parse_explicit_device(
             payload,

@@ -7,30 +7,49 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: GGUF → state_dict loader with optional dequantization.
-Loads tensors+metadata via `GGUFReader`, returning float tensors or deferred `CodexParameter` tensors.
+Loads tensors+metadata via `GGUFReader`, returning a metadata-bearing state dict of float tensors or deferred `CodexParameter` tensors.
 Fails loud when a packed `codex.pack.*` artifact is loaded through the root GGUF path.
 
 Symbols (top-level; keep in sync; no ghosts):
+- `_GGUFStateDict` (class): Metadata-bearing dict returned by the GGUF loader for detector/inventory consumers.
 - `_numpy_to_frozen_parameter` (function): Converts a NumPy tensor blob into a read-only `nn.Parameter` on the requested device.
 - `_bf16_numpy_to_frozen_parameter` (function): Converts GGUF BF16 payload bytes/words into a read-only `nn.Parameter` with logical shape and `torch.bfloat16` dtype.
+- `_metadata_from_reader` (function): Extracts GGUF metadata fields into a JSON-serializable dict from an existing reader.
 - `load_gguf_state_dict` (function): Loads a GGUF file into a PyTorch-style state dict (optionally dequantizing tensors) with optional target-device exposure.
 - `get_gguf_metadata` (function): Extracts GGUF metadata fields into a JSON-serializable dict.
 """
 
 from __future__ import annotations
-from apps.backend.runtime.logging import get_backend_logger
 
 import logging
 import warnings
-from typing import Dict, Any
+from typing import Any, Dict
 
 import numpy as np
 import torch
 
 from apps.backend.infra.config.env_flags import env_flag
+from apps.backend.runtime.logging import get_backend_logger
 from apps.backend.runtime.memory import memory_management
 
 logger = get_backend_logger("backend.quantization.gguf_loader")
+
+
+class _GGUFStateDict(dict[str, torch.Tensor]):
+    def __init__(self, *, filepath: str, metadata: Dict[str, Any]) -> None:
+        super().__init__()
+        self.filepath = str(filepath)
+        self.source_path = str(filepath)
+        self.source_format = "gguf"
+        self.gguf_metadata = dict(metadata)
+        self.source_metadata = dict(metadata)
+
+    def shape_of(self, key: str) -> tuple[int, ...] | None:
+        value = self.get(key)
+        shape = getattr(value, "shape", None)
+        if shape is None:
+            return None
+        return tuple(int(dim) for dim in shape)
 
 
 def _trace_load_patch_debug_enabled() -> bool:
@@ -122,6 +141,7 @@ def load_gguf_state_dict(
     target_device = _resolve_target_device(device)
     logger.info("Loading GGUF file: %s (target_device=%s)", gguf_path, target_device)
     reader = GGUFReader(gguf_path)
+    metadata = _metadata_from_reader(reader)
 
     if any(str(field_name).startswith("codex.pack.") for field_name in reader.fields):
         raise RuntimeError(
@@ -129,7 +149,7 @@ def load_gguf_state_dict(
             "Load the base `.gguf` artifact instead."
         )
     
-    state_dict = {}
+    state_dict = _GGUFStateDict(filepath=gguf_path, metadata=metadata)
     
     trace_load_patch_debug = _trace_load_patch_debug_enabled() and logger.isEnabledFor(logging.DEBUG)
     for tensor in reader.tensors:
@@ -194,20 +214,10 @@ def load_gguf_state_dict(
     return state_dict
 
 
-def get_gguf_metadata(gguf_path: str) -> Dict[str, Any]:
-    """Get metadata from a GGUF file.
-    
-    Args:
-        gguf_path: Path to the GGUF file.
-    
-    Returns:
-        Dictionary with metadata fields.
-    """
-    from apps.backend.quantization.gguf import GGUFReader
+def _metadata_from_reader(reader: Any) -> Dict[str, Any]:
     from apps.backend.quantization.gguf.constants import GGUFValueType
-    
-    reader = GGUFReader(gguf_path)
-    metadata = {}
+
+    metadata: Dict[str, Any] = {}
     
     for field in reader.fields.values():
         name = field.name
@@ -251,8 +261,22 @@ def get_gguf_metadata(gguf_path: str) -> Dict[str, Any]:
             metadata[name] = part.reshape(()).item()
         else:
             metadata[name] = part.tolist() if isinstance(part, np.ndarray) else part
-    
+
     return metadata
+
+
+def get_gguf_metadata(gguf_path: str) -> Dict[str, Any]:
+    """Get metadata from a GGUF file.
+
+    Args:
+        gguf_path: Path to the GGUF file.
+
+    Returns:
+        Dictionary with metadata fields.
+    """
+    from apps.backend.quantization.gguf import GGUFReader
+
+    return _metadata_from_reader(GGUFReader(gguf_path))
 
 
 __all__ = [

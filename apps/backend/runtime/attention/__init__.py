@@ -7,9 +7,8 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Attention backend implementations (basic / chunked / xFormers / PyTorch SDPA) + diffusers processor adapter.
-Provides multiple attention implementations for different memory/performance tradeoffs, plus helpers for precision upcasting and
-single-head spatial attention variants used by legacy SD/UNet code paths.
-PyTorch SDPA flash-policy requests warn and fall back deterministically when flash kernels are unavailable.
+Provides memory/performance variants, precision-upcast helpers, single-head spatial legacy paths, neutral SDPA `auto` dispatch,
+mask-aware explicit flash fallback/logging, and pre-shaped `[B,H,S,D]` validation/contiguity before PyTorch SDPA dispatch.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `get_attn_precision` (function): Resolves attention precision policy (handles global upcast and disable flags).
@@ -19,8 +18,9 @@ Symbols (top-level; keep in sync; no ghosts):
 - `attention_split` (function): Splits attention computation into chunks to reduce peak memory.
 - `attention_xformers` (function): xFormers attention path (when available and not broken).
 - `attention_pytorch` (function): PyTorch SDPA attention path with optional per-call SDPA policy (`auto|flash|mem_efficient|math`) and flash fallback warning behavior.
-- `_resolve_sdpa_policy_for_head_dim` (function): Applies explicit SDPA head-dim route policy (`head_dim<=256` => flash-preferred route; `head_dim>256` => default non-flash route for `auto|flash`).
-- `_flash_sdpa_ineligibility_reason` (function): Validates hard flash-kernel constraints (shape/head-dim/device/dtype) so known-ineligible flash calls skip direct flash attempts and enter deterministic fallback with explicit reason.
+- `_resolve_sdpa_policy_for_inputs` (function): Preserves neutral `auto` dispatch and routes explicit flash requests away from known-ineligible inputs.
+- `_flash_sdpa_ineligibility_reason` (function): Validates hard flash-kernel constraints (mask/shape/head-dim/device/dtype) so known-ineligible flash calls skip direct flash attempts and enter deterministic fallback with explicit reason.
+- `_log_sdpa_call_once` (function): Emits bounded PyTorch SDPA call diagnostics with backend, requested/effective policy, mask, enabled kernels, and q/k/v shapes.
 - `attention_function` (function): Runtime-selected cross-attention dispatcher (driven by `memory_management.manager.config.attention.backend`) with optional SDPA policy forwarding for PyTorch backend.
 - `attention_function_pre_shaped` (function): Dispatcher wrapper for pre-shaped Q/K/V tensors (`[B,H,S,D]` -> `[B,H,S,D]`), including optional SDPA policy forwarding.
 - `attention_function_single_head_spatial` (function): Runtime-selected single-head spatial attention dispatcher (VAE; driven by runtime config).
@@ -40,7 +40,6 @@ Symbols (top-level; keep in sync; no ghosts):
 - `AttentionProcessorCodex` (class): Diffusers-style attention processor adapter that dispatches to the selected attention backend.
 """
 
-import logging
 import math
 from contextvars import ContextVar
 from contextlib import nullcontext
@@ -75,10 +74,9 @@ _XFORMERS_OPS = None
 _XFORMERS_BROKEN = None
 _XFORMERS_VERSION = None
 _XFORMERS_IMPORT_ERROR: Exception | None = None
-_SDPA_POLICY_LOGGED: set[tuple[str, str, str, str]] = set()
+_SDPA_CALL_LOGGED: set[tuple[str, str, str, str, str, str, str, str, str, str]] = set()
 _SDPA_FLASH_FALLBACK_LOGGED: set[tuple[str, str, str, str, str, str]] = set()
 _SDPA_NON_FLASH_FALLBACK_LOGGED: set[tuple[str, str, str, str, str, str, str]] = set()
-_SDPA_HEAD_DIM_ROUTE_LOGGED: set[tuple[str, str, str, str, str, int]] = set()
 _ATTENTION_REQUEST_ID_CTX: ContextVar[str] = ContextVar("attention_request_id", default="-")
 
 
@@ -179,18 +177,78 @@ def _sdpa_context(*, sdpa_policy: _SDPAPolicy, device: torch.device):
     return sdpa_kernel(backend)
 
 
-def _log_sdpa_policy_once(*, sdpa_policy: _SDPAPolicy, device: torch.device, dtype: torch.dtype) -> None:
+def _cuda_sdp_enabled_state() -> dict[str, object]:
+    cuda_backend = getattr(torch.backends, "cuda", None)
+    if cuda_backend is None:
+        return {}
+
+    def _call_bool(name: str) -> object:
+        enabled_fn = getattr(cuda_backend, name, None)
+        if enabled_fn is None:
+            return "missing"
+        try:
+            return bool(enabled_fn())
+        except Exception as exc:
+            return f"error:{type(exc).__name__}"
+
+    return {
+        "flash": _call_bool("flash_sdp_enabled"),
+        "mem_efficient": _call_bool("mem_efficient_sdp_enabled"),
+        "math": _call_bool("math_sdp_enabled"),
+        "cudnn": _call_bool("cudnn_sdp_enabled"),
+    }
+
+
+def _sdpa_mask_description(mask: torch.Tensor | None) -> str:
+    if mask is None:
+        return "None"
+    if not isinstance(mask, torch.Tensor):
+        return f"{type(mask).__name__}"
+    return f"{tuple(mask.shape)} {mask.dtype} {mask.device}"
+
+
+def _log_sdpa_call_once(
+    *,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    mask: torch.Tensor | None,
+    requested_policy: _SDPAPolicy,
+    effective_policy: _SDPAPolicy,
+    is_causal: bool,
+) -> None:
     request_id = get_attention_request_id()
-    key = (request_id, sdpa_policy, device.type, str(dtype))
-    if key in _SDPA_POLICY_LOGGED:
-        return
-    _SDPA_POLICY_LOGGED.add(key)
-    _LOGGER.info(
-        "[attention][req=%s] pytorch sdpa policy=%s device=%s dtype=%s",
+    mask_description = _sdpa_mask_description(mask)
+    key = (
         request_id,
-        sdpa_policy,
-        str(device),
-        str(dtype),
+        str(q.device),
+        str(q.dtype),
+        str(tuple(q.shape)),
+        str(tuple(k.shape)),
+        str(tuple(v.shape)),
+        mask_description,
+        str(is_causal),
+        requested_policy,
+        effective_policy,
+    )
+    if key in _SDPA_CALL_LOGGED:
+        return
+    _SDPA_CALL_LOGGED.add(key)
+    _LOGGER.info(
+        "[attention][req=%s] sdpa call backend=pytorch_sdpa q=%s k=%s v=%s "
+        "dtype=%s device=%s mask=%s is_causal=%s requested_policy=%s "
+        "effective_policy=%s enabled=%s",
+        request_id,
+        tuple(q.shape),
+        tuple(k.shape),
+        tuple(v.shape),
+        str(q.dtype),
+        str(q.device),
+        mask_description,
+        bool(is_causal),
+        requested_policy,
+        effective_policy,
+        _cuda_sdp_enabled_state(),
     )
 
 
@@ -255,59 +313,33 @@ def _default_non_flash_sdpa_policy(*, device: torch.device) -> _SDPAPolicy:
     return "math"
 
 
-def _resolve_sdpa_policy_for_head_dim(
+def _resolve_sdpa_policy_for_inputs(
     *,
     requested_policy: _SDPAPolicy,
     q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    mask: torch.Tensor | None,
 ) -> _SDPAPolicy:
-    if q.ndim < 1:
+    if requested_policy != "flash":
         return requested_policy
-
-    head_dim = int(q.shape[-1])
-    if head_dim <= 256:
-        # Explicit threshold policy:
-        # - default/auto route should prefer flash when eligible.
-        effective_policy = "flash" if requested_policy == "auto" else requested_policy
-    else:
-        # Explicit threshold policy:
-        # - head_dim > 256 defaults to a non-flash route.
-        # - explicit non-flash requests stay unchanged.
-        if requested_policy in {"auto", "flash"}:
-            effective_policy = _default_non_flash_sdpa_policy(device=q.device)
-        else:
-            effective_policy = requested_policy
-
-    if effective_policy == requested_policy:
-        return effective_policy
-
-    request_id = get_attention_request_id()
-    key = (request_id, requested_policy, effective_policy, str(q.device), str(q.dtype), head_dim)
-    if key not in _SDPA_HEAD_DIM_ROUTE_LOGGED:
-        _SDPA_HEAD_DIM_ROUTE_LOGGED.add(key)
-        route_note = (
-            "head_dim<=256 flash-preferred route"
-            if head_dim <= 256
-            else "head_dim>256 default non-flash route"
-        )
-        _LOGGER.info(
-            "[attention][req=%s] %s: requested_policy=%s effective_policy=%s head_dim=%d device=%s dtype=%s",
-            request_id,
-            route_note,
-            requested_policy,
-            effective_policy,
-            head_dim,
-            str(q.device),
-            str(q.dtype),
-        )
-
-    return effective_policy
+    if _flash_sdpa_ineligibility_reason(q, k, v, mask=mask) is None:
+        return "flash"
+    return _default_non_flash_sdpa_policy(device=q.device)
 
 
 def _flash_sdpa_ineligibility_reason(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    *,
+    mask: torch.Tensor | None,
 ) -> str | None:
+    if mask is not None:
+        return (
+            "flash SDPA does not support non-null attn_mask in this runtime path; "
+            f"got mask={_sdpa_mask_description(mask)}."
+        )
     if q.ndim != 4 or k.ndim != 4 or v.ndim != 4:
         return (
             "flash precheck expects q/k/v tensors with shape [B,H,S,D]; "
@@ -343,11 +375,24 @@ def _run_pytorch_sdpa(
     sdpa_policy: str | None,
 ) -> torch.Tensor:
     requested_policy = _normalize_sdpa_policy(sdpa_policy)
-    normalized_policy = _resolve_sdpa_policy_for_head_dim(requested_policy=requested_policy, q=q)
-    head_dim = int(q.shape[-1]) if q.ndim >= 1 else 0
+    normalized_policy = _resolve_sdpa_policy_for_inputs(
+        requested_policy=requested_policy,
+        q=q,
+        k=k,
+        v=v,
+        mask=mask,
+    )
 
     def _run_once(policy: _SDPAPolicy) -> torch.Tensor:
-        _log_sdpa_policy_once(sdpa_policy=policy, device=q.device, dtype=q.dtype)
+        _log_sdpa_call_once(
+            q=q,
+            k=k,
+            v=v,
+            mask=mask,
+            requested_policy=requested_policy,
+            effective_policy=policy,
+            is_causal=is_causal,
+        )
         with _sdpa_context(sdpa_policy=policy, device=q.device):
             return torch.nn.functional.scaled_dot_product_attention(
                 q,
@@ -359,14 +404,25 @@ def _run_pytorch_sdpa(
             )
 
     if normalized_policy != "flash":
-        if (
-            head_dim > 256
-            and requested_policy in {"auto", "flash"}
-            and normalized_policy != "math"
-        ):
+        if requested_policy == "flash":
+            precheck_failure = _flash_sdpa_ineligibility_reason(q, k, v, mask=mask)
+            if precheck_failure is None:
+                precheck_failure = "flash SDPA route resolved to a non-flash fallback policy."
             try:
+                _log_sdpa_flash_fallback_once(
+                    device=q.device,
+                    dtype=q.dtype,
+                    requested_policy=requested_policy,
+                    fallback_policy=normalized_policy,
+                    reason=precheck_failure,
+                )
                 return _run_once(normalized_policy)
             except Exception as primary_exc:
+                if normalized_policy == "math":
+                    raise RuntimeError(
+                        "SDPA policy flash precheck failed and fallback policy math failed. "
+                        f"Reason: {precheck_failure}"
+                    ) from primary_exc
                 _log_sdpa_non_flash_fallback_once(
                     device=q.device,
                     dtype=q.dtype,
@@ -378,30 +434,20 @@ def _run_pytorch_sdpa(
                 return _run_once("math")
         return _run_once(normalized_policy)
 
-    precheck_failure = _flash_sdpa_ineligibility_reason(q, k, v)
+    precheck_failure = _flash_sdpa_ineligibility_reason(q, k, v, mask=mask)
     if precheck_failure is not None:
-        for fallback_policy in ("mem_efficient", "math"):
-            try:
-                _log_sdpa_flash_fallback_once(
-                    device=q.device,
-                    dtype=q.dtype,
-                    requested_policy=requested_policy,
-                    fallback_policy=fallback_policy,
-                    reason=precheck_failure,
-                )
-                return _run_once(fallback_policy)
-            except Exception:
-                continue
         raise RuntimeError(
-            "SDPA policy flash precheck failed and no fallback policy succeeded "
-            "(tried mem_efficient, math). "
+            "Internal SDPA policy error: flash remained effective after its precheck failed. "
             f"Reason: {precheck_failure}"
         )
 
     try:
         return _run_once("flash")
     except Exception as flash_exc:
-        for fallback_policy in ("mem_efficient", "math"):
+        fallback_policies: list[_SDPAPolicy] = [_default_non_flash_sdpa_policy(device=q.device)]
+        if "math" not in fallback_policies:
+            fallback_policies.append("math")
+        for fallback_policy in fallback_policies:
             try:
                 _log_sdpa_flash_fallback_once(
                     device=q.device,
@@ -414,7 +460,7 @@ def _run_pytorch_sdpa(
             except Exception:
                 continue
         raise RuntimeError(
-            "SDPA policy flash failed and no fallback policy succeeded (tried mem_efficient, math)."
+            "SDPA policy flash failed and no fallback policy succeeded."
         ) from flash_exc
 
 
@@ -724,13 +770,69 @@ def attention_pytorch(
     is_causal=False,
     sdpa_policy: str | None = None,
 ):
+    heads = int(heads)
+    if heads <= 0:
+        raise RuntimeError(f"attention_pytorch requires positive heads; got {heads}.")
     if skip_reshape:
-        b, _, _, dim_head = q.shape
+        if q.ndim != 4 or k.ndim != 4 or v.ndim != 4:
+            raise RuntimeError(
+                "attention_pytorch(skip_reshape=True) expects q/k/v with shape [B,H,S,D]; "
+                f"got q={tuple(q.shape)} k={tuple(k.shape)} v={tuple(v.shape)}."
+            )
+        b, heads_seen, q_tokens, dim_head = q.shape
+        if int(heads_seen) != heads:
+            raise RuntimeError(f"attention_pytorch heads mismatch: q has {int(heads_seen)}, expected {heads}.")
+        if int(k.shape[0]) != int(b) or int(v.shape[0]) != int(b):
+            raise RuntimeError(
+                "attention_pytorch batch mismatch for pre-shaped q/k/v: "
+                f"q={tuple(q.shape)} k={tuple(k.shape)} v={tuple(v.shape)}."
+            )
+        if int(k.shape[1]) != heads or int(v.shape[1]) != heads:
+            raise RuntimeError(
+                "attention_pytorch head mismatch for pre-shaped q/k/v: "
+                f"q={tuple(q.shape)} k={tuple(k.shape)} v={tuple(v.shape)} expected_heads={heads}."
+            )
+        if int(k.shape[2]) != int(v.shape[2]):
+            raise RuntimeError(
+                "attention_pytorch pre-shaped K/V sequence length mismatch: "
+                f"k={tuple(k.shape)} v={tuple(v.shape)}."
+            )
+        if int(k.shape[-1]) != int(dim_head) or int(v.shape[-1]) != int(dim_head):
+            raise RuntimeError(
+                "attention_pytorch head_dim mismatch for pre-shaped q/k/v: "
+                f"q={tuple(q.shape)} k={tuple(k.shape)} v={tuple(v.shape)}."
+            )
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
     else:
+        if q.ndim != 3 or k.ndim != 3 or v.ndim != 3:
+            raise RuntimeError(
+                "attention_pytorch(skip_reshape=False) expects q/k/v with shape [B,S,C]; "
+                f"got q={tuple(q.shape)} k={tuple(k.shape)} v={tuple(v.shape)}."
+            )
         b, _, dim_head = q.shape
+        if int(k.shape[0]) != int(b) or int(v.shape[0]) != int(b):
+            raise RuntimeError(
+                "attention_pytorch batch mismatch for q/k/v: "
+                f"q={tuple(q.shape)} k={tuple(k.shape)} v={tuple(v.shape)}."
+            )
+        if int(k.shape[1]) != int(v.shape[1]):
+            raise RuntimeError(
+                "attention_pytorch K/V sequence length mismatch: "
+                f"k={tuple(k.shape)} v={tuple(v.shape)}."
+            )
+        if int(k.shape[-1]) != int(dim_head) or int(v.shape[-1]) != int(dim_head):
+            raise RuntimeError(
+                "attention_pytorch inner-dim mismatch for q/k/v: "
+                f"q={tuple(q.shape)} k={tuple(k.shape)} v={tuple(v.shape)}."
+            )
+        if int(dim_head) % heads != 0:
+            raise RuntimeError(f"attention_pytorch inner_dim={int(dim_head)} is not divisible by heads={heads}.")
+        q_tokens = int(q.shape[1])
         dim_head //= heads
         q, k, v = map(
-            lambda t: t.view(b, -1, heads, dim_head).transpose(1, 2),
+            lambda t: t.reshape(b, -1, heads, dim_head).transpose(1, 2).contiguous(),
             (q, k, v),
         )
 
@@ -743,7 +845,7 @@ def attention_pytorch(
         sdpa_policy=sdpa_policy,
     )
     out = (
-        out.transpose(1, 2).reshape(b, -1, heads * dim_head)
+        out.transpose(1, 2).reshape(b, q_tokens, heads * dim_head)
     )
     return out
 
@@ -873,11 +975,17 @@ def attention_function(
             "attention_function(sdpa_policy=...) is supported only for backend='pytorch'. "
             f"Got backend={backend_selected.value!r} policy={normalized_sdpa_policy!r}."
         )
-    if skip_reshape and int(q.shape[1]) != int(heads):
-        raise RuntimeError(
-            "attention_function(skip_reshape=True) requires `heads` to match q.shape[1] "
-            f"(heads={int(heads)} q.shape[1]={int(q.shape[1])})."
-        )
+    if skip_reshape:
+        if q.ndim != 4:
+            raise RuntimeError(
+                "attention_function(skip_reshape=True) requires pre-shaped q with shape [B,H,S,D]; "
+                f"got q={tuple(q.shape)}."
+            )
+        if int(q.shape[1]) != int(heads):
+            raise RuntimeError(
+                "attention_function(skip_reshape=True) requires `heads` to match q.shape[1] "
+                f"(heads={int(heads)} q.shape[1]={int(q.shape[1])})."
+            )
     if backend_selected == AttentionBackend.XFORMERS:
         return attention_xformers(
             q,
@@ -953,6 +1061,11 @@ def attention_function_pre_shaped(
         raise RuntimeError(
             "attention_function_pre_shaped expects matching head dims across q/k/v; "
             f"got q={tuple(q.shape)} k={tuple(k.shape)} v={tuple(v.shape)}."
+        )
+    if int(k.shape[2]) != int(v.shape[2]):
+        raise RuntimeError(
+            "attention_function_pre_shaped expects matching K/V sequence lengths; "
+            f"got k={tuple(k.shape)} v={tuple(v.shape)}."
         )
     batch = int(q.shape[0])
     heads = int(q.shape[1])

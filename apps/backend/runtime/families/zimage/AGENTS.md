@@ -1,6 +1,6 @@
 # apps/backend/runtime/families/zimage
 Date: 2025-12-12
-Last Review: 2026-03-03
+Last Review: 2026-05-24
 Status: Active
 
 ## Purpose
@@ -40,6 +40,7 @@ Status: Active
 - 2025-12-29: ZImage tokenizer fallback paths are now anchored to `CODEX_ROOT` (required) so tokenizers resolve correctly when the process CWD is not the repo root.
 - 2026-03-01: ZImage GGUF text encoder loads GGUF via `apps/backend/runtime/checkpoint/io.py:load_gguf_state_dict` under the global forward-dequant runtime contract (`dequantize=False` when policy is omitted).
 - 2026-03-03: ZImage safetensors text-encoder path (`text_encoder.py:from_state_dict`) now uses generic strict Qwen keymap normalization (`runtime/state_dict/keymap_qwen_text_encoder.py`) before native `Qwen3_4B` strict load, accepting known auxiliary heads while failing loud on unknown keyspaces.
+- 2026-05-24: `ZImageTextEncoder.dtype` owns logical floating output dtype resolution for Qwen3 hidden states. GGUF packed storage dtypes (`uint8`/`int8`) must never drive `encode(...)` or `encode_masked(...)` output casting; use model compute dtype, parameter `computation_dtype`, or floating storage dtype and fail loud if none exists.
 - 2026-01-04: Added `runtime/families/zimage/inference.py` and updated detector/loader to use it (prevents drift in hidden/context/latent/layer inference; supports prefixed SafeTensors exports).
 - 2026-01-02: Added standardized file header docstrings to Z-Image runtime facade/debug modules (doc-only change; part of rollout).
 - 2026-01-23: Centralized llama.cpp-style GGUF tensor-name keyspace resolution for Qwen3 in `apps/backend/runtime/state_dict/keymap_llama_gguf.py`; `qwen3.py:resolve_qwen3_gguf_keyspace` delegates and fails loud on unknown keys without materializing a renamed state dict.

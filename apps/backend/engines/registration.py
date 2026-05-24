@@ -27,6 +27,7 @@ Symbols (top-level; keep in sync; no ghosts):
 - `register_wan22_14b_animate` (function): Registers WAN22 Animate 14B engine and aliases.
 - `register_wan22_videos` (function): Registers all WAN22 default video engines.
 - `register_zimage` (function): Registers the Z-Image engine and aliases.
+- `register_zimage_l2p` (function): Registers the Z-Image L2P pixel engine with no aliases.
 - `register_anima` (function): Registers the Anima engine.
 - `register_qwen_image` (function): Registers the Qwen Image architecture-family engine facade.
 """
@@ -142,6 +143,11 @@ def register_wan22_videos(*, registry: EngineRegistry | None = None, replace: bo
 def register_zimage(*, registry: EngineRegistry | None = None, replace: bool = False) -> None:
     from apps.backend.engines.zimage.zimage import ZImageEngine
     _reg("zimage", ZImageEngine, registry=registry, replace=replace, aliases=("z-image", "z-image-turbo"))
+
+
+def register_zimage_l2p(*, registry: EngineRegistry | None = None, replace: bool = False) -> None:
+    from apps.backend.engines.zimage_l2p.zimage_l2p import ZImageL2PEngine
+    _reg("zimage_l2p", ZImageL2PEngine, registry=registry, replace=replace, aliases=())
 
 
 def register_anima(*, registry: EngineRegistry | None = None, replace: bool = False) -> None:

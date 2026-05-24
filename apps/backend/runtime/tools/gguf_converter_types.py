@@ -7,39 +7,61 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Public types for the GGUF converter tool.
-Defines the conversion config, quantization selector enum, precision controls, progress tracking, and verification error type.
+Defines the conversion config, public file recipe enum, physical tensor target enum, quant-policy preset enum, progress tracking, and verification error type.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `QuantizationType` (enum): Supported “human” quantization selectors for conversion (maps to `GGMLQuantizationType`).
-- `PrecisionMode` (enum): Mixed-quant float precision policy selector (`full_*` and `*_plus_fp32` modes).
-- `MIXED_FLOAT_OVERRIDE_VALUES` (tuple): Canonical allowed literals for mixed float override values.
-- `PRECISION_MODE_VALUES` (tuple): Canonical allowed literals for precision-mode selectors.
-- `normalize_mixed_float_override` (function): Normalizes and validates a mixed float override literal (`auto|F16|BF16|F32`).
-- `normalize_precision_mode` (function): Normalizes and validates a precision-mode selector.
-- `ConversionConfig` (dataclass): Conversion configuration (paths, profile selection, quantization, and dtype override knobs).
+- `QuantizationRecipe` (enum): Public file-level GGUF recipe selector for conversion outputs.
+- `TensorQuantizationType` (enum): Physical per-tensor GGML target type used by rules and advanced overrides.
+- `QuantPolicyPreset` (enum): Policy preset controlling optional profile quality rules (`HQ|MQ|LQ`).
+- `normalize_quantization_recipe` (function): Normalizes and validates a public recipe selector.
+- `normalize_tensor_quantization_type` (function): Normalizes and validates a physical tensor target selector.
+- `normalize_quant_policy_preset` (function): Normalizes and validates a required quant-policy preset selector.
+- `normalize_optional_quant_policy_preset` (function): Normalizes an optional quant-policy preset selector.
+- `ConversionConfig` (dataclass): Conversion configuration (paths, profile selection, recipe, optional policy preset, and regex tensor overrides).
 - `ConversionProgress` (dataclass): Progress/report structure for long conversions (stage counters, timings, and status fields).
 - `GGUFVerificationError` (exception): Raised when a written GGUF file fails validation/verification.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Sequence
 
 
-class QuantizationType(str, Enum):
-    """Supported GGUF quantization types."""
+class QuantizationRecipe(str, Enum):
+    """Public file-level GGUF conversion recipes."""
 
     F16 = "F16"
     F32 = "F32"
     Q8_0 = "Q8_0"
+    Q6_K = "Q6_K"
     Q5_K_M = "Q5_K_M"
+    Q5_K_S = "Q5_K_S"
+    Q4_K_M = "Q4_K_M"
+    Q4_K_S = "Q4_K_S"
+    Q3_K_L = "Q3_K_L"
+    Q3_K_M = "Q3_K_M"
+    Q3_K_S = "Q3_K_S"
+    Q2_K = "Q2_K"
+    Q2_K_S = "Q2_K_S"
+    Q5_1 = "Q5_1"
+    Q5_0 = "Q5_0"
+    Q4_1 = "Q4_1"
+    Q4_0 = "Q4_0"
+    IQ4_NL = "IQ4_NL"
+
+
+class TensorQuantizationType(str, Enum):
+    """Physical per-tensor GGML target types for policy rules and user overrides."""
+
+    F16 = "F16"
+    F32 = "F32"
+    Q8_0 = "Q8_0"
     Q6_K = "Q6_K"
     Q5_K = "Q5_K"
     Q5_1 = "Q5_1"
     Q5_0 = "Q5_0"
-    Q4_K_M = "Q4_K_M"
     Q4_K = "Q4_K"
     Q4_1 = "Q4_1"
     Q4_0 = "Q4_0"
@@ -48,71 +70,57 @@ class QuantizationType(str, Enum):
     IQ4_NL = "IQ4_NL"
 
 
-class PrecisionMode(str, Enum):
-    """Mixed-quant float precision mode selector."""
+class QuantPolicyPreset(str, Enum):
+    """Optional per-profile quality policy preset."""
 
-    FULL_BF16 = "FULL_BF16"
-    FULL_FP16 = "FULL_FP16"
-    FULL_FP32 = "FULL_FP32"
-    FP16_PLUS_FP32 = "FP16_PLUS_FP32"
-    BF16_PLUS_FP32 = "BF16_PLUS_FP32"
+    HQ = "HQ"
+    MQ = "MQ"
+    LQ = "LQ"
 
 
-MIXED_FLOAT_OVERRIDE_VALUES: tuple[str, str, str, str] = ("auto", "F16", "BF16", "F32")
-PRECISION_MODE_VALUES: tuple[str, str, str, str, str] = (
-    PrecisionMode.FULL_BF16.value,
-    PrecisionMode.FULL_FP16.value,
-    PrecisionMode.FULL_FP32.value,
-    PrecisionMode.FP16_PLUS_FP32.value,
-    PrecisionMode.BF16_PLUS_FP32.value,
-)
+def _normalize_enum_value(value: object, enum_type: type[Enum], *, field: str) -> Enum:
+    if isinstance(value, enum_type):
+        return value
+    raw = str(value or "").strip().upper()
+    try:
+        return enum_type(raw)
+    except ValueError as exc:
+        allowed = ", ".join(str(member.value) for member in enum_type)
+        raise ValueError(f"Invalid {field} {value!r}; expected one of: {allowed}") from exc
 
 
-def normalize_mixed_float_override(value: object) -> str:
+def normalize_quantization_recipe(value: object) -> QuantizationRecipe:
+    """Normalize a public file-level recipe selector."""
+
+    return _normalize_enum_value(value, QuantizationRecipe, field="quantization")  # type: ignore[return-value]
+
+
+def normalize_tensor_quantization_type(value: object) -> TensorQuantizationType:
+    """Normalize a physical per-tensor target selector."""
+
+    return _normalize_enum_value(value, TensorQuantizationType, field="tensor quantization type")  # type: ignore[return-value]
+
+
+def normalize_quant_policy_preset(value: object) -> QuantPolicyPreset:
+    """Normalize a required quant-policy preset selector."""
+
     if value is None:
-        return "auto"
-    if not isinstance(value, str):
-        raise ValueError(
-            f"Invalid float dtype selection: {value!r} (expected {'|'.join(MIXED_FLOAT_OVERRIDE_VALUES)})"
-        )
-    raw = value.strip().upper()
-    if raw in {"", "AUTO"}:
-        return "auto"
-    if raw in {"F16", "BF16", "F32"}:
-        return raw
-    raise ValueError(
-        f"Invalid float dtype selection: {value!r} (expected {'|'.join(MIXED_FLOAT_OVERRIDE_VALUES)})"
-    )
+        allowed = ", ".join(preset.value for preset in QuantPolicyPreset)
+        raise ValueError(f"Invalid quant_policy_preset {value!r}; expected one of: {allowed}")
+    return _normalize_enum_value(value, QuantPolicyPreset, field="quant_policy_preset")  # type: ignore[return-value]
 
 
-def normalize_precision_mode(value: object) -> PrecisionMode | None:
+def normalize_optional_quant_policy_preset(value: object) -> Optional[QuantPolicyPreset]:
+    """Normalize an optional quant-policy preset selector."""
+
     if value is None:
         return None
-    if not isinstance(value, str):
-        raise ValueError(
-            f"Invalid precision_mode: {value!r} (expected {'|'.join(PRECISION_MODE_VALUES)})"
-        )
-    raw = value.strip().upper()
+    if isinstance(value, QuantPolicyPreset):
+        return value
+    raw = str(value).strip()
     if not raw:
         return None
-    aliases = {
-        "FULL BF16": PrecisionMode.FULL_BF16,
-        "FULL BFLOAT16": PrecisionMode.FULL_BF16,
-        "FULL_FP16": PrecisionMode.FULL_FP16,
-        "FULL FP16": PrecisionMode.FULL_FP16,
-        "FULL_FP32": PrecisionMode.FULL_FP32,
-        "FULL FP32": PrecisionMode.FULL_FP32,
-        "FP16+FP32": PrecisionMode.FP16_PLUS_FP32,
-        "BF16+FP32": PrecisionMode.BF16_PLUS_FP32,
-    }
-    if raw in aliases:
-        return aliases[raw]
-    try:
-        return PrecisionMode(raw)
-    except ValueError as exc:
-        raise ValueError(
-            f"Invalid precision_mode: {value!r} (expected {'|'.join(PRECISION_MODE_VALUES)})"
-        ) from exc
+    return normalize_quant_policy_preset(raw)
 
 
 @dataclass(slots=True)
@@ -120,13 +128,12 @@ class ConversionConfig:
     """Configuration for GGUF conversion."""
 
     config_path: str  # Path to config.json or folder containing it
-    safetensors_path: str  # Path to .safetensors file
+    safetensors_path: str  # Path to .safetensors file, index, or directory
     output_path: str  # Output .gguf path
     profile_id: Optional[str] = None
-    quantization: QuantizationType = QuantizationType.F16
+    quantization: QuantizationRecipe = QuantizationRecipe.F16
+    quant_policy_preset: Optional[QuantPolicyPreset] = None
     tensor_type_overrides: Sequence[str] = ()
-    float_group_overrides: dict[str, str] = field(default_factory=dict)
-    precision_mode: PrecisionMode | None = None
 
 
 @dataclass(slots=True)
@@ -154,10 +161,11 @@ __all__ = [
     "ConversionConfig",
     "ConversionProgress",
     "GGUFVerificationError",
-    "MIXED_FLOAT_OVERRIDE_VALUES",
-    "PRECISION_MODE_VALUES",
-    "PrecisionMode",
-    "QuantizationType",
-    "normalize_mixed_float_override",
-    "normalize_precision_mode",
+    "QuantPolicyPreset",
+    "QuantizationRecipe",
+    "TensorQuantizationType",
+    "normalize_optional_quant_policy_preset",
+    "normalize_quant_policy_preset",
+    "normalize_quantization_recipe",
+    "normalize_tensor_quantization_type",
 ]

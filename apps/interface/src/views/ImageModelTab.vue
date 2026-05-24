@@ -6,7 +6,7 @@ License: PolyForm Noncommercial 1.0.0
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
-Purpose: Image model tab view (txt2img/img2img/inpaint) UI for SD/Flux/ZImage/Qwen Image-family engines.
+Purpose: Image model tab view (txt2img/img2img/inpaint) UI for SD/Flux/ZImage/Z-Image L2P/Qwen Image-family engines.
 Owns prompt + parameter controls, init-image + mask handling for img2img/inpaint, per-tab history, and integrates with the generation composable to
 submit `/api/txt2img`/`/api/img2img` tasks and render progress/results (Z-Image Turbo/Base and FLUX.2 Klein distilled/base-4B are variant-dependent:
 CFG label + negative prompt gating follow the selected checkpoint/tab state, while img2img denoise + hires visibility stay truthful to the active capability/mask contract).
@@ -29,6 +29,8 @@ Run status in the RUN card is centralized via `RunProgressStatus` variants (prog
 When XYZ workflow is enabled, RUN header shows an `XYZ` badge beside `Generate` via the run-card center-adjacent slot while keeping the primary CTA label stable as `Generate`.
 Qwen Image uses the same image workspace shell but hides unsupported generic controls, keeps batch/action state forced to one-shot Generate,
 snaps txt2img dimensions to the backend family resolution step, omits CLIP Skip/swap/refiner/hires/IP-Adapter/advanced-guidance controls, and treats edit output dimensions as backend-derived from the init image.
+Z-Image L2P uses the same image workspace shell but hides unsupported generic controls, keeps batch/action state forced to one-shot Generate,
+forces 1024x1024 txt2img, omits VAE/CLIP Skip/swap/refiner/hires/IP-Adapter/advanced-guidance controls, and relies on the QuickSettings L2P TEnc selector.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `ImageModelTab` (component): Main image model tab view; handles prompt/params/profile persistence, init-image UX, history reuse, and actions.
@@ -81,10 +83,10 @@ Symbols (top-level; keep in sync; no ghosts):
 - `onGenerate` (function): Run handler for the Run card; dispatches standard generation or XYZ sweep depending on XYZ enable state.
 - `runGenerateDisabled`/`runGenerateTitle` (const): Run CTA state/title derived from capabilities + active mode + XYZ running/enabled state.
 - `assetContractBlockingReason` / `workflowParamsSnapshot` (const): Current image asset-contract gating reason plus workflow snapshot carrying the
-  active family-scoped VAE owner.
+  active family-scoped VAE owner for VAE-owning image families.
 - `usesImageAutomation` / `infiniteXyzConflict` / `automationBatchConflict` (const): Derived automation guards for the split-button and backend-owned automation route.
 - `showIpAdapterCard` / `initFolderMissingPath` / `dirInitMaskConflict` / `ipAdapterBlockingReason` (const): Card-visibility + preflight guards for Initial Image DIR mode and the dedicated IP-Adapter owner card.
-- `isQwenImageRequest` / `showRunBatchControls` (const): Qwen Image surface guards that hide unsupported generic controls and force one-shot request state.
+- `isQwenImageRequest` / `isZImageL2PRequest` / `showRunBatchControls` (const): Exact one-shot surface guards that hide unsupported generic controls and force one-shot request state.
 - `missingInpaintMask` (const): Derived guard flag used to disable generation when INPAINT is enabled without an applied mask.
 - `supportsImg2ImgMasking` (const): Truthful backend-capability-driven mask/inpaint support gate for img2img engines.
 - `hideNegativePrompt` (const): Hides the base Negative Prompt field when the active checkpoint/model does not support it or effective base CFG is `<= 1`.
@@ -398,7 +400,7 @@ Symbols (top-level; keep in sync; no ghosts):
         :generateDisabled="runGenerateDisabled"
         :generateTitle="runGenerateTitle"
         :actionMode="params.runAction"
-        :showActionMenu="!xyzStore.enabled && !isQwenImageRequest"
+        :showActionMenu="!xyzStore.enabled && !isExactOneShotImageRequest"
         :isRunning="isRunBusy"
         :showBatchControls="showRunBatchControls"
         :batchCount="params.batchCount"
@@ -685,9 +687,11 @@ onBeforeUnmount(() => {
 const workflowParamsSnapshot = computed<Record<string, unknown> | null>(() => {
   const currentTab = tab.value
   if (!currentTab) return null
+  const baseSnapshot = currentTab.params as unknown as Record<string, unknown>
+  if (props.type === 'zimage_l2p') return { ...baseSnapshot }
   const familyOwnedVae = String(quicksettingsStore.getVaeForFamily(props.type) || '').trim()
   return {
-    ...(currentTab.params as unknown as Record<string, unknown>),
+    ...baseSnapshot,
     vae: familyOwnedVae,
   }
 })
@@ -818,22 +822,24 @@ watch(
 const engineConfig = computed(() => getEngineConfig(props.type))
 const resolvedEngineForMode = computed(() => resolveEngineForRequest(props.type, Boolean(params.value.useInitImage)))
 const isQwenImageRequest = computed(() => resolvedEngineForMode.value === 'qwen_image')
+const isZImageL2PRequest = computed(() => resolvedEngineForMode.value === 'zimage_l2p')
+const isExactOneShotImageRequest = computed(() => isQwenImageRequest.value || isZImageL2PRequest.value)
 const img2imgResizeModeOptions = computed(() => img2imgResizeModeOptionsForEngine(resolvedEngineForMode.value))
 const engineSurface = computed(() => engineCaps.get(resolvedEngineForMode.value))
 const engineFamilySurface = computed(() => engineCaps.getFamilyForEngine(resolvedEngineForMode.value))
 const imageDimensionInputStep = computed(() => {
   const resolutionStep = Number(engineFamilySurface.value?.resolution_step)
   if (
-    resolvedEngineForMode.value === 'qwen_image'
+    (resolvedEngineForMode.value === 'qwen_image' || resolvedEngineForMode.value === 'zimage_l2p')
     && Number.isFinite(resolutionStep)
     && Math.trunc(resolutionStep) > 0
   ) {
     return Math.trunc(resolutionStep)
   }
-  return resolvedEngineForMode.value === 'zimage' || resolvedEngineForMode.value === 'qwen_image' ? 16 : 8
+  return resolvedEngineForMode.value === 'zimage' || resolvedEngineForMode.value === 'qwen_image' || resolvedEngineForMode.value === 'zimage_l2p' ? 16 : 8
 })
 const imageDimensionSliderStep = computed(() =>
-  resolvedEngineForMode.value === 'qwen_image'
+  (resolvedEngineForMode.value === 'qwen_image' || resolvedEngineForMode.value === 'zimage_l2p')
     ? imageDimensionInputStep.value
     : (resolvedEngineForMode.value === 'zimage' ? 16 : 64),
 )
@@ -911,7 +917,7 @@ const canGenerateForCurrentMode = computed(() =>
 const assetContractBlockingReason = computed(() => {
   const checkpoint = String(params.value.checkpoint || '').trim()
   if (!checkpoint) return 'Select a checkpoint to generate.'
-  const familyOwnedVae = String(quicksettingsStore.getVaeForFamily(props.type) || '').trim()
+  const familyOwnedVae = isZImageL2PRequest.value ? '' : String(quicksettingsStore.getVaeForFamily(props.type) || '').trim()
   try {
     buildExplicitImageRequestContract({
       modelLabel: checkpoint,
@@ -957,14 +963,14 @@ const isRunBusy = computed(() => isRunning.value || xyzRunning.value)
 const generateLabel = 'Generate'
 const supportsImg2ImgMasking = computed(() => Boolean(engineSurface.value?.supports_img2img_masking))
 const usesImageAutomation = computed(() => (
-  !isQwenImageRequest.value
+  !isExactOneShotImageRequest.value
   && (params.value.runAction === 'infinite'
   || (params.value.useInitImage && params.value.initSource.mode === 'dir')
   || (params.value.ipAdapter.enabled && params.value.ipAdapter.source.mode === 'dir'))
 ))
-const showRunBatchControls = computed(() => !usesImageAutomation.value && !isQwenImageRequest.value)
+const showRunBatchControls = computed(() => !usesImageAutomation.value && !isExactOneShotImageRequest.value)
 const ipAdapterSupported = computed(() => {
-  if (isQwenImageRequest.value) return false
+  if (isExactOneShotImageRequest.value) return false
   if (engineSurface.value) return Boolean(engineSurface.value.supports_ip_adapter)
   return props.type === 'sd15' || props.type === 'sdxl'
 })
@@ -1011,7 +1017,7 @@ function getSupirRestoreBlockingReason(candidate: Pick<ImageBaseParams, 'useInit
   return ''
 }
 
-const showIpAdapterCard = computed(() => !isQwenImageRequest.value && !supirEnabled.value && (ipAdapterSupported.value || params.value.ipAdapter.enabled))
+const showIpAdapterCard = computed(() => !isExactOneShotImageRequest.value && !supirEnabled.value && (ipAdapterSupported.value || params.value.ipAdapter.enabled))
 const infiniteXyzConflict = computed(() => params.value.runAction === 'infinite' && xyzStore.enabled)
 const automationBatchConflict = computed(() => (
   usesImageAutomation.value
@@ -1103,7 +1109,7 @@ const runGenerateTitle = computed(() => {
   return ''
 })
 
-const enableAssets = computed(() => !isQwenImageRequest.value)
+const enableAssets = computed(() => !isExactOneShotImageRequest.value)
 const enableStyles = computed(() => true)
 const toolbarLabel = computed(() => {
   if (props.type !== 'zimage') return ''
@@ -1111,7 +1117,7 @@ const toolbarLabel = computed(() => {
 })
 
 const cfgLabel = computed(() => (usesDistilledCfgModel.value ? 'Distilled CFG' : 'CFG'))
-const showClipSkip = computed(() => !isQwenImageRequest.value && Boolean(familyCapabilities.value?.shows_clip_skip))
+const showClipSkip = computed(() => !isExactOneShotImageRequest.value && Boolean(familyCapabilities.value?.shows_clip_skip))
 const minClipSkip = computed(() => 0)
 const swapModelChoices = computed(() => {
   const family = normalizeTabFamily(props.type)
@@ -1120,7 +1126,7 @@ const swapModelChoices = computed(() => {
 })
 
 const supportsHiresForEngine = computed(() => {
-  if (isQwenImageRequest.value) return false
+  if (isExactOneShotImageRequest.value) return false
   if (props.type === 'zimage') return false
   const surf = engineSurface.value
   if (!surf) return true
@@ -1133,10 +1139,10 @@ const hiresModePolicy = computed(() => resolveHiresModePolicy(
 ))
 const showHires = computed(() => !supirEnabled.value && hiresModePolicy.value.showCard)
 
-const showGlobalSwapModel = computed(() => !isQwenImageRequest.value && !Boolean(params.value.useInitImage))
+const showGlobalSwapModel = computed(() => !isExactOneShotImageRequest.value && !Boolean(params.value.useInitImage))
 
 const showHiresRefiner = computed(() => {
-  if (isQwenImageRequest.value) return false
+  if (isExactOneShotImageRequest.value) return false
   if (params.value.useInitImage) return false
   if (props.type === 'zimage') return false
   const surf = engineSurface.value
@@ -1145,7 +1151,7 @@ const showHiresRefiner = computed(() => {
 })
 
 const showGlobalRefiner = computed(() => {
-  if (isQwenImageRequest.value) return false
+  if (isExactOneShotImageRequest.value) return false
   if (params.value.useInitImage) return false
   if (props.type === 'zimage') return false
   const surf = engineSurface.value
@@ -1483,11 +1489,22 @@ watch(showHiresRefiner, (show) => {
 })
 
 watch(
-  isQwenImageRequest,
+  isExactOneShotImageRequest,
   (active) => {
     if (!active) return
     const nextPatch: Partial<ImageBaseParams> = {}
     let needsPatch = false
+    if (isZImageL2PRequest.value && (params.value.useInitImage || params.value.initImageData || params.value.initImageName)) {
+      nextPatch.useInitImage = false
+      nextPatch.initImageData = ''
+      nextPatch.initImageName = ''
+      needsPatch = true
+    }
+    if (isZImageL2PRequest.value && (params.value.width !== 1024 || params.value.height !== 1024)) {
+      nextPatch.width = 1024
+      nextPatch.height = 1024
+      needsPatch = true
+    }
     if (params.value.runAction !== 'generate') {
       nextPatch.runAction = 'generate'
       needsPatch = true
@@ -1696,6 +1713,7 @@ const previewCaption = computed(() => {
 })
 
 const resolutionPresets = computed((): [number, number][] => {
+  if (isZImageL2PRequest.value) return [[1024, 1024]]
   if (props.type === 'sd15') return [[512, 512], [512, 768], [768, 512]]
   return [[1024, 1024], [1152, 896], [1216, 832], [1344, 768]]
 })
@@ -1716,7 +1734,7 @@ const runSummary = computed(() => {
     `${sampler} / ${scheduler}`,
     seedLabel,
   ]
-  if (!isQwenImageRequest.value) {
+  if (!isExactOneShotImageRequest.value) {
     parts.push(`batch ${params.value.batchCount}×${params.value.batchSize}`)
   }
   return parts.join(' · ')
@@ -2080,7 +2098,7 @@ function setParams(patch: Partial<ImageBaseParams>): void {
 }
 
 function setRunAction(actionMode: ImageRunAction): void {
-  if (isQwenImageRequest.value) {
+  if (isExactOneShotImageRequest.value) {
     setParams({ runAction: 'generate', batchCount: 1, batchSize: 1 })
     return
   }
@@ -2241,6 +2259,7 @@ const _INIT_IMAGE_DIM_MIN = 64
 const _INIT_IMAGE_DIM_MAX = 8192
 
 function snapInitImageDim(value: number, step: number): number {
+  if (isZImageL2PRequest.value) return 1024
   const clamped = Math.max(_INIT_IMAGE_DIM_MIN, Math.min(_INIT_IMAGE_DIM_MAX, Math.trunc(value)))
   const safeStep = Number.isFinite(step) && step > 0 ? Math.trunc(step) : 8
   const snapped = (resolvedEngineForMode.value === 'zimage' ? Math.floor(clamped / safeStep) : Math.round(clamped / safeStep)) * safeStep
@@ -2248,6 +2267,7 @@ function snapInitImageDim(value: number, step: number): number {
 }
 
 function normalizeImageDimension(value: unknown): number {
+  if (isZImageL2PRequest.value) return 1024
   const numeric = Number(value)
   const fallback = Number.isFinite(numeric) ? numeric : _INIT_IMAGE_DIM_MIN
   return snapInitImageDim(fallback, imageDimensionInputStep.value)

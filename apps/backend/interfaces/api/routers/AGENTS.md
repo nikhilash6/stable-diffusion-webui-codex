@@ -1,7 +1,7 @@
 # apps/backend/interfaces/api/routers Overview
 <!-- tags: backend, api, fastapi, routers -->
 Date: 2026-01-08
-Last Review: 2026-05-17
+Last Review: 2026-05-23
 Status: Active
 
 ## Purpose
@@ -29,6 +29,7 @@ Status: Active
 - 2026-04-28: `generation.py` must read primary model-family capability truth through `runtime/model_registry/capabilities.py::primary_family_for_engine_id(...)`; do not import `_ENGINE_ID_PRIMARY_FAMILY` or other private taxonomy maps into routers.
 - 2026-04-29: `generation.py` route capability admission must use canonical `/api/engines/capabilities` identity only. If an engine id is absent from `ENGINE_ID_TO_SEMANTIC_ENGINE`, reject it instead of instantiating registry engines or probing `engine.capabilities()` as a fallback owner.
 - 2026-05-17: `generation.py` keeps Qwen Image variant selection internal-only: `/api/txt2img` derives `qwen_image_variant="2512"`, `/api/img2img` derives `qwen_image_variant="edit_2511"`, and public variant keys plus foreign-family selectors and classic edit-incompatible denoise/resize/mask/hires/IP-Adapter/LoRA/SUPIR surfaces fail before task creation. Qwen VAE SHA preflight must reject generic inventory VAE matches unless the path is under `qwen_image_vae` roots and exposes adjacent `AutoencoderKLQwenImage` config metadata; Qwen text-encoder SHA preflight must reject assets outside `qwen_image_tenc` roots.
+- 2026-05-23: `generation.py` keeps Z-Image L2P exact and no-VAE: `/api/txt2img` accepts only `engine="zimage_l2p"` with 1024x1024, batch 1, `euler/simple`, `checkpoint_core_only=true`, `model_format=checkpoint|gguf`, `model_sha`, and one Qwen3-4B `tenc_sha`; img2img/image-automation, VAE selectors, CLIP Skip, hires, swap/refiner, IP-Adapter, LoRA, advanced guidance, Z-Image variant keys, and unknown extras fail before task creation. `ui.py` accepts `zimage_l2p` as a live image tab type, and `models.py` routes its prompt-token count through the Z-Image/Qwen tokenizer key.
 - 2026-03-30: `tests.py` also owns `/api/tests/ip-adapter/probe`; the router resolves inventory-backed adapter/image-encoder selectors and repo-scoped reference-image paths only, while `apps/backend/runtime/adapters/ip_adapter/probe.py` owns the actual conditioning receipt. Do not turn `tests.py` into a second txt2img surface.
 - 2026-03-30: `/api/tests/ip-adapter/probe` must execute the live CUDA probe in a subprocess and return the child receipt/failure payload; the router must not run the heavy CLIP/IP-Adapter probe inline in the API host process.
 - 2026-03-26: `generation.py` generic-video workers now forward settings key `codex_core_streaming` into canonical engine option `core_streaming_enabled` before calling the orchestrator, so live LTX `txt2vid` / `img2vid` requests can actually exercise the bounded core-streaming runtime seam instead of silently running the non-streamed path.
@@ -46,7 +47,7 @@ Status: Active
 - 2026-02-28: `generation.py` img2vid API contract now accepts only `solo|sliding|svi2|svi2_pro`; unsupported mode values return fail-loud HTTP 400.
 - 2026-04-05: `generation.py` now parks `/api/vid2vid` at the router seam itself: after JSON-object validation it fails with HTTP 400 detail `"/api/vid2vid is parked; no families are implemented yet."` before any settings/staging/task-creation work.
 - 2026-01-13: `tools.py` supports GGUF conversion cancellation (`POST /api/tools/convert-gguf/:job_id/cancel`) and an `overwrite` flag (default false; fails with 409 if the output path exists).
-- 2026-03-07: `tools.py` `/api/tools/convert-gguf` accepts only the source/native converter contract (`config_path`, `safetensors_path`, `output_path`, `overwrite`, `quantization`, `tensor_type_overrides`, `profile_id`, `float_group_overrides`, `precision_mode`); unknown keys fail loud with HTTP 400.
+- 2026-05-19: `tools.py` `/api/tools/convert-gguf` accepts only the source/native converter contract (`config_path`, `safetensors_path`, `output_path`, `overwrite`, `quantization`, `quant_policy_preset`, `tensor_type_overrides`, `profile_id`); `quantization` is a canonical file recipe, `tensor_type_overrides` targets physical tensor types, and unknown payload keys fail loud with HTTP 400.
 - 2026-01-13: `models.py` adds `/api/models/checkpoint-metadata` so the UI can fetch the full metadata modal payload without constructing it client-side.
 - 2026-01-18: `models.py` now includes backend `asset_contracts` in `/api/engines/capabilities` so the UI can gate required VAE/text encoder selection from a single contract source.
 - 2026-04-05: `models.py` `/api/engines/capabilities` now exposes parked exact ids only through `parked_exact_engines`; runnable `engines`, `asset_contracts`, `dependency_checks`, and `engine_id_to_semantic_engine` must not launder parked ids such as `sd35`, `netflix_void`, `svd`, or `hunyuan_video`.
@@ -158,7 +159,7 @@ Status: Active
 - 2026-03-03: `models.py` now exposes async inventory refresh start (`POST /api/models/inventory/refresh/async`) backed by task registry SSE (`/api/tasks/{id}/events`), with info-level start/completion lifecycle logs and terminal result payload carrying normalized inventory for one-shot frontend refresh application.
 - 2026-03-13: `tasks.py` SSE gap payloads now carry `last_event_id` alongside `oldest_event_id`/`newest_event_id`, and completed `/api/tasks/{id}` snapshots remain the recovery source-of-truth for async inventory refresh when a live `result` event is truncated.
 - 2026-04-05: `options.py` now treats `codex_main_device` as the single runtime-device option on the WebUI/API side. Do not reintroduce `codex_core_device` / `codex_te_device` / `codex_vae_device` as parallel active option keys.
-- 2026-02-23: `tools.py` GGUF conversion API now accepts `precision_mode` (`FULL_BF16|FULL_FP16|FULL_FP32|FP16_PLUS_FP32|BF16_PLUS_FP32`) and rejects ambiguous payloads that combine `precision_mode` with legacy `float_group_overrides`.
+- 2026-05-19: `tools.py` GGUF conversion API owns profile-aware `quant_policy_preset=HQ|MQ|LQ` validation. The policy field is accepted only when the selected profile+recipe has a distinct policy state; preserved tensors keep source dtype.
 - 2026-02-27: `generation.py` now rejects unknown top-level `/api/img2img` payload keys (allowlist) to prevent silent contract drift (txt2img already enforced this).
 - 2026-04-06: `generation.py` owns the public omission/default seam for `img2img_per_step_blend_strength` / `img2img_per_step_blend_steps`: omit -> `1.0` / `0`, allow only with `img2img_mask` + `img2img_inpaint_mode='per_step_blend'`, and reject the fields fail-loud outside that masked path.
 - 2026-04-29: `generation.py` rejects unknown nested txt2img `extras.hires.*` keys before task creation and requires enabled `img2img_extras.hires` active fields (`denoise`, `scale`, `resize_x`, `resize_y`, `steps`, `upscaler`) before task registration.

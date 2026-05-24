@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Declarative schema models for launcher Tk forms.
-Defines typed descriptors for sections and fields so tabs can render settings declaratively instead of hand-writing each widget row.
+Defines typed descriptors for sections and fields so tabs can render settings declaratively instead of hand-writing each widget row, including visible VRAM impact metadata.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `FieldKind` (class): Supported form input kinds for launcher setting rows.
@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 import tkinter as tk
 from typing import Callable, Sequence
+
+from apps.launcher.setting_registry import VramImpactMetadata
 
 
 class FieldKind(StrEnum):
@@ -52,6 +54,7 @@ class FormFieldDescriptor:
     choices: Sequence[str] = ()
     width: int = 18
     advanced: bool = False
+    vram: VramImpactMetadata | None = None
     help_text: str | None = None
     help_mode: HelpMode = HelpMode.INLINE
     help_title: str | None = None

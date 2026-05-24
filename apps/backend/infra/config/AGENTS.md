@@ -1,6 +1,6 @@
 # apps/backend/infra/config Overview
 Date: 2026-02-18
-Last Review: 2026-05-17
+Last Review: 2026-05-23
 Status: Active
 
 ## Purpose
@@ -28,5 +28,6 @@ Status: Active
 - 2026-03-05: `paths.py` model-root provisioning now includes Flux.2 keys (`flux2_ckpt`, `flux2_tenc`, `flux2_vae`, `flux2_loras`) alongside existing families.
 - 2026-03-12: `paths.py` model-root provisioning now includes LTX2 keys (`ltx2_ckpt`, `ltx2_tenc`, `ltx2_vae`, `ltx2_connectors`, `ltx2_loras`) so repo-relative `models/ltx2*` folders are created with the same startup path-seam used by other families.
 - 2026-05-17: `paths.py` model-root provisioning includes Qwen Image split-asset roots (`qwen_image_ckpt`, `qwen_image_tenc`, `qwen_image_vae`) for the single `qwen_image` architecture family.
+- 2026-05-23: `paths.py` model-root provisioning includes the Z-Image L2P denoiser root (`zimage_l2p_ckpt`) while reusing `zimage_tenc` for the required Qwen3-4B text encoder.
 - Keep this folder focused on config/bootstrap contracts; runtime execution logic belongs outside `infra/config`.
 - 2026-03-31: Bootstrap env naming must follow the real owner seam: runtime-global/bootstrap keys live here, family-prefixed keys stay in family-owned code, and shared runtime feature toggles must not be introduced under a model-family prefix.

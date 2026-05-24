@@ -12,6 +12,7 @@ Maps `ModelFamily` values to the appropriate `build_plan(...)` implementation an
 Includes core-only families such as Anima (Cosmos Predict2) and FLUX.2 Klein 4B that rely on sha-selected external assets.
 Includes LTX2 monolithic-checkpoint planning for strict component seam extraction (`transformer`, `connectors`, `vae`, `audio_vae`, `vocoder`).
 WAN22 family variants are dispatched explicitly (`WAN22_5B`/`WAN22_14B`/`WAN22_ANIMATE`).
+Z-Image L2P is dispatched separately from latent Z-Image because it is a no-VAE pixel-space checkpoint.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `_BUILDERS` (constant): Mapping of supported `ModelFamily` values to plan-builder callables.
@@ -26,7 +27,7 @@ from apps.backend.runtime.model_registry.specs import ModelFamily, ModelSignatur
 
 from ..errors import UnsupportedFamilyError
 from ..specs import ParserPlanBundle
-from . import anima, chroma, flux, flux2, ltx2, sd1, sd2, sd3, sdxl, wan22, zimage
+from . import anima, chroma, flux, flux2, ltx2, sd1, sd2, sd3, sdxl, wan22, zimage, zimage_l2p
 
 
 _BUILDERS: Dict[ModelFamily, Callable[[ModelSignature], ParserPlanBundle]] = {
@@ -46,6 +47,7 @@ _BUILDERS: Dict[ModelFamily, Callable[[ModelSignature], ParserPlanBundle]] = {
     ModelFamily.WAN22_14B: wan22.build_plan,
     ModelFamily.WAN22_ANIMATE: wan22.build_plan,
     ModelFamily.ZIMAGE: zimage.build_plan,
+    ModelFamily.ZIMAGE_L2P: zimage_l2p.build_plan,
 }
 
 

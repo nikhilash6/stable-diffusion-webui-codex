@@ -12,7 +12,7 @@ surfaces, embeddings, and engine capabilities.
 Inventory payloads include first-class IP-Adapter model and image-encoder lists from the dedicated roots in `apps/paths.json`.
 Capability surfaces include semantic-engine asset contracts (owner-resolved from canonical engine ids), backend-owned exact-engine inpaint-mode maps,
 and backend-owned dependency checks so the UI can enforce sha-only external asset selection and readiness gating deterministically. Also provides prompt token-counting
-(`/api/models/prompt-token-count`) using vendored offline tokenizers for supported prompt-token engine ids, including FLUX.2 Klein 4B, Qwen Image, LTX2, exact WAN ids, and
+(`/api/models/prompt-token-count`) using vendored offline tokenizers for supported prompt-token engine ids, including FLUX.2 Klein 4B, Qwen Image, Z-Image L2P, LTX2, exact WAN ids, and
 Anima runtime-equivalent Qwen+T5 prompt tokenization/max-length checks with the same family-owned offline tokenizer rules used by the runtime. Raw `/api/samplers`
 inventory keeps unsupported rows visible with non-executable metadata (`supported=false`, `default_scheduler=null`, `allowed_schedulers=[]`),
 while supported rows must resolve complete executable registry metadata.
@@ -87,6 +87,7 @@ _ENGINE_TOKENIZER_KEY: Dict[str, str] = {
     "chroma": "chroma",
     "flux1_chroma": "chroma",
     "zimage": "zimage",
+    "zimage_l2p": "zimage",
     "anima": "anima",
     "wan22_5b": "wan",
     "wan22_14b": "wan",

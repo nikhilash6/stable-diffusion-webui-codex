@@ -174,7 +174,7 @@ uv sync --locked --extra cu128
 
 6) Install repo-local Node.js + frontend deps:
 ```powershell
-uv tool run --from nodeenv nodeenv -n 24.13.0 "$repoRoot\.nodeenv"
+uv tool run --from nodeenv nodeenv -n 24.15.0 "$repoRoot\.nodeenv"
 $npm = Join-Path $repoRoot ".nodeenv\Scripts\npm.cmd"
 if (!(Test-Path $npm)) { $npm = Join-Path $repoRoot ".nodeenv\bin\npm.cmd" }
 $interfaceDir = Join-Path $repoRoot "apps\interface"
@@ -196,18 +196,19 @@ Pop-Location
 - Abort diagnostics list explicit cause and offending files/directories when applicable.
 - Non-destructive update path only: `git fetch --prune` + `git pull --ff-only`.
 - Dependency verification (toolchain + torch backend resolution) runs on every update attempt after git safety checks.
-- If repo-local npm is missing, updater auto-provisions `.nodeenv` via nodeenv (using `CODEX_NODE_VERSION`, default `24.13.0`).
+- If repo-local npm is missing, updater auto-provisions `.nodeenv` via nodeenv (using `CODEX_NODE_VERSION`, default `24.15.0`).
 - Environment refresh runs on every update attempt after dependency verification.
 - Frontend refresh uses lock-preserving mode (`npm ci`), so `apps/interface/package-lock.json` is required.
 
 ## Node.js (frontend)
 The installers provision a repo-local Node.js into `.nodeenv` via `nodeenv` (no system Node required).
 The updater also provisions `.nodeenv` automatically if npm is missing.
+Existing `.nodeenv` directories are not replaced automatically; if the managed Node.js version differs from `CODEX_NODE_VERSION`, install/update aborts so the operator can recreate `.nodeenv` or pin the existing version intentionally.
 On Windows, updater/install scripts probe npm in both `.nodeenv\\Scripts\\npm.cmd` and `.nodeenv\\bin\\npm.cmd`.
 Installer/updater frontend sync uses lock-preserving `npm ci` (requires `apps/interface/package-lock.json`).
 
 Override:
-- `CODEX_NODE_VERSION` (Node.js version pin for nodeenv; default: 24.13.0)
+- `CODEX_NODE_VERSION` (Node.js version pin for nodeenv; default: 24.15.0)
 
 ## PyTorch
 This repo uses `uv.lock` to pin and lock dependency versions (including PyTorch variants). The installers choose **one** PyTorch backend via `uv` extras.

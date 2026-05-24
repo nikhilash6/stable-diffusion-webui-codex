@@ -7,7 +7,7 @@ SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 Required Notice: see NOTICE
 
 Purpose: Tk/ttk styles used by the Codex launcher GUI.
-Centralizes palette values, cross-platform font resolution, and ttk style configuration so the app/tabs do not hardcode colors or fonts.
+Centralizes palette values, cross-platform font resolution, VRAM impact badges, and ttk style configuration so the app/tabs do not hardcode colors or fonts.
 
 Symbols (top-level; keep in sync; no ghosts):
 - `Palette` (dataclass): Color palette used by the GUI.
@@ -116,6 +116,9 @@ def apply_style(root: tk.Tk, palette: Palette) -> None:
     style.configure("Muted.TLabel", background=palette.bg0, foreground=palette.fg_muted)
     style.configure("Section.Header.TLabel", background=palette.bg0, foreground=palette.accent, font=fonts.body_strong)
     style.configure("Statusline.TLabel", background=palette.bg0, foreground=palette.fg_muted, font=fonts.small)
+    style.configure("Vram.Low.TLabel", background=palette.bg0, foreground=palette.ok, font=fonts.small_strong)
+    style.configure("Vram.Medium.TLabel", background=palette.bg0, foreground=palette.warn, font=fonts.small_strong)
+    style.configure("Vram.High.TLabel", background=palette.bg0, foreground=palette.err, font=fonts.small_strong)
 
     style.configure(
         "TNotebook",

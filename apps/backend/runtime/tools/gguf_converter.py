@@ -10,16 +10,17 @@ Purpose: GGUF converter tool (SafeTensors → GGUF) with optional quantization, 
 Uses explicit converter profiles for supported text encoders and transformer/denoiser components, including sharded HF-style weights.
 
 Symbols (top-level; keep in sync; no ghosts):
-- `QuantizationType` (enum): Supported “human” quantization selectors for conversion (maps to `GGMLQuantizationType`).
-- `ConversionConfig` (dataclass): Conversion configuration (input/output paths, quantization choices, profile selection, and dtype overrides).
+- `QuantizationRecipe` (enum): Public file-level quantization recipe selector.
+- `QuantPolicyPreset` (enum): Quantization policy preset selector.
+- `ConversionConfig` (dataclass): Conversion configuration (input/output paths, quantization choices, profile/policy selection, and regex dtype overrides).
 - `ConversionProgress` (dataclass): Progress/report structure for long conversions (stage counters, timings, and status fields).
+- `ConversionPreflight` (dataclass): Resolved conversion contract returned by `preflight_conversion_contract`.
 - `GGUFConversionCancelled` (exception): Raised when a conversion is cancelled via a cooperative cancel signal.
 - `GGUFVerificationError` (exception): Raised when a written GGUF file fails validation/verification.
-- `_compile_float_group_override_rules` (function): Compiles profile-scoped float-group overrides into matcher rules.
-- `_apply_float_group_overrides` (function): Applies profile-scoped F16/BF16/F32 group overrides to compiled dtype rules.
-- `_precision_mode_plus_overrides` (function): Builds profile float-group overrides for precision-mode PLUS policies.
-- `_precision_mode_full_float_dtype` (function): Resolves precision-mode FULL policy to a target float GGML dtype.
-- `_force_nonquantized_tensor_dtype` (function): Rewrites planned non-quantized tensors to a selected full float dtype.
+- `_format_size_delta` (function): Formats underflow promotion size deltas for operator logs.
+- `_log_q8_underflow_reports` (function): Emits per-tensor Q8_0 underflow promotion/retention reports.
+- `_log_k_underflow_reports` (function): Emits per-tensor Q4_K/Q5_K underflow promotion/retention reports.
+- `preflight_conversion_contract` (function): Resolve and validate recipe/profile/policy before heavy tensor IO.
 - `convert_safetensors_to_gguf` (function): Main conversion entrypoint; reads SafeTensors (incl. sharded), quantizes tensors, writes GGUF,
   and optionally verifies the output (uses many helpers above).
 """
@@ -27,12 +28,10 @@ Symbols (top-level; keep in sync; no ghosts):
 from __future__ import annotations
 from apps.backend.runtime.logging import get_backend_logger
 
-from dataclasses import replace
+from dataclasses import dataclass
 import json
-import logging
-import re
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
@@ -43,25 +42,26 @@ from apps.backend.quantization.gguf import (
     GGUFWriter,
 )
 from apps.backend.runtime.tools import gguf_converter_metadata as _metadata
+from apps.backend.runtime.tools import gguf_converter_k_underflow as _k_underflow
 from apps.backend.runtime.tools import gguf_converter_profiles as _profiles
+from apps.backend.runtime.tools import gguf_converter_q8_underflow as _q8_underflow
 from apps.backend.runtime.tools import gguf_converter_quantization as _quantization
 from apps.backend.runtime.tools import gguf_converter_safetensors_source as _safetensors_source
 from apps.backend.runtime.tools import gguf_converter_tensor_planner as _tensor_planner
 from apps.backend.runtime.tools import gguf_converter_verify as _verify
-from apps.backend.runtime.tools.gguf_converter_float_groups import float_groups_for_profile_id
 from apps.backend.runtime.tools.gguf_converter_specs import (
     CompiledTensorTypeRule,
-    ConverterProfileId,
+    ConverterProfileSpec,
     GGUFArch,
-    TensorNameTarget,
 )
 from apps.backend.runtime.tools.gguf_converter_types import (
     ConversionConfig,
     ConversionProgress,
     GGUFVerificationError,
-    PrecisionMode,
-    QuantizationType,
-    normalize_mixed_float_override,
+    QuantPolicyPreset,
+    QuantizationRecipe,
+    normalize_optional_quant_policy_preset,
+    normalize_quantization_recipe,
 )
 
 logger = get_backend_logger("backend.runtime.tools.gguf_converter")
@@ -71,203 +71,120 @@ class GGUFConversionCancelled(Exception):
     """Raised when a conversion is cancelled via a cooperative cancel signal."""
 
 
-_FLOAT_GGML_TYPES: set[GGMLQuantizationType] = {
-    GGMLQuantizationType.F16,
-    GGMLQuantizationType.BF16,
-    GGMLQuantizationType.F32,
-}
-_ZIMAGE_PAD_TOKENS: set[str] = {"x_pad_token", "cap_pad_token"}
-_QWEN_IMAGE_FULL_DTYPE_DOWNGRADE_MODES: frozenset[PrecisionMode] = frozenset(
-    {PrecisionMode.FULL_FP16, PrecisionMode.FULL_BF16}
-)
+@dataclass(frozen=True, slots=True)
+class ConversionPreflight:
+    config_path: Path
+    model_config: dict[str, Any]
+    profile: ConverterProfileSpec
+    recipe: QuantizationRecipe
+    recipe_info: _quantization.QuantizationRecipeSpec
+    quant_policy_preset: QuantPolicyPreset | None
+    quant_policy_id: str | None
+    requested_type: GGMLQuantizationType
+    dtype_rules: list[CompiledTensorTypeRule]
+    arch: str
+    metadata_config: dict[str, Any]
+    key_mapping: dict[str, str]
 
 
-def _parse_mixed_float_override_choice(value: object) -> GGMLQuantizationType | None:
-    normalized = normalize_mixed_float_override(value)
-    if normalized == "auto":
-        return None
-    if normalized == "F16":
-        return GGMLQuantizationType.F16
-    if normalized == "BF16":
-        return GGMLQuantizationType.BF16
-    if normalized == "F32":
-        return GGMLQuantizationType.F32
-    raise RuntimeError(f"Unsupported normalized float dtype selection: {normalized!r}")
+def _format_size_delta(delta_bytes: int | None) -> str:
+    if delta_bytes is None:
+        return "unknown"
+    sign = "+" if delta_bytes >= 0 else "-"
+    return f"{sign}{GGUFWriter.format_n_bytes_to_str(abs(delta_bytes))}"
 
 
-def _compile_float_group_override_rules(
-    *,
-    profile_id: str,
-    overrides: object,
-    reason_prefix: str = "user float group override",
-) -> list[CompiledTensorTypeRule]:
-    if overrides is None:
-        return []
-    if not isinstance(overrides, dict):
-        raise TypeError(f"float_group_overrides must be a dict[str, str], got {type(overrides).__name__}")
-    if not overrides:
-        return []
+def _log_q8_underflow_reports(reports: tuple[_q8_underflow.Q8UnderflowReport, ...]) -> None:
+    if not reports:
+        return
 
-    allowed_groups = {g.id: g for g in float_groups_for_profile_id(profile_id)}
-    if not allowed_groups:
-        raise ValueError(f"Profile {profile_id!r} does not define any float dtype groups")
-
-    compiled: list[CompiledTensorTypeRule] = []
-    for group_id, choice in overrides.items():
-        gid = str(group_id).strip()
-        if not gid:
-            raise ValueError("float_group_overrides contains an empty group id")
-        group = allowed_groups.get(gid)
-        if group is None:
-            allowed = ", ".join(sorted(allowed_groups.keys()))
-            raise ValueError(f"Unknown float dtype group for profile {profile_id!r}: {gid!r} (allowed: {allowed})")
-
-        ggml_type = _parse_mixed_float_override_choice(choice)
-        if ggml_type is None:
-            continue
-
-        for pattern in group.patterns:
-            compiled.append(
-                CompiledTensorTypeRule(
-                    pattern=re.compile(pattern),
-                    ggml_type=ggml_type,
-                    apply_to=TensorNameTarget.DST,
-                    reason=f"{reason_prefix}: {gid}={ggml_type.name}",
-                )
+    promoted_count = sum(1 for report in reports if report.promoted)
+    retained_count = len(reports) - promoted_count
+    logger.warning(
+        "Q8_0 stored-scale underflow affected %d tensor(s); promoted=%d retained_q8_0=%d",
+        len(reports),
+        promoted_count,
+        retained_count,
+    )
+    for report in reports:
+        ratio_percent = report.affected_ratio * 100.0
+        if report.promoted:
+            assert report.selected_ggml_type is not None
+            logger.warning(
+                "Promoting Q8_0 tensor %s -> %s due to stored-scale underflow: "
+                "affected=%d/%d (%.6f%%), size_delta=%s, reason=%s",
+                report.gguf_name,
+                report.selected_ggml_type.name,
+                report.affected_blocks,
+                report.total_blocks,
+                ratio_percent,
+                _format_size_delta(report.size_delta_bytes),
+                report.reason,
             )
-    return compiled
+        else:
+            logger.warning(
+                "Keeping Q8_0 tensor %s with non-material stored-scale underflow: "
+                "affected=%d/%d (%.6f%%), reason=%s",
+                report.gguf_name,
+                report.affected_blocks,
+                report.total_blocks,
+                ratio_percent,
+                report.reason,
+            )
 
 
-def _apply_float_group_overrides(
-    rules: list[CompiledTensorTypeRule],
-    *,
+def _log_k_underflow_reports(reports: tuple[_k_underflow.KUnderflowReport, ...]) -> None:
+    if not reports:
+        return
+
+    promoted_count = sum(1 for report in reports if report.promoted)
+    retained_count = len(reports) - promoted_count
+    logger.warning(
+        "Q4_K/Q5_K stored-scale underflow affected %d tensor(s); promoted=%d retained_k=%d",
+        len(reports),
+        promoted_count,
+        retained_count,
+    )
+    for report in reports:
+        ratio_percent = report.affected_ratio * 100.0
+        if report.promoted:
+            assert report.selected_ggml_type is not None
+            logger.warning(
+                "Promoting %s tensor %s -> %s due to stored-scale underflow: "
+                "affected=%d/%d (%.6f%%), size_delta=%s, reason=%s",
+                report.ggml_type.name,
+                report.gguf_name,
+                report.selected_ggml_type.name,
+                report.affected_blocks,
+                report.total_blocks,
+                ratio_percent,
+                _format_size_delta(report.size_delta_bytes),
+                report.reason,
+            )
+        else:
+            logger.warning(
+                "Keeping %s tensor %s with non-material stored-scale underflow: "
+                "affected=%d/%d (%.6f%%), reason=%s",
+                report.ggml_type.name,
+                report.gguf_name,
+                report.affected_blocks,
+                report.total_blocks,
+                ratio_percent,
+                report.reason,
+            )
+
+
+def preflight_conversion_contract(
     config: ConversionConfig,
-    profile_id: str,
-    overrides: object | None = None,
-) -> None:
-    selected_overrides = getattr(config, "float_group_overrides", None) if overrides is None else overrides
-    rules.extend(_compile_float_group_override_rules(profile_id=profile_id, overrides=selected_overrides))
-
-
-def _precision_mode_plus_overrides(
-    precision_mode: PrecisionMode | None,
     *,
-    profile_id: str,
-) -> dict[str, str]:
-    if precision_mode == PrecisionMode.FP16_PLUS_FP32:
-        value = "F16"
-    elif precision_mode == PrecisionMode.BF16_PLUS_FP32:
-        value = "BF16"
-    else:
-        return {}
-    return {group.id: value for group in float_groups_for_profile_id(profile_id)}
+    quant_policy_preset_explicit: bool = False,
+) -> ConversionPreflight:
+    """Resolve and validate a GGUF conversion contract before heavy tensor IO."""
 
-
-def _precision_mode_full_float_dtype(precision_mode: PrecisionMode | None) -> GGMLQuantizationType | None:
-    if precision_mode == PrecisionMode.FULL_FP16:
-        return GGMLQuantizationType.F16
-    if precision_mode == PrecisionMode.FULL_BF16:
-        return GGMLQuantizationType.BF16
-    if precision_mode == PrecisionMode.FULL_FP32:
-        return GGMLQuantizationType.F32
-    return None
-
-
-def _float_storage_meta(
-    shape: tuple[int, ...],
-    dtype: GGMLQuantizationType,
-) -> tuple[np.dtype, int]:
-    if dtype == GGMLQuantizationType.F16:
-        element_dtype = np.dtype(np.float16)
-        bytes_per_elem = 2
-    elif dtype == GGMLQuantizationType.BF16:
-        element_dtype = np.dtype(np.uint16)
-        bytes_per_elem = 2
-    elif dtype == GGMLQuantizationType.F32:
-        element_dtype = np.dtype(np.float32)
-        bytes_per_elem = 4
-    else:
-        raise ValueError(f"Expected float GGML dtype, got {dtype.name}")
-
-    elem_count = int(np.prod(shape, dtype=np.int64)) if len(shape) > 0 else 1
-    return element_dtype, int(elem_count * bytes_per_elem)
-
-
-def _force_nonquantized_tensor_dtype(
-    plans: list[_tensor_planner.TensorPlan],
-    *,
-    target_dtype: GGMLQuantizationType | None,
-) -> list[_tensor_planner.TensorPlan]:
-    if target_dtype is None:
-        return plans
-    if target_dtype not in _FLOAT_GGML_TYPES:
-        raise ValueError(f"target_dtype must be float-like, got {target_dtype.name}")
-
-    forced: list[_tensor_planner.TensorPlan] = []
-    for plan in plans:
-        if plan.ggml_type not in _FLOAT_GGML_TYPES:
-            forced.append(plan)
-            continue
-        if target_dtype == GGMLQuantizationType.BF16 and plan.gguf_name in _ZIMAGE_PAD_TOKENS:
-            raise RuntimeError(
-                f"BF16 override is not supported for Z-Image pad token {plan.gguf_name!r}; use F16/F32 mode instead."
-            )
-        if plan.ggml_type == target_dtype:
-            forced.append(plan)
-            continue
-
-        stored_dtype, stored_nbytes = _float_storage_meta(plan.raw_shape, target_dtype)
-        forced.append(
-            replace(
-                plan,
-                ggml_type=target_dtype,
-                stored_shape=plan.raw_shape,
-                stored_dtype=stored_dtype,
-                stored_nbytes=stored_nbytes,
-            )
-        )
-    return forced
-
-
-def convert_safetensors_to_gguf(
-    config: ConversionConfig,
-    progress_callback: Optional[Callable[[ConversionProgress], None]] = None,
-    *,
-    should_cancel: Optional[Callable[[], bool]] = None,
-) -> str:
-    """Convert a Safetensors file to GGUF format.
-    
-    Args:
-        config: Conversion configuration
-        progress_callback: Optional callback for progress updates
-        
-    Returns:
-        Path to the output GGUF file
-    """
-    progress = ConversionProgress(status="loading_config")
-    
-    def update_progress():
-        if progress_callback:
-            progress_callback(progress)
-
-    def check_cancel() -> None:
-        if should_cancel is not None and should_cancel():
-            progress.status = "cancelled"
-            progress.error = "cancelled"
-            update_progress()
-            raise GGUFConversionCancelled("cancelled")
-    
-    update_progress()
-    check_cancel()
-    
-    # Load model config
     config_path = _safetensors_source.resolve_config_json_path(config.config_path)
     with open(config_path, "r", encoding="utf-8") as f:
         model_config = json.load(f)
 
-    logger.info("Loaded config: %s", model_config.get("_class_name") or model_config.get("model_type") or "unknown")
-    check_cancel()
-    
     profile_id = getattr(config, "profile_id", None)
     if profile_id:
         profile = _profiles.profile_by_id(str(profile_id))
@@ -277,37 +194,42 @@ def convert_safetensors_to_gguf(
     else:
         profile = _profiles.resolve_profile(model_config)
 
-    precision_mode = getattr(config, "precision_mode", None)
-    plus_mode_overrides = _precision_mode_plus_overrides(precision_mode, profile_id=profile.id.value)
-    full_float_target = _precision_mode_full_float_dtype(precision_mode)
+    recipe = normalize_quantization_recipe(config.quantization)
+    profile.quant_policy.require_recipe_supported(recipe)
+    recipe_info = _quantization.recipe_spec(recipe)
 
-    if plus_mode_overrides and getattr(config, "float_group_overrides", None):
-        raise RuntimeError("precision_mode PLUS options cannot be combined with float_group_overrides")
-    if profile.id is ConverterProfileId.QWEN_IMAGE_TRANSFORMER and precision_mode in _QWEN_IMAGE_FULL_DTYPE_DOWNGRADE_MODES:
-        raise RuntimeError(
-            f"{profile.id.value} required F32 tensors cannot be downgraded by {precision_mode.value}; "
-            "use FULL_FP32, a quantized preset, or Qwen float-group controls instead."
-        )
-
-    pre_required_rules: list[CompiledTensorTypeRule] = []
-    if plus_mode_overrides:
-        pre_required_rules = _compile_float_group_override_rules(
-            profile_id=profile.id.value,
-            overrides=plus_mode_overrides,
-            reason_prefix="precision_mode plus override",
-        )
+    requested_policy = normalize_optional_quant_policy_preset(getattr(config, "quant_policy_preset", None))
+    if quant_policy_preset_explicit and requested_policy is None:
+        allowed = ", ".join(preset.value for preset in QuantPolicyPreset)
+        raise ValueError(f"Invalid quant_policy_preset None; expected one of: {allowed}")
+    if recipe_info.is_float:
+        if quant_policy_preset_explicit or requested_policy is not None:
+            raise ValueError(f"quant_policy_preset is not accepted for float recipe {recipe.value}")
+        effective_policy: QuantPolicyPreset | None = None
+    elif requested_policy is not None:
+        if not profile.quant_policy.supports_policy_preset(
+            recipe=recipe,
+            policy_preset=requested_policy,
+            model_config=model_config,
+        ):
+            raise ValueError(
+                f"quant_policy_preset {requested_policy.value!r} has no supported effect for "
+                f"profile {profile.id.value!r} recipe {recipe.value!r}"
+            )
+        effective_policy = requested_policy
     else:
-        pre_required_rules = _compile_float_group_override_rules(
-            profile_id=profile.id.value,
-            overrides=getattr(config, "float_group_overrides", None),
-        )
+        effective_policy = profile.quant_policy.default_policy_preset(recipe=recipe, model_config=model_config)
 
-    requested_type = _quantization.requested_ggml_type(config.quantization)
+    requested_type = recipe_info.ggml_type
     dtype_rules = profile.quant_policy.compile(
-        quant=config.quantization,
+        recipe=recipe,
+        policy_preset=effective_policy,
+        model_config=model_config,
         user_rules=config.tensor_type_overrides,
-        extra_rules_before_required=pre_required_rules,
     )
+    quant_policy_id = None
+    if effective_policy is not None:
+        quant_policy_id = f"{profile.quant_policy.id}_{effective_policy.value.lower()}_v{profile.quant_policy.version}"
 
     if profile.arch is GGUFArch.LLAMA:
         arch = str(model_config.get("model_type") or "llama")
@@ -321,6 +243,72 @@ def convert_safetensors_to_gguf(
     key_mapping: dict[str, str] = {}
     if profile.key_mapping is not None:
         key_mapping = profile.key_mapping.build(model_config)
+
+    return ConversionPreflight(
+        config_path=config_path,
+        model_config=model_config,
+        profile=profile,
+        recipe=recipe,
+        recipe_info=recipe_info,
+        quant_policy_preset=effective_policy,
+        quant_policy_id=quant_policy_id,
+        requested_type=requested_type,
+        dtype_rules=dtype_rules,
+        arch=arch,
+        metadata_config=metadata_config,
+        key_mapping=key_mapping,
+    )
+
+
+def convert_safetensors_to_gguf(
+    config: ConversionConfig,
+    progress_callback: Optional[Callable[[ConversionProgress], None]] = None,
+    *,
+    should_cancel: Optional[Callable[[], bool]] = None,
+) -> str:
+    """Convert a Safetensors file to GGUF format.
+
+    Args:
+        config: Conversion configuration
+        progress_callback: Optional callback for progress updates
+
+    Returns:
+        Path to the output GGUF file
+    """
+    progress = ConversionProgress(status="loading_config")
+
+    def update_progress():
+        if progress_callback:
+            progress_callback(progress)
+
+    def check_cancel() -> None:
+        if should_cancel is not None and should_cancel():
+            progress.status = "cancelled"
+            progress.error = "cancelled"
+            update_progress()
+            raise GGUFConversionCancelled("cancelled")
+
+    update_progress()
+    check_cancel()
+
+    preflight = preflight_conversion_contract(config)
+    model_config = preflight.model_config
+    config_path = preflight.config_path
+    profile = preflight.profile
+    requested_type = preflight.requested_type
+    dtype_rules = preflight.dtype_rules
+    arch = preflight.arch
+    metadata_config = preflight.metadata_config
+    key_mapping = preflight.key_mapping
+
+    logger.info(
+        "Loaded config: %s (profile=%s, recipe=%s, policy=%s)",
+        model_config.get("_class_name") or model_config.get("model_type") or "unknown",
+        profile.id.value,
+        preflight.recipe.value,
+        preflight.quant_policy_preset.value if preflight.quant_policy_preset is not None else "none",
+    )
+    check_cancel()
     
     # Load safetensors
     progress.status = "loading_weights"
@@ -336,8 +324,40 @@ def convert_safetensors_to_gguf(
         tensor_names = list(sf.keys())
         check_cancel()
 
+        # Shared streaming row chunk size for pre-header analysis and tensor writes.
+        chunk_rows = 1024
+
         plans = _tensor_planner.plan_tensors(tensor_names, sf, key_mapping, requested_type, dtype_rules)
-        plans = _force_nonquantized_tensor_dtype(plans, target_dtype=full_float_target)
+
+        def note_q8_underflow_scan(plan: _tensor_planner.TensorPlan) -> None:
+            progress.current_tensor = f"q8 underflow scan: {plan.gguf_name}"
+            update_progress()
+
+        promotion_result = _q8_underflow.apply_q8_underflow_promotions(
+            plans,
+            sf,
+            check_cancel=check_cancel,
+            chunk_rows=chunk_rows,
+            on_scan_tensor=note_q8_underflow_scan,
+        )
+        plans = promotion_result.plans
+        progress.current_tensor = ""
+        _log_q8_underflow_reports(promotion_result.reports)
+
+        def note_k_underflow_scan(plan: _tensor_planner.TensorPlan) -> None:
+            progress.current_tensor = f"k underflow scan: {plan.gguf_name}"
+            update_progress()
+
+        k_promotion_result = _k_underflow.apply_k_underflow_promotions(
+            plans,
+            sf,
+            check_cancel=check_cancel,
+            chunk_rows=chunk_rows,
+            on_scan_tensor=note_k_underflow_scan,
+        )
+        plans = k_promotion_result.plans
+        progress.current_tensor = ""
+        _log_k_underflow_reports(k_promotion_result.reports)
 
         progress.total_steps = len(plans)
         check_cancel()
@@ -347,7 +367,9 @@ def convert_safetensors_to_gguf(
             writer,
             arch,
             metadata_config,
-            config.quantization,
+            preflight.recipe_info,
+            quant_policy=preflight.quant_policy_id,
+            quant_policy_preset=preflight.quant_policy_preset,
             config_path=config_path,
             safetensors_path=config.safetensors_path,
         )
@@ -374,9 +396,6 @@ def convert_safetensors_to_gguf(
             assert writer.fout is not None
             out = writer.fout[0]
             writer.write_padding(out, out.tell())
-
-            # Stream-write tensors in the same order used for tensor-info offsets.
-            chunk_rows = 1024
 
             def _write_bf16_bytes(tensor: torch.Tensor) -> int:
                 bf16_tensor = tensor.to(torch.bfloat16).contiguous()
@@ -662,8 +681,11 @@ def convert_safetensors_to_gguf(
 __all__ = [
     "ConversionConfig",
     "ConversionProgress", 
+    "ConversionPreflight",
     "GGUFConversionCancelled",
-    "QuantizationType",
+    "QuantPolicyPreset",
+    "QuantizationRecipe",
     "GGUFVerificationError",
     "convert_safetensors_to_gguf",
+    "preflight_conversion_contract",
 ]

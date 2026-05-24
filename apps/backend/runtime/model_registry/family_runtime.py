@@ -10,7 +10,8 @@ Purpose: Per-model-family runtime specification (capabilities + latent/normaliza
 Defines UI-facing capability flags and runtime defaults per `ModelFamily` (latent channels, prediction kind, normalization hints),
 acting as the single source of truth for both backend assembly and frontend conditional UI (flow-shift is left unset when variant-specific).
 Includes Qwen Image (`ModelFamily.QWEN_IMAGE`) as a Qwen2.5-VL-conditioned flow-image family, Anima (`ModelFamily.ANIMA`) as a
-flow-based image family with fixed flow shift defaults, FLUX.2 as a 32-channel flow family whose scheduler shift remains dynamic/variant-aware (`flow_shift=None` here; runtime owns the truthful bridge),
+flow-based image family with fixed flow shift defaults, Z-Image L2P (`ModelFamily.ZIMAGE_L2P`) as a pixel-space no-VAE family,
+FLUX.2 as a 32-channel flow family whose scheduler shift remains dynamic/variant-aware (`flow_shift=None` here; runtime owns the truthful bridge),
 explicit WAN22 family variants (`WAN22_5B`/`WAN22_14B`/`WAN22_ANIMATE`) with independent defaults, and the
 CogVideoX-Fun-backed Netflix VOID vid2vid scaffold (`ModelFamily.NETFLIX_VOID`).
 
@@ -134,6 +135,18 @@ CAPABILITIES_QWEN_IMAGE = FamilyCapabilities(
     shows_guidance_scale=True,
     supported_samplers=("euler",),
     supported_schedulers=("simple",),
+    resolution_step=16,
+)
+
+CAPABILITIES_ZIMAGE_L2P = FamilyCapabilities(
+    supports_negative_prompt=True,
+    supports_cfg=True,
+    shows_clip_skip=False,
+    shows_guidance_scale=True,
+    supported_samplers=("euler",),
+    supported_schedulers=("simple",),
+    min_resolution=1024,
+    max_resolution=1024,
     resolution_step=16,
 )
 
@@ -554,6 +567,26 @@ FAMILY_RUNTIME_SPECS: Dict[ModelFamily, FamilyRuntimeSpec] = {
         patch_size=2,
         capabilities=CAPABILITIES_FLOW_WITH_CFG,
     ),
+    ModelFamily.ZIMAGE_L2P: FamilyRuntimeSpec(
+        family=ModelFamily.ZIMAGE_L2P,
+        latent_channels=3,
+        latent_scale_factor=1,
+        vae_scaling_factor=1.0,
+        vae_shift_factor=0.0,
+        context_dim=2560,
+        uses_pooled_output=False,
+        uses_guidance_embed=False,
+        default_cfg=2.0,
+        prediction=PredictionKind.FLOW,
+        default_steps=30,
+        flow_shift=3.0,
+        scheduler_default="simple",
+        uses_t5=False,
+        preferred_width=1024,
+        preferred_height=1024,
+        patch_size=16,
+        capabilities=CAPABILITIES_ZIMAGE_L2P,
+    ),
     ModelFamily.ANIMA: FamilyRuntimeSpec(
         family=ModelFamily.ANIMA,
         latent_channels=16,
@@ -624,6 +657,7 @@ __all__ = [
     "CAPABILITIES_FLOW_WITH_CFG",
     "CAPABILITIES_FLUX2",
     "CAPABILITIES_QWEN_IMAGE",
+    "CAPABILITIES_ZIMAGE_L2P",
     "CAPABILITIES_TURBO",
     "FamilyRuntimeSpec",
     "FAMILY_RUNTIME_SPECS",
