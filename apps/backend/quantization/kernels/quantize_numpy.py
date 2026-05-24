@@ -21,6 +21,8 @@ Symbols (top-level; keep in sync; no ghosts):
 - `quantize_blocks_q5_1` (function): Quantizes blocks to GGML Q5_1 packed layout.
 - `quantize_blocks_iq4_nl` (function): Quantizes blocks to GGML IQ4_NL packed layout.
 - `_pack_k_scale_min` (function): Packs K-quant scale/min arrays into the ggml K-block header layout.
+- `_k_quant_scale_components` (function): Computes Q4_K/Q5_K group scales and stored FP16 block-scale headers.
+- `k_quant_stored_scale_underflow_mask` (function): Returns Q4_K/Q5_K blocks whose stored FP16 scale/min headers underflow.
 - `quantize_blocks_q4_k` (function): Quantizes blocks to GGML Q4_K packed layout.
 - `quantize_blocks_q5_k` (function): Quantizes blocks to GGML Q5_K packed layout.
 - `quantize_blocks_q3_k` (function): Quantizes blocks to GGML Q3_K packed layout.
@@ -239,45 +241,81 @@ def _pack_k_scale_min(scales: np.ndarray, mins: np.ndarray) -> np.ndarray:
     return packed.reshape((scales.shape[0], 12))
 
 
-def quantize_blocks_q4_k(blocks: np.ndarray) -> np.ndarray:
-    """Quantize float32 blocks (n, 256) to GGML Q4_K packed blocks (n, 144)."""
+def _k_quant_scale_components(
+    blocks: np.ndarray,
+    qtype: QuantType,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if qtype == QuantType.Q4_K:
+        scale_divisor = np.float32(15.0)
+    elif qtype == QuantType.Q5_K:
+        scale_divisor = np.float32(31.0)
+    else:
+        raise ValueError(f"K stored-scale underflow analysis expects Q4_K or Q5_K, got {qtype.name}")
     if blocks.ndim != 2 or blocks.shape[1] != 256:
-        raise ValueError(f"Q4_K quantize expects (n_blocks, 256), got {blocks.shape}")
+        raise ValueError(f"{qtype.name} K quantize expects (n_blocks, 256), got {blocks.shape}")
 
-    x = blocks.astype(np.float32, copy=False)
-    n_blocks = x.shape[0]
-    groups = x.reshape((n_blocks, 8, 32))
+    values = blocks.astype(np.float32, copy=False)
+    if not np.all(np.isfinite(values)):
+        raise ValueError(f"{qtype.name} K quantize received non-finite values")
 
-    g_min = groups.min(axis=-1)
-    g_max = groups.max(axis=-1)
-    g_min = np.minimum(g_min, 0.0)
-    dm = -g_min
-
-    scale = (g_max - g_min) / np.float32(15.0)
+    n_blocks = values.shape[0]
+    groups = values.reshape((n_blocks, 8, 32))
+    group_min = groups.min(axis=-1)
+    group_max = groups.max(axis=-1)
+    group_min = np.minimum(group_min, np.float32(0.0))
+    group_min_delta = -group_min
+    scale = (group_max - group_min) / scale_divisor
 
     max_scale = scale.max(axis=-1, keepdims=True)
     d = (max_scale / np.float32(63.0)).astype(np.float32)
-    sc = np.where(d == 0, 0, np.rint(scale / d)).astype(np.int32)
+    stored_d = d.astype(np.float16)
+
+    max_group_min_delta = group_min_delta.max(axis=-1, keepdims=True)
+    dmin = (max_group_min_delta / np.float32(63.0)).astype(np.float32)
+    stored_dmin = dmin.astype(np.float16)
+
+    return groups, group_min_delta, scale, d, dmin, stored_d, stored_dmin
+
+
+def k_quant_stored_scale_underflow_mask(blocks: np.ndarray, qtype: QuantType) -> np.ndarray:
+    """Return Q4_K/Q5_K blocks whose non-zero scale/min cannot be represented by stored FP16 headers."""
+
+    _, _, _, d, dmin, stored_d, stored_dmin = _k_quant_scale_components(blocks, qtype)
+    scale_underflow = (d.reshape(-1) > np.float32(0.0)) & (stored_d.reshape(-1) == np.float16(0.0))
+    min_underflow = (dmin.reshape(-1) > np.float32(0.0)) & (stored_dmin.reshape(-1) == np.float16(0.0))
+    return scale_underflow | min_underflow
+
+
+def quantize_blocks_q4_k(blocks: np.ndarray) -> np.ndarray:
+    """Quantize float32 blocks (n, 256) to GGML Q4_K packed blocks (n, 144)."""
+    groups, dm, scale, d, dmin, stored_d, stored_dmin = _k_quant_scale_components(blocks, QuantType.Q4_K)
+    n_blocks = groups.shape[0]
+
+    scaled_sc = np.zeros_like(scale, dtype=np.float32)
+    np.divide(scale, d, out=scaled_sc, where=stored_d != np.float16(0.0))
+    sc = np.rint(scaled_sc).astype(np.int32)
     sc = np.clip(sc, 0, 63).astype(np.uint8)
 
-    max_dm = dm.max(axis=-1, keepdims=True)
-    dmin = (max_dm / np.float32(63.0)).astype(np.float32)
-    mn = np.where(dmin == 0, 0, np.rint(dm / dmin)).astype(np.int32)
+    scaled_mn = np.zeros_like(dm, dtype=np.float32)
+    np.divide(dm, dmin, out=scaled_mn, where=stored_dmin != np.float16(0.0))
+    mn = np.rint(scaled_mn).astype(np.int32)
     mn = np.clip(mn, 0, 63).astype(np.uint8)
 
     scale_q = d * sc.astype(np.float32)
     dm_q = dmin * mn.astype(np.float32)
 
-    with np.errstate(divide="ignore", invalid="ignore"):
-        q = np.where(
-            scale_q[:, :, None] == 0,
-            0,
-            np.rint((groups + dm_q[:, :, None]) / scale_q[:, :, None]),
-        )
+    q_scaled = np.zeros_like(groups, dtype=np.float32)
+    np.divide(
+        groups + dm_q[:, :, None],
+        scale_q[:, :, None],
+        out=q_scaled,
+        where=scale_q[:, :, None] != np.float32(0.0),
+    )
+    q = np.rint(q_scaled)
     q = np.clip(q, 0, 15).astype(np.uint8)
 
-    header_d = d.astype(np.float16).view(np.uint8)
-    header_dmin = dmin.astype(np.float16).view(np.uint8)
+    header_d = stored_d.view(np.uint8)
+    header_dmin = stored_dmin.view(np.uint8)
     scales_packed = _pack_k_scale_min(sc, mn)
 
     even = q[:, 0:8:2, :]
@@ -290,39 +328,30 @@ def quantize_blocks_q4_k(blocks: np.ndarray) -> np.ndarray:
 
 def quantize_blocks_q5_k(blocks: np.ndarray) -> np.ndarray:
     """Quantize float32 blocks (n, 256) to GGML Q5_K packed blocks (n, 176)."""
-    if blocks.ndim != 2 or blocks.shape[1] != 256:
-        raise ValueError(f"Q5_K quantize expects (n_blocks, 256), got {blocks.shape}")
+    groups, dm, scale, d, dmin, stored_d, stored_dmin = _k_quant_scale_components(blocks, QuantType.Q5_K)
+    n_blocks = groups.shape[0]
 
-    x = blocks.astype(np.float32, copy=False)
-    n_blocks = x.shape[0]
-    groups = x.reshape((n_blocks, 8, 32))
-
-    g_min = groups.min(axis=-1)
-    g_max = groups.max(axis=-1)
-    g_min = np.minimum(g_min, 0.0)
-    dm = -g_min
-
-    scale = (g_max - g_min) / np.float32(31.0)
-
-    max_scale = scale.max(axis=-1, keepdims=True)
-    d = (max_scale / np.float32(63.0)).astype(np.float32)
-    sc = np.where(d == 0, 0, np.rint(scale / d)).astype(np.int32)
+    scaled_sc = np.zeros_like(scale, dtype=np.float32)
+    np.divide(scale, d, out=scaled_sc, where=stored_d != np.float16(0.0))
+    sc = np.rint(scaled_sc).astype(np.int32)
     sc = np.clip(sc, 0, 63).astype(np.uint8)
 
-    max_dm = dm.max(axis=-1, keepdims=True)
-    dmin = (max_dm / np.float32(63.0)).astype(np.float32)
-    mn = np.where(dmin == 0, 0, np.rint(dm / dmin)).astype(np.int32)
+    scaled_mn = np.zeros_like(dm, dtype=np.float32)
+    np.divide(dm, dmin, out=scaled_mn, where=stored_dmin != np.float16(0.0))
+    mn = np.rint(scaled_mn).astype(np.int32)
     mn = np.clip(mn, 0, 63).astype(np.uint8)
 
     scale_q = d * sc.astype(np.float32)
     dm_q = dmin * mn.astype(np.float32)
 
-    with np.errstate(divide="ignore", invalid="ignore"):
-        q = np.where(
-            scale_q[:, :, None] == 0,
-            0,
-            np.rint((groups + dm_q[:, :, None]) / scale_q[:, :, None]),
-        )
+    q_scaled = np.zeros_like(groups, dtype=np.float32)
+    np.divide(
+        groups + dm_q[:, :, None],
+        scale_q[:, :, None],
+        out=q_scaled,
+        where=scale_q[:, :, None] != np.float32(0.0),
+    )
+    q = np.rint(q_scaled)
     q = np.clip(q, 0, 31).astype(np.uint8)
 
     ql = q & np.uint8(0x0F)
@@ -336,8 +365,8 @@ def quantize_blocks_q5_k(blocks: np.ndarray) -> np.ndarray:
     weights = (np.uint8(1) << np.arange(8, dtype=np.uint8)).reshape((1, 8, 1))
     qh = (qh_bits.astype(np.uint8) * weights).sum(axis=1).astype(np.uint8)  # (n_blocks, 32)
 
-    header_d = d.astype(np.float16).view(np.uint8)
-    header_dmin = dmin.astype(np.float16).view(np.uint8)
+    header_d = stored_d.view(np.uint8)
+    header_dmin = stored_dmin.view(np.uint8)
     scales_packed = _pack_k_scale_min(sc, mn)
 
     return np.concatenate([header_d, header_dmin, scales_packed, qh, qs], axis=-1)

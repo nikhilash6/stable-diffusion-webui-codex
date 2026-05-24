@@ -28,3 +28,4 @@ Status: Active
 - 2026-02-15: `tensor.py` now uses an explicit NumPy->tensor no-copy helper (readonly warning suppressed intentionally) to avoid eager host copies for packed GGUF weights.
 - 2026-02-23: `gguf_loader.py::_resolve_target_device(...)` now defaults to memory-manager mount-device authority when no device is provided, removing an implicit CPU default in GGUF load paths.
 - 2026-05-23: `gguf_loader.py` returns a metadata-bearing state-dict object (`source_format=gguf`, `source_metadata` / `gguf_metadata`) so model detectors can enforce profile metadata without reparsing tensors or rewriting keys.
+- 2026-05-24: `kernels/quantize_numpy.py` owns Q4_K/Q5_K stored-FP16 scale/min underflow predicates and warning-free masked division for K-packers; converter pre-header scans must call this quantization-owned math instead of inventing a second predicate.

@@ -17,8 +17,9 @@ Symbols (top-level; keep in sync; no ghosts):
 - `ConversionPreflight` (dataclass): Resolved conversion contract returned by `preflight_conversion_contract`.
 - `GGUFConversionCancelled` (exception): Raised when a conversion is cancelled via a cooperative cancel signal.
 - `GGUFVerificationError` (exception): Raised when a written GGUF file fails validation/verification.
-- `_format_size_delta` (function): Formats Q8 underflow promotion size deltas for operator logs.
+- `_format_size_delta` (function): Formats underflow promotion size deltas for operator logs.
 - `_log_q8_underflow_reports` (function): Emits per-tensor Q8_0 underflow promotion/retention reports.
+- `_log_k_underflow_reports` (function): Emits per-tensor Q4_K/Q5_K underflow promotion/retention reports.
 - `preflight_conversion_contract` (function): Resolve and validate recipe/profile/policy before heavy tensor IO.
 - `convert_safetensors_to_gguf` (function): Main conversion entrypoint; reads SafeTensors (incl. sharded), quantizes tensors, writes GGUF,
   and optionally verifies the output (uses many helpers above).
@@ -41,6 +42,7 @@ from apps.backend.quantization.gguf import (
     GGUFWriter,
 )
 from apps.backend.runtime.tools import gguf_converter_metadata as _metadata
+from apps.backend.runtime.tools import gguf_converter_k_underflow as _k_underflow
 from apps.backend.runtime.tools import gguf_converter_profiles as _profiles
 from apps.backend.runtime.tools import gguf_converter_q8_underflow as _q8_underflow
 from apps.backend.runtime.tools import gguf_converter_quantization as _quantization
@@ -123,6 +125,47 @@ def _log_q8_underflow_reports(reports: tuple[_q8_underflow.Q8UnderflowReport, ..
             logger.warning(
                 "Keeping Q8_0 tensor %s with non-material stored-scale underflow: "
                 "affected=%d/%d (%.6f%%), reason=%s",
+                report.gguf_name,
+                report.affected_blocks,
+                report.total_blocks,
+                ratio_percent,
+                report.reason,
+            )
+
+
+def _log_k_underflow_reports(reports: tuple[_k_underflow.KUnderflowReport, ...]) -> None:
+    if not reports:
+        return
+
+    promoted_count = sum(1 for report in reports if report.promoted)
+    retained_count = len(reports) - promoted_count
+    logger.warning(
+        "Q4_K/Q5_K stored-scale underflow affected %d tensor(s); promoted=%d retained_k=%d",
+        len(reports),
+        promoted_count,
+        retained_count,
+    )
+    for report in reports:
+        ratio_percent = report.affected_ratio * 100.0
+        if report.promoted:
+            assert report.selected_ggml_type is not None
+            logger.warning(
+                "Promoting %s tensor %s -> %s due to stored-scale underflow: "
+                "affected=%d/%d (%.6f%%), size_delta=%s, reason=%s",
+                report.ggml_type.name,
+                report.gguf_name,
+                report.selected_ggml_type.name,
+                report.affected_blocks,
+                report.total_blocks,
+                ratio_percent,
+                _format_size_delta(report.size_delta_bytes),
+                report.reason,
+            )
+        else:
+            logger.warning(
+                "Keeping %s tensor %s with non-material stored-scale underflow: "
+                "affected=%d/%d (%.6f%%), reason=%s",
+                report.ggml_type.name,
                 report.gguf_name,
                 report.affected_blocks,
                 report.total_blocks,
@@ -300,6 +343,21 @@ def convert_safetensors_to_gguf(
         plans = promotion_result.plans
         progress.current_tensor = ""
         _log_q8_underflow_reports(promotion_result.reports)
+
+        def note_k_underflow_scan(plan: _tensor_planner.TensorPlan) -> None:
+            progress.current_tensor = f"k underflow scan: {plan.gguf_name}"
+            update_progress()
+
+        k_promotion_result = _k_underflow.apply_k_underflow_promotions(
+            plans,
+            sf,
+            check_cancel=check_cancel,
+            chunk_rows=chunk_rows,
+            on_scan_tensor=note_k_underflow_scan,
+        )
+        plans = k_promotion_result.plans
+        progress.current_tensor = ""
+        _log_k_underflow_reports(k_promotion_result.reports)
 
         progress.total_steps = len(plans)
         check_cancel()
